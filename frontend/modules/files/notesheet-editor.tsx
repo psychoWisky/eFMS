@@ -287,32 +287,69 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                 )}
               </div>
 
-              {/* Forwarding remarks thread (read-only) */}
+              {/* Forwarding remarks — professional document log */}
               <div className="bg-white rounded-2xl border border-gray-200 shadow-sm">
-                <div className="px-6 py-4 border-b border-gray-100">
-                  <h2 className="text-lg font-bold text-gray-800">Forwarding Remarks</h2>
-                  <p className="text-sm text-gray-500 mt-0.5">Remarks added when this file was forwarded</p>
-                </div>
-                <div className="px-6 py-4 space-y-3 min-h-[100px]">
-                  {forwardingRemarks.filter((r) => r.remark).length === 0 ? (
-                    <p className="text-base text-gray-400 text-center py-6">No forwarding remarks yet.</p>
-                  ) : (
-                    forwardingRemarks.filter((r) => r.remark).map((r) => (
-                      <div key={r.id} className={cn("flex gap-3", r.user_id === user?.id ? "flex-row-reverse" : "flex-row")}>
-                        <div className="w-9 h-9 rounded-full bg-[#0D6E6E] flex items-center justify-center text-white text-sm font-bold shrink-0">
-                          {(r.user_name?.[0] ?? "?").toUpperCase()}
-                        </div>
-                        <div className={cn("max-w-md", r.user_id === user?.id ? "items-end" : "items-start", "flex flex-col")}>
-                          <span className="text-sm text-gray-500 mb-1">{r.user_name ?? "Unknown"}</span>
-                          <div className={cn("rounded-2xl px-4 py-2.5 text-base",
-                            r.user_id === user?.id ? "bg-[#0D6E6E] text-white rounded-tr-sm" : "bg-gray-100 text-gray-900 rounded-tl-sm")}>
-                            {r.remark}
-                          </div>
-                        </div>
-                      </div>
-                    ))
+                <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
+                  <div>
+                    <h2 className="text-lg font-bold text-gray-800">Forwarding Remarks</h2>
+                    <p className="text-sm text-gray-500 mt-0.5">Official remarks recorded during file movement</p>
+                  </div>
+                  {forwardingRemarks.filter((r) => r.remark).length > 0 && (
+                    <span className="text-xs font-semibold bg-gray-100 text-gray-600 px-2.5 py-1 rounded-full">
+                      {forwardingRemarks.filter((r) => r.remark).length} entr{forwardingRemarks.filter((r) => r.remark).length === 1 ? "y" : "ies"}
+                    </span>
                   )}
                 </div>
+                {forwardingRemarks.filter((r) => r.remark).length === 0 ? (
+                  <div className="px-6 py-10 text-center text-gray-400">
+                    <p className="text-base">No forwarding remarks recorded.</p>
+                  </div>
+                ) : (
+                  <div className="divide-y divide-gray-100">
+                    {forwardingRemarks.filter((r) => r.remark).map((r, idx, arr) => {
+                      const dt = new Date(r.created_at);
+                      const dateStr = dt.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
+                      const timeStr = dt.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", hour12: true });
+                      const initials = (r.user_name ?? "?").split(" ").map((w: string) => w[0]).slice(0, 2).join("").toUpperCase();
+                      return (
+                        <div key={r.id} className="px-6 py-5">
+                          <div className="flex items-start gap-4">
+                            {/* Serial number */}
+                            <div className="w-7 h-7 rounded-full bg-gray-100 border border-gray-200 flex items-center justify-center shrink-0 mt-0.5">
+                              <span className="text-xs font-bold text-gray-500">{arr.length - idx}</span>
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              {/* Header row */}
+                              <div className="flex items-center justify-between gap-3 flex-wrap mb-3">
+                                <div className="flex items-center gap-2.5">
+                                  <div className="w-8 h-8 rounded-full bg-[#0D6E6E] flex items-center justify-center text-white text-xs font-bold shrink-0">
+                                    {initials}
+                                  </div>
+                                  <div>
+                                    <p className="text-sm font-semibold text-gray-900 leading-tight">{r.user_name ?? "Unknown"}</p>
+                                    {r.user_id === user?.id && (
+                                      <p className="text-xs text-[#0D6E6E] font-medium leading-tight">You</p>
+                                    )}
+                                  </div>
+                                </div>
+                                <div className="flex items-center gap-1.5 text-sm font-medium text-gray-600 shrink-0">
+                                  <Clock size={14} className="text-gray-500" />
+                                  <span>{dateStr}</span>
+                                  <span className="text-gray-400">|</span>
+                                  <span>{timeStr}</span>
+                                </div>
+                              </div>
+                              {/* Remark body */}
+                              <div className="bg-gray-50 border border-gray-200 rounded-xl px-4 py-3">
+                                <p className="text-sm text-gray-800 leading-relaxed whitespace-pre-wrap">{r.remark}</p>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
             </div>
           )}
