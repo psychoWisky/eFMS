@@ -145,8 +145,10 @@ export function NewFileForm({ onSuccess }: NewFileFormProps) {
       setConfirm(false);
     },
     onError: (err: unknown) => {
-      const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
-      toast.error(msg ?? "Failed to create file.");
+      const data = (err as { response?: { data?: { detail?: string; message?: string; errors?: { field: string; message: string }[] } } })?.response?.data;
+      const msg = data?.detail ?? data?.message;
+      const fieldErrors = data?.errors?.map((e) => `${e.field}: ${e.message}`).join("; ");
+      toast.error(fieldErrors ?? msg ?? "Failed to create file.");
       setConfirm(false);
     },
   });
@@ -171,6 +173,7 @@ export function NewFileForm({ onSuccess }: NewFileFormProps) {
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (!subject.trim()) { toast.error("Subject is required."); return; }
+    if (subject.trim().length < 5) { toast.error("Subject must be at least 5 characters."); return; }
     if (!category) { toast.error("Category is required."); return; }
     if (!priority) { toast.error("Priority is required."); return; }
     if (!recipientId) { toast.error("Please select a recipient."); return; }
@@ -380,7 +383,7 @@ export function NewFileForm({ onSuccess }: NewFileFormProps) {
               <div><span className="font-semibold text-gray-600">Subject:</span> <span>{subject}</span></div>
               <div><span className="font-semibold text-gray-600">Category:</span> <span>{category}</span></div>
               <div><span className="font-semibold text-gray-600">Priority:</span> <span className="capitalize">{priority}</span></div>
-              <div><span className="font-semibold text-gray-600">Recipient:</span> <span>{selectedRecipient?.name}</span></div>
+              <div><span className="font-semibold text-gray-600">Recipient:</span> <span>{selectedRecipient?.full_name}</span></div>
               {annexures.length > 0 && <div><span className="font-semibold text-gray-600">Annexures:</span> <span>{annexures.map((a) => a.tag).join(", ")}</span></div>}
             </div>
             <div className="flex gap-3">

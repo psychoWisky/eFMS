@@ -45,7 +45,7 @@ api.interceptors.response.use(
         const raw = localStorage.getItem("efms-auth");
         const { state } = JSON.parse(raw ?? "{}");
         const { data } = await axios.post(
-          `${process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8001/api/v1"}/auth/refresh`,
+          `${process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000/api/v1"}/auth/refresh`,
           { refresh_token: state?.refreshToken }
         );
         const newAccess = data.access_token;
