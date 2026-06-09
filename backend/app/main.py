@@ -49,7 +49,9 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS
+app.add_middleware(AuditMiddleware)
+
+# CORS must be outermost (added last = runs first in Starlette's LIFO stack)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
@@ -57,8 +59,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-app.add_middleware(AuditMiddleware)
 
 # Exception handlers
 app.add_exception_handler(AppException, app_exception_handler)

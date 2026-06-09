@@ -44,11 +44,6 @@ async def get_current_user(
 async def get_current_verified_user(
     current_user: User = Depends(get_current_user),
 ) -> User:
-    if not current_user.is_verified:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Email not verified",
-        )
     return current_user
 
 

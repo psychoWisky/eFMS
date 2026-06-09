@@ -13,6 +13,7 @@ export interface AuthUser {
   department?: string;
   kyc_completed: boolean;
   roles: EfmsRole[];
+  can_sign: boolean;
 }
 
 interface AuthState {

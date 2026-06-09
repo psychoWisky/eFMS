@@ -8,6 +8,32 @@ from pydantic import BaseModel, Field
 from app.models.efms import FileStatus, FilePriority, RouteAction, DispatchMode
 
 
+# ── Signature schemas ─────────────────────────────────────────────────────────
+
+class SignInitiate(BaseModel):
+    pos_x: float = Field(..., ge=0, le=100)
+    pos_y: float = Field(..., ge=0, le=100)
+    page_number: int = Field(1, ge=1)
+
+
+class SignVerify(BaseModel):
+    otp_code: str = Field(..., min_length=6, max_length=6)
+
+
+class SignatureOut(BaseModel):
+    id: UUID
+    file_id: UUID
+    user_id: UUID
+    signer_name: str = ""
+    pos_x: float
+    pos_y: float
+    page_number: int
+    status: str
+    signed_at: Optional[datetime] = None
+    verified_at: Optional[datetime] = None
+    model_config = {"from_attributes": True}
+
+
 class FileCreate(BaseModel):
     subject: str = Field(..., min_length=5, max_length=500)
     category: str = "general"
@@ -80,6 +106,7 @@ class FileOut(BaseModel):
     notesheet: Optional[NotesheetOut] = None
     route_entries: List[RouteEntryOut] = []
     attachments: List[AttachmentOut] = []
+    signatures: List[SignatureOut] = []
     model_config = {"from_attributes": True}
 
 

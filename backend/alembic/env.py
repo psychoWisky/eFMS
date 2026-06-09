@@ -11,8 +11,9 @@ from app.db.base import Base  # noqa: F401
 import app.models.user           # noqa: F401
 import app.models.organization   # noqa: F401
 import app.models.audit          # noqa: F401
-import app.models.academic       # noqa: F401
 import app.models.efms           # noqa: F401
+import app.models.efms_extra     # noqa: F401
+import app.models.admin          # noqa: F401
 
 from app.core.config import get_settings
 

@@ -38,16 +38,15 @@ async def seed():
                 INSERT INTO users
                     (id, email, hashed_password, first_name, last_name,
                      designation, mobile,
-                     is_active, is_verified, kyc_completed, is_approved, is_pending_approval, active_role)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, true, true, true, true, false, $8::system_role)
+                     is_active, kyc_completed, active_role)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, true, true, $8::system_role)
                 ON CONFLICT (email) DO UPDATE
-                    SET hashed_password     = EXCLUDED.hashed_password,
-                        active_role         = EXCLUDED.active_role,
-                        designation         = EXCLUDED.designation,
-                        mobile              = EXCLUDED.mobile,
-                        is_verified         = true,
-                        is_approved         = true,
-                        is_pending_approval = false
+                    SET hashed_password = EXCLUDED.hashed_password,
+                        active_role     = EXCLUDED.active_role,
+                        designation     = EXCLUDED.designation,
+                        mobile          = EXCLUDED.mobile,
+                        is_active       = true,
+                        kyc_completed   = true
                 RETURNING id
             """, uid, email, pw_hash, first, last, designation, mobile, role)
 

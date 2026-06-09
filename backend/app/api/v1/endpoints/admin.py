@@ -329,3 +329,53 @@ async def delete_department(did: UUID, db: AsyncSession = Depends(get_db), _=Dep
     except IntegrityError:
         await db.rollback()
         raise HTTPException(400, "Department has users linked. Toggle to hide instead.")
+
+
+# ── Digital Signature Permissions ─────────────────────────────────────────────
+
+class SignPermissionIn(BaseModel):
+    can_sign: bool
+
+class SignPermissionUserOut(BaseModel):
+    id: UUID
+    email: str
+    full_name: str
+    designation: Optional[str]
+    active_role: Optional[str]
+    can_sign: bool
+    model_config = {"from_attributes": True}
+
+    @classmethod
+    def from_user(cls, u: User) -> "SignPermissionUserOut":
+        return cls(
+            id=u.id, email=u.email, full_name=u.full_name,
+            designation=getattr(u, "designation", None),
+            active_role=u.active_role.value if u.active_role else None,
+            can_sign=bool(getattr(u, "can_sign", False)),
+        )
+
+
+@router.get("/sign-permissions", response_model=List[SignPermissionUserOut])
+async def list_sign_permissions(db: AsyncSession = Depends(get_db), _=Depends(_super)):
+    """Return all users who have been granted digital signature permission."""
+    r = await db.execute(
+        select(User).where(User.can_sign == True, User.is_active == True).order_by(User.first_name)
+    )
+    return [SignPermissionUserOut.from_user(u) for u in r.scalars().all()]
+
+
+@router.patch("/users/{uid}/sign-permission")
+async def set_sign_permission(
+    uid: UUID,
+    body: SignPermissionIn,
+    db: AsyncSession = Depends(get_db),
+    _=Depends(_super),
+):
+    """Grant or revoke digital signature permission for a user."""
+    user = await db.get(User, uid)
+    if not user:
+        raise HTTPException(404, "User not found.")
+    user.can_sign = body.can_sign  # type: ignore[attr-defined]
+    await db.commit()
+    action = "granted" if body.can_sign else "revoked"
+    return {"message": f"Signature permission {action} for {user.full_name}."}

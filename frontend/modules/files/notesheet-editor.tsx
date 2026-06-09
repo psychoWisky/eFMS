@@ -9,14 +9,17 @@ import { useUser, useActiveRole } from "@/stores/auth.store";
 import { cn, formatDate } from "@/lib/utils";
 import {
   ChevronLeft, FileText, Download, CheckCircle2, XCircle, ArrowRight,
-  Loader2, AlertCircle, Lock, Clock, MessageSquare, RotateCcw, Upload, X,
+  Loader2, AlertCircle, Lock, Clock, MessageSquare, RotateCcw, Upload, X, PenLine,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
+import PdfSignatureCanvas, { type SignatureStamp } from "@/components/signature/pdf-signature-canvas";
+import OtpVerifyModal from "@/components/signature/otp-verify-modal";
 
 interface RouteEntry { id: string; from_user_id: string | null; to_user_id: string | null; action: string; remarks: string | null; is_current: boolean; created_at: string; }
 interface TrackEntry { id: string; from_user_id: string | null; to_user_id: string | null; from_user_name: string | null; to_user_name: string | null; action: string; remarks: string | null; is_current: boolean; created_at: string; }
 interface Attachment { id: string; original_name: string; file_size: number | null; mime_type: string | null; stored_name: string; created_at: string; }
 interface Notesheet { id: string; content: string; version: number; is_locked: boolean; }
+interface Signature { id: string; file_id: string; user_id: string; signer_name: string; pos_x: number; pos_y: number; page_number: number; status: "pending" | "verified"; signed_at: string | null; verified_at: string | null; }
 interface EfmsFile {
   id: string; ref_number: string; subject: string; category: string;
   status: string; priority: string; is_confidential: boolean;
@@ -24,6 +27,7 @@ interface EfmsFile {
   recipient_name: string | null; created_at: string; updated_at: string;
   is_released: boolean;
   notesheet: Notesheet | null; route_entries: RouteEntry[]; attachments: Attachment[];
+  signatures: Signature[];
 }
 interface ForwardingRemark { id: string; remark: string; user_name: string; user_id: string; created_at: string; }
 interface SystemUser { id: string; email: string; full_name: string; active_role: string | null; designation: string | null; }
@@ -44,8 +48,14 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
   const user = useUser();
   const role = useActiveRole();
   const qc = useQueryClient();
-  const [activeTab, setActiveTab] = useState<"notesheet" | "track">("notesheet");
+  const [activeTab, setActiveTab] = useState<"notesheet" | "track" | "sign">("notesheet");
   const [actionModal, setActionModal] = useState(false);
+  // Signature state
+  const [pendingStamp, setPendingStamp] = useState<{ pos_x: number; pos_y: number } | null>(null);
+  const [pendingSignatureId, setPendingSignatureId] = useState<string | null>(null);
+  const [showOtpModal, setShowOtpModal] = useState(false);
+  const [otpError, setOtpError] = useState<string | null>(null);
+  const [otpLoading, setOtpLoading] = useState(false);
   const [actionType, setActionType] = useState<"forward" | "approve" | "reject" | "return">("forward");
   const [toUserId, setToUserId] = useState("");
   const [remarks, setRemarks] = useState("");
@@ -253,13 +263,23 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
 
           {/* Tabs */}
           <div className="flex gap-1 mt-3">
-            {([{id:"notesheet",label:"Notesheet"},{id:"track",label:"Track Status"}] as const).map((t) => (
-              <button key={t.id} onClick={() => setActiveTab(t.id)}
-                className={cn("px-4 py-2 text-sm font-semibold rounded-lg transition-colors",
-                  activeTab === t.id ? "bg-[#0D6E6E] text-white" : "text-gray-600 hover:bg-gray-100")}>
-                {t.label === "Track Status" ? <><Clock size={13} className="inline mr-1" />Track Status</> : <><MessageSquare size={13} className="inline mr-1" />Notesheet &amp; Remarks</>}
+            <button onClick={() => setActiveTab("notesheet")}
+              className={cn("px-4 py-2 text-sm font-semibold rounded-lg transition-colors",
+                activeTab === "notesheet" ? "bg-[#0D6E6E] text-white" : "text-gray-600 hover:bg-gray-100")}>
+              <MessageSquare size={13} className="inline mr-1" />Notesheet &amp; Remarks
+            </button>
+            <button onClick={() => setActiveTab("track")}
+              className={cn("px-4 py-2 text-sm font-semibold rounded-lg transition-colors",
+                activeTab === "track" ? "bg-[#0D6E6E] text-white" : "text-gray-600 hover:bg-gray-100")}>
+              <Clock size={13} className="inline mr-1" />Track Status
+            </button>
+            {user?.can_sign && isHolder && (
+              <button onClick={() => setActiveTab("sign")}
+                className={cn("px-4 py-2 text-sm font-semibold rounded-lg transition-colors flex items-center gap-1",
+                  activeTab === "sign" ? "bg-emerald-600 text-white" : "text-emerald-700 hover:bg-emerald-50 border border-emerald-200")}>
+                <PenLine size={13} />Sign Document
               </button>
-            ))}
+            )}
           </div>
         </div>
 
@@ -398,8 +418,140 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
               </div>
             </div>
           )}
+
+          {/* ── SIGN DOCUMENT TAB ── */}
+          {activeTab === "sign" && (
+            <div className="p-6 space-y-5">
+              <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
+                <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
+                  <div>
+                    <h2 className="text-lg font-bold text-gray-800 flex items-center gap-2">
+                      <PenLine size={18} className="text-emerald-600" /> Digital Signature
+                    </h2>
+                    <p className="text-sm text-gray-500 mt-0.5">
+                      Click anywhere on the document to place your signature stamp, then confirm with OTP.
+                    </p>
+                  </div>
+                  {pendingStamp && !showOtpModal && (
+                    <button
+                      onClick={async () => {
+                        if (!pendingStamp) return;
+                        try {
+                          setOtpLoading(true);
+                          const res = await api.post(`/efms/files/${fileId}/sign`, {
+                            pos_x: pendingStamp.pos_x,
+                            pos_y: pendingStamp.pos_y,
+                            page_number: 1,
+                          });
+                          setPendingSignatureId(res.data.signature_id);
+                          setShowOtpModal(true);
+                          setOtpError(null);
+                        } catch (err) {
+                          const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+                          toast.error(msg ?? "Failed to initiate signature.");
+                        } finally {
+                          setOtpLoading(false);
+                        }
+                      }}
+                      disabled={otpLoading}
+                      className="flex items-center gap-2 px-4 py-2 bg-emerald-600 text-white rounded-xl text-sm font-semibold hover:bg-emerald-700 disabled:opacity-50"
+                    >
+                      {otpLoading ? <Loader2 size={14} className="animate-spin" /> : <PenLine size={14} />}
+                      Confirm Position &amp; Send OTP
+                    </button>
+                  )}
+                </div>
+
+                {/* PDF canvas with overlay */}
+                <div className="p-4">
+                  {file.attachments.length === 0 ? (
+                    <div className="text-center py-16 text-gray-400">
+                      <FileText size={40} className="mx-auto mb-3 opacity-40" />
+                      <p>No attachments found. Attach a PDF to this file first.</p>
+                    </div>
+                  ) : (
+                    <PdfSignatureCanvas
+                      pdfUrl={`http://localhost:8000/uploads/${selectedPdf?.stored_name ?? file.attachments[0].stored_name}`}
+                      existingSignatures={(file.signatures ?? []).map((s) => ({ ...s, status: s.status as "pending" | "verified", verified_at: s.verified_at ?? undefined }))}
+                      onPlace={(pos_x, pos_y) => {
+                        setPendingStamp({ pos_x, pos_y });
+                        setShowOtpModal(false);
+                        setPendingSignatureId(null);
+                      }}
+                      pendingStamp={pendingStamp}
+                      onClearPending={() => { setPendingStamp(null); setPendingSignatureId(null); }}
+                    />
+                  )}
+                </div>
+
+                {/* Existing signatures list */}
+                {(file.signatures ?? []).length > 0 && (
+                  <div className="px-6 pb-5">
+                    <h3 className="text-sm font-semibold text-gray-700 mb-3">Signature Log</h3>
+                    <div className="space-y-2">
+                      {(file.signatures ?? []).map((sig) => (
+                        <div key={sig.id} className={cn(
+                          "flex items-center gap-3 px-4 py-3 rounded-xl border text-sm",
+                          sig.status === "verified"
+                            ? "bg-emerald-50 border-emerald-200"
+                            : "bg-amber-50 border-amber-200 border-dashed"
+                        )}>
+                          {sig.status === "verified"
+                            ? <CheckCircle2 size={16} className="text-emerald-500 shrink-0" />
+                            : <Lock size={16} className="text-amber-500 shrink-0" />
+                          }
+                          <div className="flex-1">
+                            <span className="font-semibold text-gray-800">{sig.signer_name}</span>
+                            <span className="text-gray-500 ml-2">· Page {sig.page_number}, {sig.pos_x.toFixed(0)}% × {sig.pos_y.toFixed(0)}%</span>
+                          </div>
+                          <span className={cn("px-2 py-0.5 rounded-full text-xs font-semibold",
+                            sig.status === "verified" ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700")}>
+                            {sig.status === "verified" ? "✓ Verified" : "? Pending"}
+                          </span>
+                          {sig.verified_at && (
+                            <span className="text-xs text-gray-400">{formatDate(sig.verified_at, "relative")}</span>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
         </div>
       </div>
+
+      {/* OTP Verification Modal */}
+      {showOtpModal && pendingSignatureId && user && (
+        <OtpVerifyModal
+          email={user.email}
+          fileRef={file.ref_number}
+          isLoading={otpLoading}
+          error={otpError}
+          onClose={() => {
+            setShowOtpModal(false);
+            setOtpError(null);
+          }}
+          onVerify={async (otp) => {
+            setOtpLoading(true);
+            setOtpError(null);
+            try {
+              await api.post(`/efms/files/${fileId}/sign/${pendingSignatureId}/verify`, { otp_code: otp });
+              toast.success("Signature verified! ✓");
+              setShowOtpModal(false);
+              setPendingStamp(null);
+              setPendingSignatureId(null);
+              qc.invalidateQueries({ queryKey: ["efms-file", fileId] });
+            } catch (err) {
+              const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+              setOtpError(msg ?? "Invalid OTP. Please try again.");
+            } finally {
+              setOtpLoading(false);
+            }
+          }}
+        />
+      )}
 
       {/* Action Modal */}
       <AnimatePresence>

@@ -42,7 +42,9 @@ from app.schemas.efms import (
     FileCreate, FileUpdate, FileOut,
     NotesheetSave, RouteAction_ as RouteActionIn,
     DispatchCreate, DispatchOut,
+    SignInitiate, SignVerify, SignatureOut,
 )
+from app.utils.otp import create_otp, verify_otp, send_email as _send_otp_email
 from app.api.v1.endpoints.admin import create_notification
 
 # Roles that can see ALL files (spec §13, §14)
@@ -63,7 +65,7 @@ async def _generate_ref(db: AsyncSession, dept_code: str = "GEN", category: str 
 
 
 async def _load_file(file_id: UUID, db: AsyncSession) -> EfmsFile:
-    from app.models.efms_extra import Docket
+    from app.models.efms_extra import Docket, FileSignature
     result = await db.execute(
         select(EfmsFile)
         .where(EfmsFile.id == file_id)
@@ -80,6 +82,22 @@ async def _load_file(file_id: UUID, db: AsyncSession) -> EfmsFile:
         select(Docket).where(Docket.file_id == file_id, Docket.is_released == True)
     )
     f.is_released = docket_row.scalar_one_or_none() is not None  # type: ignore[attr-defined]
+
+    # Attach signatures with signer names
+    sig_rows = await db.execute(
+        select(FileSignature).where(FileSignature.file_id == file_id).order_by(FileSignature.created_at)
+    )
+    sigs = sig_rows.scalars().all()
+    enriched = []
+    for s in sigs:
+        signer = await db.get(User, s.user_id)
+        enriched.append(SignatureOut(
+            id=s.id, file_id=s.file_id, user_id=s.user_id,
+            signer_name=signer.full_name if signer else "",
+            pos_x=s.pos_x, pos_y=s.pos_y, page_number=s.page_number,
+            status=s.status, signed_at=s.signed_at, verified_at=s.verified_at,
+        ))
+    f.signatures = enriched  # type: ignore[attr-defined]
     return f
 
 
@@ -549,6 +567,87 @@ async def delete_attachment(
         os.remove(dest)
     await db.delete(att)
     await db.commit()
+
+
+# ── Digital Signature ─────────────────────────────────────────────────────────
+
+@router.post("/{file_id}/sign", response_model=dict, status_code=201)
+async def initiate_sign(
+    file_id: UUID,
+    body: SignInitiate,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_verified_user),
+):
+    """Place a pending signature stamp and send OTP to user's email."""
+    if not getattr(user, "can_sign", False):
+        raise HTTPException(status_code=403, detail="You do not have permission to sign documents.")
+
+    f = await db.get(EfmsFile, file_id)
+    if not f:
+        raise HTTPException(status_code=404, detail="File not found.")
+    if f.current_holder_id != user.id:
+        raise HTTPException(status_code=403, detail="You can only sign a file that is currently forwarded to you.")
+
+    from app.models.efms_extra import FileSignature
+    sig = FileSignature(
+        file_id=file_id,
+        user_id=user.id,
+        pos_x=body.pos_x,
+        pos_y=body.pos_y,
+        page_number=body.page_number,
+        status="pending",
+    )
+    db.add(sig)
+    await db.commit()
+    await db.refresh(sig)
+
+    code = await create_otp(db, user.email, "email")
+    _send_otp_email(
+        user.email,
+        f"[AVFU eFMS] Signature OTP for {f.ref_number}",
+        f"Dear {user.full_name},\n\n"
+        f"You are signing file: {f.ref_number} — {f.subject}\n"
+        f"Signature position: Page {body.page_number}, X={body.pos_x:.1f}%, Y={body.pos_y:.1f}%\n\n"
+        f"Your verification OTP is:  {code}\n\n"
+        f"This OTP expires in 10 minutes. Do not share it with anyone.\n\nAVFU eFMS"
+    )
+    return {"signature_id": str(sig.id), "message": f"OTP sent to {user.email}"}
+
+
+@router.post("/{file_id}/sign/{signature_id}/verify", response_model=SignatureOut)
+async def verify_sign(
+    file_id: UUID,
+    signature_id: UUID,
+    body: SignVerify,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_verified_user),
+):
+    """Verify OTP and mark signature as verified (? → ✓)."""
+    from app.models.efms_extra import FileSignature
+    sig = await db.get(FileSignature, signature_id)
+    if not sig or sig.file_id != file_id:
+        raise HTTPException(status_code=404, detail="Signature not found.")
+    if sig.user_id != user.id:
+        raise HTTPException(status_code=403, detail="This signature does not belong to you.")
+    if sig.status == "verified":
+        raise HTTPException(status_code=400, detail="Signature already verified.")
+
+    ok = await verify_otp(db, user.email, "email", body.otp_code)
+    if not ok:
+        raise HTTPException(status_code=400, detail="Invalid or expired OTP. Please try again.")
+
+    sig.status = "verified"
+    sig.verified_at = datetime.now(timezone.utc)
+    await db.commit()
+    await db.refresh(sig)
+
+    signer = await db.get(User, sig.user_id)
+    return SignatureOut(
+        id=sig.id, file_id=sig.file_id, user_id=sig.user_id,
+        signer_name=signer.full_name if signer else "",
+        pos_x=sig.pos_x, pos_y=sig.pos_y, page_number=sig.page_number,
+        status=sig.status, signed_at=sig.signed_at, verified_at=sig.verified_at,
+    )
 
 
 # ── Dispatch ──────────────────────────────────────────────────────────────────

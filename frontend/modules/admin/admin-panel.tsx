@@ -5,15 +5,17 @@ import { api } from "@/services/api";
 import { toast } from "sonner";
 import {
   Plus, Trash2, Eye, EyeOff, Tag, Users, Building2, Layers,
-  Loader2, CheckCircle2, XCircle, AlertTriangle,
+  Loader2, CheckCircle2, XCircle, AlertTriangle, PenLine, ShieldX,
 } from "lucide-react";
 
 interface Item { id: string; name: string; is_active: boolean; label?: string; designation?: string; email?: string; user_id?: string; code?: string; establishment_id?: string; }
 interface PendingUser { id: string; email: string; first_name: string | null; last_name: string | null; designation: string | null; employee_code: string | null; mobile: string | null; is_pending_approval: boolean; department_name: string | null; active_role: string | null; }
 interface Establishment { id: string; name: string; code: string | null; is_active: boolean; }
 interface Department { id: string; name: string; code: string | null; establishment_id: string | null; is_active: boolean; }
+interface SignUser { id: string; email: string; full_name: string; designation: string | null; active_role: string | null; can_sign: boolean; }
+interface AdminUser { id: string; email: string; full_name: string; active_role: string | null; designation: string | null; }
 
-type Tab = "users" | "establishments" | "departments" | "categories" | "priorities";
+type Tab = "users" | "establishments" | "departments" | "categories" | "priorities" | "signatures";
 
 const ROLE_OPTIONS = [
   { value: "efms_officer", label: "eFMS Officer" },
@@ -56,12 +58,16 @@ export function AdminPanel() {
   const [newCat, setNewCat] = useState({ name: "" });
   const [newPri, setNewPri] = useState({ name: "", label: "" });
 
+  const [signGrantUserId, setSignGrantUserId] = useState("");
+
   const { data: pendingUsers = [], isLoading: loadPending } = useQuery<PendingUser[]>({ queryKey: ["pending-users"], queryFn: async () => (await api.get("/auth/admin/pending-users")).data });
   const { data: allUsers = [] } = useQuery<PendingUser[]>({ queryKey: ["all-users"], queryFn: async () => (await api.get("/auth/admin/all-users")).data });
   const { data: establishments = [] } = useQuery<Establishment[]>({ queryKey: ["admin-establishments-all"], queryFn: async () => (await api.get("/admin/establishments/all")).data });
   const { data: departments = [] } = useQuery<Department[]>({ queryKey: ["admin-departments-all"], queryFn: async () => (await api.get("/admin/departments/all")).data });
   const { data: categories = [] } = useQuery<Item[]>({ queryKey: ["admin-categories"], queryFn: async () => (await api.get("/admin/categories")).data });
   const { data: priorities = [] } = useQuery<Item[]>({ queryKey: ["admin-priorities"], queryFn: async () => (await api.get("/admin/priorities")).data });
+  const { data: signUsers = [] } = useQuery<SignUser[]>({ queryKey: ["sign-permissions"], queryFn: async () => (await api.get("/admin/sign-permissions")).data });
+  const { data: adminUsers = [] } = useQuery<AdminUser[]>({ queryKey: ["admin-users"], queryFn: async () => (await api.get("/admin/users")).data });
 
   async function act(keys: string | string[], fn: () => Promise<unknown>) {
     try {
@@ -91,6 +97,7 @@ export function AdminPanel() {
     { id: "departments",    label: "Departments",    icon: Layers },
     { id: "categories",     label: "Categories",     icon: Tag },
     { id: "priorities",     label: "Priorities",     icon: AlertTriangle },
+    { id: "signatures",     label: "Signatures",     icon: PenLine },
   ];
 
   return (
@@ -253,6 +260,81 @@ export function AdminPanel() {
             </div>
           </div>
           {priorities.map((p) => <Row key={p.id} name={p.label ?? p.name} sub={`Key: ${p.name}`} active={p.is_active} onToggle={() => act("admin-priorities", () => api.patch(`/admin/priorities/${p.id}/toggle`, {}))} onDelete={() => act("admin-priorities", () => api.delete(`/admin/priorities/${p.id}`))} />)}
+        </div>
+      )}
+
+      {/* ── SIGNATURES ── */}
+      {tab === "signatures" && (
+        <div className="space-y-6">
+          {/* Grant permission */}
+          <div className="bg-gray-50 rounded-xl border border-gray-200 p-4">
+            <p className="text-sm font-semibold text-gray-700 mb-1">Grant Signature Permission</p>
+            <p className="text-xs text-gray-500 mb-3">Select any user to allow them to digitally sign documents forwarded to them.</p>
+            <div className="flex gap-3 items-end">
+              <div className="flex-1">
+                <label className={LABEL}>Select User *</label>
+                <select
+                  value={signGrantUserId}
+                  onChange={(e) => setSignGrantUserId(e.target.value)}
+                  className={INPUT}
+                >
+                  <option value="">Choose a user…</option>
+                  {adminUsers
+                    .filter((u) => !signUsers.some((s) => s.id === u.id))
+                    .map((u) => (
+                      <option key={u.id} value={u.id}>
+                        {u.full_name} — {u.designation ?? u.active_role ?? "No role"} · {u.email}
+                      </option>
+                    ))}
+                </select>
+              </div>
+              <button
+                onClick={() => act("sign-permissions", async () => {
+                  await api.patch(`/admin/users/${signGrantUserId}/sign-permission`, { can_sign: true });
+                  setSignGrantUserId("");
+                })}
+                disabled={!signGrantUserId}
+                className="flex items-center gap-1 px-4 py-2.5 bg-emerald-600 text-white rounded-lg text-sm font-semibold hover:bg-emerald-700 disabled:opacity-50 whitespace-nowrap"
+              >
+                <PenLine size={15} /> Grant Access
+              </button>
+            </div>
+          </div>
+
+          {/* Users with sign permission */}
+          <div>
+            <h2 className="text-base font-bold text-gray-800 mb-3">
+              Users with Signature Permission{" "}
+              {signUsers.length > 0 && (
+                <span className="text-emerald-600">({signUsers.length})</span>
+              )}
+            </h2>
+            {signUsers.length === 0 && (
+              <p className="text-sm text-gray-400 py-4">No users have been granted signature permission yet.</p>
+            )}
+            <div className="space-y-2">
+              {signUsers.map((u) => (
+                <div key={u.id} className="flex items-center justify-between bg-white border border-emerald-100 rounded-xl px-4 py-3">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-semibold text-gray-900">{u.full_name}</span>
+                      <span className="px-2 py-0.5 bg-emerald-100 text-emerald-700 rounded-full text-xs font-semibold">Can Sign</span>
+                    </div>
+                    <p className="text-xs text-gray-500 mt-0.5">{u.email} · {u.designation ?? "—"} · {u.active_role?.replace(/_/g, " ") ?? "—"}</p>
+                  </div>
+                  <button
+                    onClick={() => act("sign-permissions", () =>
+                      api.patch(`/admin/users/${u.id}/sign-permission`, { can_sign: false })
+                    )}
+                    className="flex items-center gap-1 px-3 py-1.5 border border-red-200 text-red-600 rounded-lg text-xs hover:bg-red-50 shrink-0 ml-3"
+                    title="Revoke signature permission"
+                  >
+                    <ShieldX size={13} /> Revoke
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
         </div>
       )}
 

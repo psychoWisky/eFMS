@@ -32,6 +32,7 @@ class UserBrief(BaseModel):
     kyc_completed: bool
     profile_photo_url: Optional[str]
     roles: list[SystemRole]
+    can_sign: bool = False
 
     model_config = {"from_attributes": True}
 

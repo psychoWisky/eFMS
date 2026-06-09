@@ -4,7 +4,7 @@ from email.mime.text import MIMEText
 from datetime import datetime, timezone, timedelta
 from typing import Optional, List
 from uuid import UUID
-from fastapi import APIRouter, Depends, HTTPException, status, Request
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
@@ -15,10 +15,11 @@ from app.core.security import (
     verify_password, hash_password,
     create_access_token, create_refresh_token, verify_token
 )
+from app.core.config import settings
 from app.core.dependencies import get_current_user, require_roles
 from app.models.user import User, UserRole, RefreshToken, SystemRole
 from app.models.efms_extra import OTP
-from app.schemas.auth import LoginRequest, TokenResponse, RefreshRequest, UserBrief, SwitchRoleRequest
+from app.schemas.auth import LoginRequest, TokenResponse, RefreshRequest, UserBrief
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
@@ -167,10 +168,7 @@ async def signup(body: SignupRequest, db: AsyncSession = Depends(get_db)):
         department_id=body.department_id,
         establishment_id=body.establishment_id,
         is_active=True,
-        is_verified=True,
         kyc_completed=True,
-        is_approved=False,          # type: ignore[attr-defined]
-        is_pending_approval=True,   # type: ignore[attr-defined]
     )
     db.add(user)
     await db.commit()
@@ -187,11 +185,12 @@ def build_user_brief(user: User) -> UserBrief:
         active_role=user.active_role,
         kyc_completed=user.kyc_completed,
         profile_photo_url=user.profile_photo_url,
-        roles=[r.role for r in user.roles if r.is_active],
+        roles=[r.role for r in user.roles],
+        can_sign=user.can_sign,
     )
 
 
-async def _issue_tokens(user: User, request: Request, db: AsyncSession) -> TokenResponse:
+async def _issue_tokens(user: User, db: AsyncSession) -> TokenResponse:
     access_token = create_access_token(
         subject=str(user.id),
         extra_claims={"role": user.active_role.value if user.active_role else None},
@@ -201,15 +200,14 @@ async def _issue_tokens(user: User, request: Request, db: AsyncSession) -> Token
     rt = RefreshToken(
         user_id=user.id,
         token_hash=token_hash,
-        expires_at=str(datetime.now(timezone.utc)),
-        device_info=request.headers.get("user-agent", ""),
+        expires_at=datetime.now(timezone.utc) + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS),
     )
     db.add(rt)
     return TokenResponse(access_token=access_token, refresh_token=refresh_token, user=build_user_brief(user))
 
 
 @router.post("/login", response_model=TokenResponse)
-async def login(payload: LoginRequest, request: Request, db: AsyncSession = Depends(get_db)):
+async def login(payload: LoginRequest, db: AsyncSession = Depends(get_db)):
     result = await db.execute(
         select(User).options(selectinload(User.roles)).where(User.email == payload.email)
     )
@@ -221,11 +219,7 @@ async def login(payload: LoginRequest, request: Request, db: AsyncSession = Depe
     if not user.is_active:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Your account has been deactivated.")
 
-    if not getattr(user, "is_approved", True):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
-                            detail="Your account is pending admin approval. You will be notified once approved.")
-
-    resp = await _issue_tokens(user, request, db)
+    resp = await _issue_tokens(user, db)
     await db.commit()
     return resp
 
@@ -237,7 +231,7 @@ class OTPLoginRequest(BaseModel):
     otp: str
 
 @router.post("/login/otp", response_model=TokenResponse)
-async def login_otp(payload: OTPLoginRequest, request: Request, db: AsyncSession = Depends(get_db)):
+async def login_otp(payload: OTPLoginRequest, db: AsyncSession = Depends(get_db)):
     ok = await _verify_otp(db, payload.email.lower().strip(), "email", payload.otp)
     if not ok:
         raise HTTPException(status_code=401, detail="Invalid or expired OTP.")
@@ -248,10 +242,8 @@ async def login_otp(payload: OTPLoginRequest, request: Request, db: AsyncSession
     user = result.scalar_one_or_none()
     if not user or not user.is_active:
         raise HTTPException(status_code=401, detail="Account not found or deactivated.")
-    if not getattr(user, "is_approved", True):
-        raise HTTPException(status_code=403, detail="Account pending admin approval.")
 
-    resp = await _issue_tokens(user, request, db)
+    resp = await _issue_tokens(user, db)
     await db.commit()
     return resp
 
@@ -263,7 +255,7 @@ class MobileOTPLoginRequest(BaseModel):
     otp: str
 
 @router.post("/login/mobile-otp", response_model=TokenResponse)
-async def login_mobile_otp(payload: MobileOTPLoginRequest, request: Request, db: AsyncSession = Depends(get_db)):
+async def login_mobile_otp(payload: MobileOTPLoginRequest, db: AsyncSession = Depends(get_db)):
     mobile = payload.mobile.strip()
     ok = await _verify_otp(db, mobile, "mobile", payload.otp)
     if not ok:
@@ -275,10 +267,8 @@ async def login_mobile_otp(payload: MobileOTPLoginRequest, request: Request, db:
     user = result.scalar_one_or_none()
     if not user:
         raise HTTPException(status_code=401, detail="No account found with this mobile number.")
-    if not getattr(user, "is_approved", True):
-        raise HTTPException(status_code=403, detail="Account pending admin approval.")
 
-    resp = await _issue_tokens(user, request, db)
+    resp = await _issue_tokens(user, db)
     await db.commit()
     return resp
 
@@ -286,19 +276,19 @@ async def login_mobile_otp(payload: MobileOTPLoginRequest, request: Request, db:
 # ── Refresh ───────────────────────────────────────────────────────────────────
 
 @router.post("/refresh", response_model=TokenResponse)
-async def refresh_token(payload: RefreshRequest, request: Request, db: AsyncSession = Depends(get_db)):
+async def refresh_token(payload: RefreshRequest, db: AsyncSession = Depends(get_db)):
     user_id = verify_token(payload.refresh_token, token_type="refresh")
     if not user_id:
         raise HTTPException(status_code=401, detail="Invalid or expired refresh token.")
 
     token_hash = hashlib.sha256(payload.refresh_token.encode()).hexdigest()
     result = await db.execute(
-        select(RefreshToken).where(RefreshToken.token_hash == token_hash, RefreshToken.is_revoked == False)
+        select(RefreshToken).where(RefreshToken.token_hash == token_hash, RefreshToken.revoked == False)
     )
     stored = result.scalar_one_or_none()
     if not stored:
         raise HTTPException(status_code=401, detail="Refresh token revoked.")
-    stored.is_revoked = True
+    stored.revoked = True
 
     result = await db.execute(
         select(User).options(selectinload(User.roles)).where(User.id == user_id, User.is_active == True)
@@ -307,7 +297,7 @@ async def refresh_token(payload: RefreshRequest, request: Request, db: AsyncSess
     if not user:
         raise HTTPException(status_code=401, detail="User not found.")
 
-    resp = await _issue_tokens(user, request, db)
+    resp = await _issue_tokens(user, db)
     await db.commit()
     return resp
 
@@ -320,7 +310,7 @@ async def logout(payload: RefreshRequest, db: AsyncSession = Depends(get_db), _:
     result = await db.execute(select(RefreshToken).where(RefreshToken.token_hash == token_hash))
     token = result.scalar_one_or_none()
     if token:
-        token.is_revoked = True
+        token.revoked = True
     await db.commit()
     return {"message": "Signed out."}
 
@@ -337,7 +327,6 @@ async def get_me(current_user: User = Depends(get_current_user)):
 class PendingUserOut(BaseModel):
     id: UUID; email: str; first_name: Optional[str]; last_name: Optional[str]
     designation: Optional[str]; employee_code: Optional[str]; mobile: Optional[str]
-    is_pending_approval: bool
     department_name: Optional[str] = None
     active_role: Optional[str] = None
     model_config = {"from_attributes": True}
@@ -348,7 +337,7 @@ class PendingUserOut(BaseModel):
             id=u.id, email=u.email,
             first_name=u.first_name, last_name=u.last_name,
             designation=u.designation, employee_code=u.employee_code,
-            mobile=u.mobile, is_pending_approval=bool(getattr(u, "is_pending_approval", False)),
+            mobile=u.mobile,
             department_name=u.department.name if u.department else None,
             active_role=u.active_role.value if u.active_role else None,
         )
@@ -362,7 +351,7 @@ async def pending_users(
     result = await db.execute(
         select(User)
         .options(selectinload(User.department))
-        .where(User.is_pending_approval == True, User.is_active == True)
+        .where(User.active_role == None, User.is_active == True)
         .order_by(User.created_at)
     )
     return [PendingUserOut.from_user(u) for u in result.scalars().all()]
@@ -380,19 +369,15 @@ async def approve_user(
         raise HTTPException(404, "User not found.")
 
     if body.approve:
-        # Map role string to enum
         role_map = {r.value: r for r in SystemRole}
         role = role_map.get(body.role, SystemRole.EFMS_OFFICER)
-        user.is_approved = True          # type: ignore[attr-defined]
-        user.is_pending_approval = False # type: ignore[attr-defined]
         user.active_role = role
-        ur = UserRole(user_id=user.id, role=role, is_active=True)
+        ur = UserRole(user_id=user.id, role=role)
         db.add(ur)
         await db.commit()
         return {"message": f"User approved with role {role.value}."}
     else:
         user.is_active = False
-        user.is_pending_approval = False # type: ignore[attr-defined]
         await db.commit()
         return {"message": "User rejected."}
 

@@ -7,7 +7,6 @@ import uuid
 
 class KYCProfileUpdate(BaseModel):
     first_name: str
-    middle_name: Optional[str] = None
     last_name: str
     date_of_birth: date
     gender: Gender
@@ -16,14 +15,10 @@ class KYCProfileUpdate(BaseModel):
     establishment_id: uuid.UUID
     department_id: uuid.UUID
     mobile: str
-    alternate_mobile: Optional[str] = None
-    residential_address: str
 
     @field_validator("employee_code")
     @classmethod
     def validate_employee_code(cls, v: str) -> str:
-        if not v.isdigit() or len(v) != 11:
-            raise ValueError("Employee code must be exactly 11 digits")
         return v
 
     @field_validator("mobile")
@@ -39,14 +34,11 @@ class UserProfileResponse(BaseModel):
     id: str
     email: str
     first_name: Optional[str]
-    middle_name: Optional[str]
     last_name: Optional[str]
     full_name: str
     date_of_birth: Optional[date]
     gender: Optional[Gender]
     mobile: Optional[str]
-    alternate_mobile: Optional[str]
-    residential_address: Optional[str]
     employee_code: Optional[str]
     designation: Optional[str]
     establishment_id: Optional[str]

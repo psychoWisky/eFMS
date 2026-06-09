@@ -8,8 +8,8 @@ import { cn } from "@/lib/utils";
 interface NavItem { label: string; icon: React.ElementType; href: string; roles: EfmsRole[]; }
 
 const NAV_ITEMS: NavItem[] = [
-  { label: "Dashboard",    icon: LayoutDashboard, href: "/dashboard", roles: ["efms_officer","efms_admin","registrar","dispatch_officer","hod","faculty","student"] },
-  { label: "Search Files", icon: Search,          href: "/search",    roles: ["efms_officer","efms_admin","registrar","dispatch_officer","hod","faculty","student"] },
+  { label: "Dashboard",    icon: LayoutDashboard, href: "/dashboard", roles: ["efms_officer","efms_admin","registrar","dispatch_officer","hod","faculty"] },
+  { label: "Search Files", icon: Search,          href: "/search",    roles: ["efms_officer","efms_admin","registrar","dispatch_officer","hod","faculty"] },
   { label: "Admin Panel",  icon: ShieldCheck,     href: "/admin",     roles: ["admin","super_admin"] },
 ];
 
