@@ -44,6 +44,19 @@ export function getInitials(name: string): string {
   return name.split(" ").filter(Boolean).slice(0, 2).map((w) => w[0]).join("").toUpperCase();
 }
 
+const PREVIEWABLE_MIME_TYPES = new Set([
+  "application/pdf",
+  "image/png", "image/jpeg", "image/gif", "image/webp", "image/svg+xml",
+  "text/plain",
+]);
+
+/** Shared by the attachment panel and the File Tracking History timeline. */
+export function isPreviewable(att: { mime_type: string | null; original_name: string }): boolean {
+  if (att.mime_type && PREVIEWABLE_MIME_TYPES.has(att.mime_type)) return true;
+  const ext = att.original_name.split(".").pop()?.toLowerCase();
+  return ["pdf", "png", "jpg", "jpeg", "gif", "webp", "svg", "txt"].includes(ext ?? "");
+}
+
 export function fileStatusBadgeClass(status: string): string {
   const map: Record<string, string> = {
     draft: "badge-draft",
@@ -62,4 +75,45 @@ export function fileStatusLabel(status: string): string {
     dispatched: "Dispatched",
   };
   return map[status] ?? status;
+}
+
+/**
+ * Matches a file's ref number against a search query using ONLY the final
+ * numeric segment (e.g. "AVFU/AGRO/2026/GEN/0003" -> "0003"), leading-zero
+ * insensitive: "3", "03", "003", and "0003" all match. Shared by Docket,
+ * My Files, and the Reopen picker so this rule lives in exactly one place.
+ */
+export function matchesRefSuffix(refNumber: string, query: string): boolean {
+  const q = query.trim();
+  if (!q) return true;
+  const lastSegment = refNumber.split("/").pop() ?? "";
+  const normalize = (s: string) => s.replace(/^0+/, "") || "0";
+  return normalize(lastSegment) === normalize(q);
+}
+
+export type DateRangePreset = "today" | "week" | "month" | "3months" | "6months";
+
+/**
+ * Resolves a date-range preset to concrete from/to bounds (YYYY-MM-DD), sent
+ * straight through to the backend's existing from/to query params — the same
+ * pattern search_files already accepts. Kept as the single place this preset
+ * -> bounds mapping is computed, reused by File Tracking History (and any
+ * future screen needing the same "Today / This Week / ..." presets).
+ */
+export function resolveDateRange(preset: DateRangePreset): { from: string; to: string } {
+  const now = new Date();
+  const to = now.toISOString().slice(0, 10);
+  const from = new Date(now);
+  if (preset === "today") {
+    // from === to
+  } else if (preset === "week") {
+    from.setDate(from.getDate() - 7);
+  } else if (preset === "month") {
+    from.setMonth(from.getMonth() - 1);
+  } else if (preset === "3months") {
+    from.setMonth(from.getMonth() - 3);
+  } else if (preset === "6months") {
+    from.setMonth(from.getMonth() - 6);
+  }
+  return { from: from.toISOString().slice(0, 10), to };
 }

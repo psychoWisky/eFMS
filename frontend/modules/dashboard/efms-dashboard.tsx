@@ -5,10 +5,12 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useRouter } from "next/navigation";
 import { api } from "@/services/api";
 import { useUser, useActiveRole } from "@/stores/auth.store";
-import { cn, formatDate } from "@/lib/utils";
-import { Inbox, FolderOpen, FilePlus2, Loader2, Unlock, Eye, EyeOff, AlertCircle, Clock } from "lucide-react";
+import { cn, formatDate, matchesRefSuffix } from "@/lib/utils";
+import { Inbox, FolderOpen, FilePlus2, Loader2, Unlock, Eye, EyeOff, AlertCircle, Clock, Search, FilePlus, FolderSearch } from "lucide-react";
 import { toast } from "sonner";
 import { NewFileForm } from "@/modules/files/new-file-page";
+import { ReopenFilePicker } from "@/modules/files/reopen-file-picker";
+import { PersonBadge, type PersonInfo } from "@/components/shared/person-badge";
 
 interface EfmsFile {
   id: string; ref_number: string; subject: string; category: string;
@@ -19,7 +21,7 @@ interface DocketItem {
   file_id: string; ref_number: string; subject: string; category: string;
   status: string; priority: string; created_by: string;
   current_holder_id: string | null; updated_at: string; created_at: string;
-  can_release: boolean; from_user_name: string | null;
+  can_release: boolean; from_user_name: string | null; from_user_info?: PersonInfo | null;
 }
 interface ReleasedItem {
   docket_id: string; file_id: string; ref_number: string; subject: string;
@@ -45,6 +47,9 @@ export function EFMSDashboard() {
   const qc = useQueryClient();
   const [section, setSection] = useState<Section>("docket");
   const [readFiles, setReadFiles] = useState<Set<string>>(new Set());
+  const [newFileMode, setNewFileMode] = useState<"choice" | "create" | "reopen">("choice");
+  const [docketSearch, setDocketSearch] = useState("");
+  const [myFilesSearch, setMyFilesSearch] = useState("");
 
   // Docket: files currently held by me — poll every 10s so new forwards appear without manual refresh
   const { data: docketItems = [], isLoading: loadDocket } = useQuery<DocketItem[]>({
@@ -79,6 +84,11 @@ export function EFMSDashboard() {
       toast.error(msg ?? "Could not release file.");
     },
   });
+
+  // Search matches only the trailing numeric segment of the ref number
+  // (e.g. "0003" in AVFU/AGRO/2026/GEN/0003), leading-zero insensitive.
+  const filteredDocketItems = docketItems.filter((f) => matchesRefSuffix(f.ref_number, docketSearch));
+  const filteredMyFiles = myFiles.filter((f) => matchesRefSuffix(f.ref_number, myFilesSearch));
 
   const SECTIONS: { id: Section; label: string; icon: React.ElementType; count?: number }[] = [
     { id: "docket", label: "Docket",   icon: Inbox,      count: docketItems.length },
@@ -127,6 +137,12 @@ export function EFMSDashboard() {
               </p>
             </div>
 
+            <div className="relative max-w-xs">
+              <Search size={16} className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400" />
+              <input value={docketSearch} onChange={(e) => setDocketSearch(e.target.value)} placeholder="Search by file number…"
+                className="w-full border border-gray-300 rounded-xl pl-10 pr-4 py-2.5 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]" />
+            </div>
+
             {loadDocket ? (
               <div className="flex items-center justify-center py-16 gap-3 text-gray-400"><Loader2 size={22} className="animate-spin" /> Loading…</div>
             ) : docketItems.length === 0 ? (
@@ -134,6 +150,10 @@ export function EFMSDashboard() {
                 <Inbox size={40} className="mx-auto mb-3 text-gray-200" />
                 <p className="text-lg font-semibold text-gray-600">Your docket is empty</p>
                 <p className="text-base text-gray-400 mt-1">Files forwarded to you will appear here.</p>
+              </div>
+            ) : filteredDocketItems.length === 0 ? (
+              <div className="bg-white rounded-2xl border border-gray-200 p-12 text-center">
+                <p className="text-base text-gray-400">No files match your search.</p>
               </div>
             ) : (
               <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
@@ -146,7 +166,7 @@ export function EFMSDashboard() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-100">
-                    {docketItems.map((f) => {
+                    {filteredDocketItems.map((f) => {
                       const isNew = !readFiles.has(f.file_id);
                       const days = daysAgo(f.updated_at);
                       return (
@@ -158,7 +178,7 @@ export function EFMSDashboard() {
                           <td className="px-5 py-4 max-w-xs">
                             <p className="text-base font-semibold text-gray-900 truncate">{f.subject}</p>
                           </td>
-                          <td className="px-5 py-4 text-base text-gray-600">{f.from_user_name ?? "—"}</td>
+                          <td className="px-5 py-4 text-base text-gray-600"><PersonBadge person={f.from_user_info} compact /></td>
                           <td className="px-5 py-4">
                             <span className={cn("px-2 py-1 rounded-full text-sm font-medium capitalize",
                               f.priority === "urgent" ? "bg-red-100 text-red-700" : "bg-gray-100 text-gray-600")}>
@@ -208,6 +228,12 @@ export function EFMSDashboard() {
               <p className="text-base text-gray-500 mt-0.5">Files you have created.</p>
             </div>
 
+            <div className="relative max-w-xs">
+              <Search size={16} className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400" />
+              <input value={myFilesSearch} onChange={(e) => setMyFilesSearch(e.target.value)} placeholder="Search by file number…"
+                className="w-full border border-gray-300 rounded-xl pl-10 pr-4 py-2.5 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]" />
+            </div>
+
             {loadFiles ? (
               <div className="flex items-center justify-center py-10 gap-3 text-gray-400"><Loader2 size={22} className="animate-spin" /> Loading…</div>
             ) : myFiles.length === 0 ? (
@@ -215,6 +241,10 @@ export function EFMSDashboard() {
                 <FolderOpen size={40} className="mx-auto mb-3 text-gray-200" />
                 <p className="text-lg font-semibold text-gray-600">No files yet</p>
                 <button onClick={() => setSection("new")} className="mt-4 px-5 py-2.5 bg-[#0D6E6E] text-white rounded-xl text-base font-semibold hover:bg-[#178F8F]">Create your first file</button>
+              </div>
+            ) : filteredMyFiles.length === 0 ? (
+              <div className="bg-white rounded-2xl border border-gray-200 p-10 text-center">
+                <p className="text-base text-gray-400">No files match your search.</p>
               </div>
             ) : (
               <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
@@ -227,7 +257,7 @@ export function EFMSDashboard() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-100">
-                    {myFiles.map((f, idx) => {
+                    {filteredMyFiles.map((f, idx) => {
                       // Released overrides the underlying workflow status for display —
                       // users only ever see Draft, Active, or Released here.
                       const displayStatus = f.is_released ? "released" : f.status;
@@ -315,9 +345,46 @@ export function EFMSDashboard() {
         {/* ── NEW FILE SECTION ── */}
         {section === "new" && (
           <div>
-            <h2 className="text-xl font-bold text-[#1A1A2E] mb-1">Create New File</h2>
-            <p className="text-base text-gray-500 mb-5">Fill in the details and submit your file for routing.</p>
-            <NewFileForm onSuccess={() => { qc.invalidateQueries({ queryKey: ["efms-files-outbox"] }); setSection("files"); }} />
+            {newFileMode === "choice" && (
+              <div>
+                <h2 className="text-xl font-bold text-[#1A1A2E] mb-1">New File</h2>
+                <p className="text-base text-gray-500 mb-5">Start a brand-new file, or reopen one of your own released files to continue its workflow.</p>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+                  <button onClick={() => setNewFileMode("create")}
+                    className="text-left bg-white rounded-2xl border border-gray-200 p-6 hover:border-[#0D6E6E] hover:shadow-sm transition-all">
+                    <div className="w-11 h-11 rounded-xl bg-[#E6F4F4] flex items-center justify-center mb-4">
+                      <FilePlus size={20} className="text-[#0D6E6E]" />
+                    </div>
+                    <p className="text-lg font-bold text-gray-900">Create New File</p>
+                    <p className="text-base text-gray-500 mt-1">Start a brand-new file from scratch.</p>
+                  </button>
+                  <button onClick={() => setNewFileMode("reopen")}
+                    className="text-left bg-white rounded-2xl border border-gray-200 p-6 hover:border-[#0D6E6E] hover:shadow-sm transition-all">
+                    <div className="w-11 h-11 rounded-xl bg-[#E6F4F4] flex items-center justify-center mb-4">
+                      <FolderSearch size={20} className="text-[#0D6E6E]" />
+                    </div>
+                    <p className="text-lg font-bold text-gray-900">Use Existing Released File</p>
+                    <p className="text-base text-gray-500 mt-1">Reopen one of your own released files.</p>
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {newFileMode === "create" && (
+              <div>
+                <button onClick={() => setNewFileMode("choice")} className="text-sm text-[#0D6E6E] hover:underline mb-4">← Back</button>
+                <h2 className="text-xl font-bold text-[#1A1A2E] mb-1">Create New File</h2>
+                <p className="text-base text-gray-500 mb-5">Fill in the details and submit your file for routing.</p>
+                <NewFileForm onSuccess={() => { qc.invalidateQueries({ queryKey: ["efms-files-outbox"] }); setNewFileMode("choice"); setSection("files"); }} />
+              </div>
+            )}
+
+            {newFileMode === "reopen" && (
+              <ReopenFilePicker
+                onBack={() => setNewFileMode("choice")}
+                onReopened={(fileId) => { setNewFileMode("choice"); router.push(`/files/${fileId}`); }}
+              />
+            )}
           </div>
         )}
       </div>

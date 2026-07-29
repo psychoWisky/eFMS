@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 from pydantic import BaseModel
 
 from app.db.base import get_db
@@ -48,13 +49,15 @@ class RecipientOut(BaseModel):
 
 class UserOut(BaseModel):
     id: UUID; email: str; full_name: str; active_role: Optional[str]; designation: Optional[str]
+    department_name: Optional[str] = None
     model_config = {"from_attributes": True}
 
     @classmethod
     def from_user(cls, u: User):
         return cls(id=u.id, email=u.email, full_name=u.full_name,
                    active_role=u.active_role.value if u.active_role else None,
-                   designation=getattr(u, "designation", None))
+                   designation=getattr(u, "designation", None),
+                   department_name=u.department.name if u.department else None)
 
 class NotificationOut(BaseModel):
     id: UUID; title: str; message: Optional[str]; type: str
@@ -199,7 +202,10 @@ async def delete_recipient(rid: UUID, db: AsyncSession = Depends(get_db), _=Depe
 @router.get("/users", response_model=List[UserOut])
 async def list_users(db: AsyncSession = Depends(get_db), current_user: User = Depends(_any_role)):
     r = await db.execute(
-        select(User).where(User.is_active == True, User.id != current_user.id).order_by(User.first_name)
+        select(User)
+        .where(User.is_active == True, User.id != current_user.id)
+        .options(selectinload(User.department))
+        .order_by(User.first_name)
     )
     return [UserOut.from_user(u) for u in r.scalars().all()]
 

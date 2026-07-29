@@ -12,9 +12,10 @@ import { TableRow } from "@tiptap/extension-table-row";
 import { TableCell } from "@tiptap/extension-table-cell";
 import { TableHeader } from "@tiptap/extension-table-header";
 import { Loader2, Upload, X, FileText, Send, AlertTriangle, CheckCircle2, Bold, Italic, Underline as UIcon, AlignLeft, AlignCenter, AlignRight, List, ListOrdered, Grid2x2 } from "lucide-react";
+import { PersonBadge } from "@/components/shared/person-badge";
 
 interface DropItem { id: string; name: string; label?: string; is_active?: boolean; }
-interface SystemUser { id: string; full_name: string; designation: string | null; active_role: string | null; }
+interface SystemUser { id: string; full_name: string; designation: string | null; active_role: string | null; department_name?: string | null; }
 interface Annexure { file: File; name: string; tag: string; }
 
 interface NewFileFormProps { onSuccess?: () => void; }
@@ -253,13 +254,15 @@ export function NewFileForm({ onSuccess }: NewFileFormProps) {
                 <option value="">No recipient yet…</option>
                 {allUsers.map((u) => (
                   <option key={u.id} value={u.id}>
-                    {u.designation ? `${u.designation} — ` : ""}{u.full_name}
+                    {u.full_name}{u.designation ? ` — ${u.designation}` : ""}{u.department_name ? ` (${u.department_name})` : ""}
                   </option>
                 ))}
               </select>
             )}
             {selectedRecipient && (
-              <p className="text-sm text-[#0D6E6E] mt-1.5 flex items-center gap-1"><CheckCircle2 size={13} /> Intended recipient: {selectedRecipient.full_name}</p>
+              <p className="text-sm text-[#0D6E6E] mt-1.5 flex items-center gap-2">
+                <CheckCircle2 size={13} className="shrink-0" /> Intended recipient: <PersonBadge person={selectedRecipient} compact />
+              </p>
             )}
           </div>
         </div>
@@ -398,7 +401,7 @@ export function NewFileForm({ onSuccess }: NewFileFormProps) {
               <div><span className="font-semibold text-gray-600">Category:</span> <span>{category}</span></div>
               <div><span className="font-semibold text-gray-600">Priority:</span> <span className="capitalize">{priority}</span></div>
               {isConfidential && <div><span className="font-semibold text-gray-600">Confidential:</span> <span className="text-purple-700 font-semibold">Yes — restricted to sender and recipient only</span></div>}
-              <div><span className="font-semibold text-gray-600">Intended recipient:</span> <span>{selectedRecipient?.full_name ?? "Not chosen yet"}</span></div>
+              <div className="flex items-start gap-2"><span className="font-semibold text-gray-600 shrink-0">Intended recipient:</span> {selectedRecipient ? <PersonBadge person={selectedRecipient} compact /> : <span>Not chosen yet</span>}</div>
               {annexures.length > 0 && <div><span className="font-semibold text-gray-600">Annexures:</span> <span>{annexures.map((a) => a.tag).join(", ")}</span></div>}
             </div>
             <div className="flex gap-3">
