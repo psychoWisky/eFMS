@@ -36,6 +36,7 @@ class User(Base, UUIDMixin, TimestampMixin):
     hashed_password = Column(String(255), nullable=True)
     is_active = Column(Boolean, default=True, nullable=False)
     kyc_completed = Column(Boolean, default=False, nullable=False)
+    must_change_password = Column(Boolean, default=False, nullable=False)
     google_id = Column(String(255), unique=True, nullable=True)
 
     # Profile

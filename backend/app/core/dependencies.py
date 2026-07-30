@@ -47,8 +47,19 @@ async def get_current_verified_user(
     return current_user
 
 
-async def require_kyc(
+async def require_password_changed(
     current_user: User = Depends(get_current_verified_user),
+) -> User:
+    if current_user.must_change_password:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"code": "password_change_required", "message": "You must change your temporary password before continuing."},
+        )
+    return current_user
+
+
+async def require_kyc(
+    current_user: User = Depends(require_password_changed),
 ) -> User:
     if not current_user.kyc_completed:
         raise HTTPException(

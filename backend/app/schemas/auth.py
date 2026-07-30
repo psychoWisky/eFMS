@@ -30,6 +30,7 @@ class UserBrief(BaseModel):
     full_name: str
     active_role: Optional[SystemRole]
     kyc_completed: bool
+    must_change_password: bool = False
     profile_photo_url: Optional[str]
     roles: list[SystemRole]
     can_sign: bool = False

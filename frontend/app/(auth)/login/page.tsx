@@ -43,6 +43,10 @@ export default function LoginPage() {
       const { user, access_token, refresh_token } = res.data;
       setAuth(user, access_token, refresh_token);
       toast.success(`Welcome, ${user.full_name}`);
+      if (user.must_change_password) {
+        router.replace("/change-password");
+        return;
+      }
       const isAdmin = ["admin", "super_admin"].includes(user.active_role ?? "");
       router.replace(isAdmin ? "/admin" : "/dashboard");
     },
@@ -211,10 +215,6 @@ export default function LoginPage() {
             </form>
           )}
 
-          <p className="text-center text-base text-gray-500 mt-5">
-            New user?{" "}
-            <a href="/signup" className="text-[#0D6E6E] font-semibold hover:underline">Request Access</a>
-          </p>
         </div>
       </div>
     </div>

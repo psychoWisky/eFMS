@@ -1,30 +1,21 @@
 "use client";
 import { useState } from "react";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/services/api";
 import { toast } from "sonner";
 import {
   Plus, Trash2, Eye, EyeOff, Tag, Users, Building2, Layers,
-  Loader2, CheckCircle2, XCircle, AlertTriangle, PenLine, ShieldX,
+  Loader2, AlertTriangle, PenLine, ShieldX,
 } from "lucide-react";
+import { UserManagementSection } from "./user-management";
 
 interface Item { id: string; name: string; is_active: boolean; label?: string; designation?: string; email?: string; user_id?: string; code?: string; establishment_id?: string; }
-interface PendingUser { id: string; email: string; first_name: string | null; last_name: string | null; designation: string | null; employee_code: string | null; mobile: string | null; is_pending_approval: boolean; department_name: string | null; active_role: string | null; }
 interface Establishment { id: string; name: string; code: string | null; is_active: boolean; }
 interface Department { id: string; name: string; code: string | null; establishment_id: string | null; is_active: boolean; }
 interface SignUser { id: string; email: string; full_name: string; designation: string | null; active_role: string | null; can_sign: boolean; }
 interface AdminUser { id: string; email: string; full_name: string; active_role: string | null; designation: string | null; }
 
 type Tab = "users" | "establishments" | "departments" | "categories" | "priorities" | "signatures";
-
-const ROLE_OPTIONS = [
-  { value: "efms_officer", label: "eFMS Officer" },
-  { value: "efms_admin", label: "eFMS Admin" },
-  { value: "registrar", label: "Registrar" },
-  { value: "dispatch_officer", label: "Dispatch Officer" },
-  { value: "hod", label: "Head of Department" },
-  { value: "faculty", label: "Faculty" },
-];
 
 const INPUT = "w-full border border-gray-300 rounded-lg px-3 py-2.5 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]";
 const LABEL = "block text-sm font-semibold text-gray-600 mb-1";
@@ -52,7 +43,6 @@ function Row({ name, sub, active, onToggle, onDelete }: { name: string; sub?: st
 export function AdminPanel() {
   const [tab, setTab] = useState<Tab>("users");
   const qc = useQueryClient();
-  const [approveRoles, setApproveRoles] = useState<Record<string, string>>({});
   const [newEst, setNewEst] = useState({ name: "", code: "" });
   const [newDept, setNewDept] = useState({ name: "", code: "", establishment_id: "" });
   const [newCat, setNewCat] = useState({ name: "" });
@@ -60,8 +50,6 @@ export function AdminPanel() {
 
   const [signGrantUserId, setSignGrantUserId] = useState("");
 
-  const { data: pendingUsers = [], isLoading: loadPending } = useQuery<PendingUser[]>({ queryKey: ["pending-users"], queryFn: async () => (await api.get("/auth/admin/pending-users")).data });
-  const { data: allUsers = [] } = useQuery<PendingUser[]>({ queryKey: ["all-users"], queryFn: async () => (await api.get("/auth/admin/all-users")).data });
   const { data: establishments = [] } = useQuery<Establishment[]>({ queryKey: ["admin-establishments-all"], queryFn: async () => (await api.get("/admin/establishments/all")).data });
   const { data: departments = [] } = useQuery<Department[]>({ queryKey: ["admin-departments-all"], queryFn: async () => (await api.get("/admin/departments/all")).data });
   const { data: categories = [] } = useQuery<Item[]>({ queryKey: ["admin-categories"], queryFn: async () => (await api.get("/admin/categories")).data });
@@ -80,19 +68,8 @@ export function AdminPanel() {
     }
   }
 
-  const approve = useMutation({
-    mutationFn: ({ uid, approve, role }: { uid: string; approve: boolean; role: string }) =>
-      api.post(`/auth/admin/users/${uid}/approve`, { approve, role }),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["pending-users"] });
-      qc.invalidateQueries({ queryKey: ["all-users"] });
-      toast.success("User updated");
-    },
-    onError: () => toast.error("Action failed"),
-  });
-
   const TABS: { id: Tab; label: string; icon: React.ElementType; badge?: number }[] = [
-    { id: "users",          label: "Users",          icon: Users,     badge: pendingUsers.length },
+    { id: "users",          label: "User Management", icon: Users },
     { id: "establishments", label: "Establishments", icon: Building2 },
     { id: "departments",    label: "Departments",    icon: Layers },
     { id: "categories",     label: "Categories",     icon: Tag },
@@ -118,72 +95,8 @@ export function AdminPanel() {
         ))}
       </div>
 
-      {/* ── USERS ── */}
-      {tab === "users" && (
-        <div className="space-y-6">
-          {/* Pending */}
-          <div>
-            <h2 className="text-lg font-bold text-gray-800 mb-3">Pending Approval {pendingUsers.length > 0 && <span className="text-red-500">({pendingUsers.length})</span>}</h2>
-            {loadPending && <div className="flex items-center gap-2 text-gray-400 py-4"><Loader2 size={16} className="animate-spin" /> Loading…</div>}
-            {!loadPending && pendingUsers.length === 0 && <p className="text-gray-400 text-sm py-4">No pending approvals.</p>}
-            <div className="space-y-3">
-              {pendingUsers.map((u) => (
-                <div key={u.id} className="bg-white border border-amber-200 rounded-xl p-4">
-                  <div className="flex flex-col sm:flex-row sm:items-center gap-3">
-                    <div className="flex-1 min-w-0">
-                      <p className="text-base font-bold text-gray-900">{u.first_name} {u.last_name}</p>
-                      <p className="text-sm text-gray-600">{u.email}</p>
-                      <p className="text-sm text-gray-500">{u.designation}{u.employee_code ? ` · ${u.employee_code}` : ""}{u.mobile ? ` · ${u.mobile}` : ""}</p>
-                    </div>
-                    <div className="flex items-center gap-2 shrink-0">
-                      <select value={approveRoles[u.id] ?? "efms_officer"} onChange={(e) => setApproveRoles((v) => ({ ...v, [u.id]: e.target.value }))}
-                        className="border border-gray-300 rounded-lg px-2 py-1.5 text-sm focus:outline-none">
-                        {ROLE_OPTIONS.map((r) => <option key={r.value} value={r.value}>{r.label}</option>)}
-                      </select>
-                      <button onClick={() => approve.mutate({ uid: u.id, approve: true, role: approveRoles[u.id] ?? "efms_officer" })}
-                        className="flex items-center gap-1 px-3 py-1.5 bg-green-600 text-white rounded-lg text-sm font-semibold hover:bg-green-700">
-                        <CheckCircle2 size={14} /> Approve
-                      </button>
-                      <button onClick={() => approve.mutate({ uid: u.id, approve: false, role: "efms_officer" })}
-                        className="flex items-center gap-1 px-3 py-1.5 border border-red-200 text-red-600 rounded-lg text-sm hover:bg-red-50">
-                        <XCircle size={14} /> Reject
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          {/* All users table */}
-          <div>
-            <h2 className="text-lg font-bold text-gray-800 mb-3">All Users ({allUsers.length})</h2>
-            <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
-              <table className="w-full text-sm">
-                <thead className="bg-gray-50 border-b">
-                  <tr>{["Name","Email","Designation","Department","Role","Status"].map((h) => <th key={h} className="text-left px-4 py-3 font-semibold text-gray-600">{h}</th>)}</tr>
-                </thead>
-                <tbody className="divide-y divide-gray-50">
-                  {allUsers.map((u) => (
-                    <tr key={u.id} className="hover:bg-gray-50">
-                      <td className="px-4 py-3 font-medium text-gray-900">{u.first_name} {u.last_name}</td>
-                      <td className="px-4 py-3 text-gray-600 text-xs">{u.email}</td>
-                      <td className="px-4 py-3 text-gray-500">{u.designation ?? "—"}</td>
-                      <td className="px-4 py-3 text-gray-500">{u.department_name ?? "—"}</td>
-                      <td className="px-4 py-3 text-gray-500 capitalize">{u.active_role?.replace(/_/g, " ") ?? "—"}</td>
-                      <td className="px-4 py-3">
-                        {u.is_pending_approval
-                          ? <span className="px-2 py-0.5 bg-amber-100 text-amber-700 rounded-full text-xs font-semibold">Pending</span>
-                          : <span className="px-2 py-0.5 bg-green-100 text-green-700 rounded-full text-xs font-semibold">Active</span>}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </div>
-      )}
+      {/* ── USER MANAGEMENT ── */}
+      {tab === "users" && <UserManagementSection />}
 
       {/* ── ESTABLISHMENTS ── */}
       {tab === "establishments" && (

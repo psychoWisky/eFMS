@@ -12,6 +12,7 @@ export interface AuthUser {
   designation?: string;
   department?: string;
   kyc_completed: boolean;
+  must_change_password: boolean;
   roles: EfmsRole[];
   can_sign: boolean;
 }
@@ -51,5 +52,6 @@ export const useAuthStore = create<AuthState>()(
 
 export const useUser = () => useAuthStore((s) => s.user);
 export const useIsAuthenticated = () => useAuthStore((s) => !!s.accessToken);
+export const useMustChangePassword = () => useAuthStore((s) => !!s.user?.must_change_password);
 export const useActiveRole = () => useAuthStore((s) => s.activeRole);
 export const useHasRole = (...roles: EfmsRole[]) => useAuthStore((s) => s.activeRole != null && roles.includes(s.activeRole));
