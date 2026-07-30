@@ -6,6 +6,7 @@ from uuid import UUID
 from pydantic import BaseModel, Field
 
 from app.models.efms import FileStatus, FilePriority, RouteAction, DispatchMode
+from app.utils.person_info import PersonInfo
 
 
 # ── Signature schemas ─────────────────────────────────────────────────────────
@@ -25,6 +26,7 @@ class SignatureOut(BaseModel):
     file_id: UUID
     user_id: UUID
     signer_name: str = ""
+    signer_info: Optional[PersonInfo] = None
     pos_x: float
     pos_y: float
     page_number: int
@@ -60,6 +62,8 @@ class RouteEntryOut(BaseModel):
     to_user_id: Optional[UUID] = None
     from_user_name: Optional[str] = None
     to_user_name: Optional[str] = None
+    from_user_info: Optional[PersonInfo] = None
+    to_user_info: Optional[PersonInfo] = None
     action: RouteAction
     remarks: Optional[str] = None
     is_current: bool
@@ -103,6 +107,11 @@ class FileOut(BaseModel):
     created_at: datetime
     updated_at: datetime
     is_released: bool = False
+    released_at: Optional[datetime] = None
+    released_by_info: Optional[PersonInfo] = None
+    creator_info: Optional[PersonInfo] = None
+    current_holder_info: Optional[PersonInfo] = None
+    recipient_info: Optional[PersonInfo] = None
     notesheet: Optional[NotesheetOut] = None
     route_entries: List[RouteEntryOut] = []
     attachments: List[AttachmentOut] = []

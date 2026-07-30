@@ -10,8 +10,10 @@ from pydantic import BaseModel
 from app.db.base import get_db
 from app.core.dependencies import get_current_verified_user
 from app.models.user import User
-from app.models.efms import EfmsFile
+from app.models.efms import EfmsFile, FileStatus
 from app.models.efms_extra import Docket, FileRemark
+from app.api.v1.endpoints.efms_files import _load_file, _assert_file_access, _has_full_remark_visibility
+from app.utils.person_info import person_info_map
 
 router = APIRouter(prefix="/docket", tags=["Docket"])
 
@@ -28,17 +30,28 @@ async def my_docket(db: AsyncSession = Depends(get_db), user: User = Depends(get
     )
     files = result.scalars().all()
     from app.models.efms import RouteEntry
-    out = []
+
+    # Find who last forwarded each file to me (still one routing-history query
+    # per file — unchanged, unrelated to this task), then batch-resolve all
+    # those senders' name/designation/department in a single extra lookup.
+    last_entry_by_file = {}
     for f in files:
-        # Find who last forwarded to me
         last_route = await db.execute(
             select(RouteEntry)
             .where(RouteEntry.file_id == f.id, RouteEntry.to_user_id == user.id)
             .order_by(RouteEntry.created_at.desc())
             .limit(1)
         )
-        last_entry = last_route.scalar_one_or_none()
-        from_user = await db.get(User, last_entry.from_user_id) if last_entry and last_entry.from_user_id else None
+        last_entry_by_file[f.id] = last_route.scalar_one_or_none()
+
+    people = await person_info_map(
+        (e.from_user_id for e in last_entry_by_file.values() if e), db
+    )
+
+    out = []
+    for f in files:
+        last_entry = last_entry_by_file[f.id]
+        from_info = people.get(last_entry.from_user_id) if last_entry and last_entry.from_user_id else None
 
         out.append({
             "file_id": str(f.id),
@@ -52,7 +65,8 @@ async def my_docket(db: AsyncSession = Depends(get_db), user: User = Depends(get
             "updated_at": f.updated_at.isoformat() if f.updated_at else None,
             "created_at": f.created_at.isoformat() if f.created_at else None,
             "can_release": str(f.created_by) == str(user.id),
-            "from_user_name": from_user.full_name if from_user else None,
+            "from_user_name": from_info.full_name if from_info else None,
+            "from_user_info": from_info.model_dump() if from_info else None,
         })
     return out
 
@@ -90,6 +104,38 @@ async def release_file(file_id: UUID, db: AsyncSession = Depends(get_db), user: 
     return {"released": True}
 
 
+# ── Reopen a released file (only original creator) ────────────────────────────
+
+@router.post("/{file_id}/reopen")
+async def reopen_file(file_id: UUID, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_verified_user)):
+    """Reopen a file the caller both created and released. Reuses the same
+    file record — no new file, no new reference number, no route entry, no
+    notification, no email, no history of any kind. Exactly three fields
+    change: is_released -> False, status -> active, current_holder_id ->
+    the creator. Everything else (notesheet, attachments, remarks, routing
+    history, created_at) is left untouched. From this point the file behaves
+    like any other Active file and the existing Forward flow takes over
+    unchanged."""
+    file = await db.get(EfmsFile, file_id)
+    if not file:
+        raise HTTPException(404, "File not found.")
+    if str(file.created_by) != str(user.id):
+        raise HTTPException(403, "Only the original creator can reopen this file.")
+
+    docket_result = await db.execute(
+        select(Docket).where(Docket.file_id == file_id, Docket.is_released == True)
+    )
+    docket = docket_result.scalar_one_or_none()
+    if not docket:
+        raise HTTPException(400, "This file is not currently released.")
+
+    docket.is_released = False
+    file.status = FileStatus.active
+    file.current_holder_id = user.id
+    await db.commit()
+    return {"reopened": True}
+
+
 # ── Released files (visible to whole department) ──────────────────────────────
 
 @router.get("/released", response_model=List[dict])
@@ -117,28 +163,55 @@ async def released_files(db: AsyncSession = Depends(get_db), user: User = Depend
     return out
 
 
+# ── My released files (creator's own — feeds the Reopen picker only) ──────────
+
+@router.get("/released/mine", response_model=List[dict])
+async def my_released_files(db: AsyncSession = Depends(get_db), user: User = Depends(get_current_verified_user)):
+    """Released files this user both created and released. Distinct from
+    /released (department-wide) — this is the exact "My Released Files" list
+    used by New File -> Use Existing Released File, and must never include
+    department files or files the user was only a participant on."""
+    result = await db.execute(
+        select(Docket)
+        .where(Docket.is_released == True, Docket.released_by == user.id)
+        .order_by(Docket.released_at.desc())
+    )
+    dockets = result.scalars().all()
+    out = []
+    for d in dockets:
+        file = await db.get(EfmsFile, d.file_id)
+        if file and file.created_by == user.id:
+            out.append({
+                "docket_id": str(d.id),
+                "file_id": str(file.id),
+                "ref_number": file.ref_number,
+                "subject": file.subject,
+                "category": file.category,
+                "released_at": d.released_at.isoformat() if d.released_at else None,
+            })
+    return out
+
+
 # ── Forwarding remarks (read-only thread — no direct messaging) ──────────────
 
 @router.get("/remarks/{file_id}")
 async def get_remarks(file_id: UUID, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_verified_user)):
-    """Returns forwarding remarks from route_entries with chain-position visibility rules.
+    """Returns forwarding remarks (route_entries.remarks) for a file.
 
-    A user sees only remarks from route entries that were created at or before
-    the moment they last forwarded the file onward.  If they have not yet
-    forwarded the file (they are the current holder), they see every remark
-    up to and including the entry that delivered the file to them — i.e. their
-    own position in the chain but nothing that happens after they forward it.
-
-    Movement chain example (A→B→C→D):
-      A sees: own entry only
-      B sees: A's entry + own entry
-      C sees: A's + B's + own entry
-      D sees: A's + B's + C's + own entry
+    The current holder (or admin) sees every forwarding remark. Everyone else
+    — including the creator, once they've forwarded the file on — sees only
+    the remark(s) they personally authored while forwarding. Nothing else.
+    If the file returns to a past holder, they regain full visibility for as
+    long as they hold it, then lose it again once they forward it onward —
+    this falls out naturally from _has_full_remark_visibility keying off the
+    file's current_holder_id, no extra state needed.
     """
-    from app.models.efms import RouteEntry
-    from datetime import datetime as _dt
+    f = await _load_file(file_id, db)
+    await _assert_file_access(f, user, db)
+    full_visibility = _has_full_remark_visibility(f, user)
 
-    # Load the full ordered chain for this file
+    from app.models.efms import RouteEntry
+
     all_entries_result = await db.execute(
         select(RouteEntry)
         .where(RouteEntry.file_id == file_id)
@@ -146,62 +219,29 @@ async def get_remarks(file_id: UUID, db: AsyncSession = Depends(get_db), user: U
     )
     all_entries: list = all_entries_result.scalars().all()
 
-    # Determine the cutoff timestamp for the requesting user.
-    #
-    # The cutoff is the created_at of the LAST entry where this user appears as
-    # from_user_id (i.e. the last time they forwarded the file onward).
-    # This naturally includes the remark they left when forwarding, and excludes
-    # everything that happened afterwards.
-    #
-    # If the user has never forwarded (never appears as from_user_id), they are
-    # either the first creator (from_user_id of the very first entry is them) or
-    # the current holder who hasn't acted yet.  In that case use the created_at
-    # of the latest entry where they appear as to_user_id as the cutoff — they
-    # can see everything that was sent TO them, but not what happens after.
-    #
-    # Admin/super-admin roles bypass visibility filtering and see everything.
-    from app.models.user import SystemRole
-    admin_roles = {SystemRole.SUPER_ADMIN, SystemRole.ADMIN, SystemRole.EFMS_ADMIN,
-                   SystemRole.EFMS_OFFICER, SystemRole.REGISTRAR}
-    is_admin = user.active_role in admin_roles
-
-    cutoff: "_dt | None" = None
-    if not is_admin:
-        # Last forward action by this user
-        forwarded_by_user = [
-            e for e in all_entries if e.from_user_id == user.id
-        ]
-        if forwarded_by_user:
-            cutoff = forwarded_by_user[-1].created_at
-        else:
-            # User hasn't forwarded yet — find the latest entry that pointed to them
-            received_by_user = [
-                e for e in all_entries if e.to_user_id == user.id
-            ]
-            if received_by_user:
-                cutoff = received_by_user[-1].created_at
-            # If neither, the user is the file creator and sees only entries up
-            # to the first forward (their own initial send). Use the first entry
-            # from_user_id == user.id if present (covered above), otherwise all
-            # entries are visible (admin-like fall-through; creator can always see).
-
-    # Filter to entries at or before the cutoff
     visible_entries = [
         e for e in all_entries
-        if (is_admin or cutoff is None or (e.created_at is not None and e.created_at <= cutoff))
-        and e.remarks is not None
+        if e.remarks is not None and (full_visibility or e.from_user_id == user.id)
     ]
+
+    person_ids = set()
+    for e in visible_entries:
+        person_ids.add(e.from_user_id)
+        person_ids.add(e.to_user_id)
+    people = await person_info_map(person_ids, db)
 
     out = []
     for e in visible_entries:
-        from_user = await db.get(User, e.from_user_id) if e.from_user_id else None
-        to_user   = await db.get(User, e.to_user_id)   if e.to_user_id   else None
+        from_info = people.get(e.from_user_id) if e.from_user_id else None
+        to_info   = people.get(e.to_user_id)   if e.to_user_id   else None
         out.append({
             "id":         str(e.id),
             "remark":     e.remarks,
             "user_id":    str(e.from_user_id) if e.from_user_id else None,
-            "user_name":  from_user.full_name if from_user else "System",
-            "to_user":    to_user.full_name if to_user else "—",
+            "user_name":  from_info.full_name if from_info else "System",
+            "to_user":    to_info.full_name if to_info else "—",
+            "user_info":  from_info.model_dump() if from_info else None,
+            "to_user_info": to_info.model_dump() if to_info else None,
             "action":     e.action.value if hasattr(e.action, "value") else str(e.action),
             "created_at": e.created_at.isoformat() if e.created_at else None,
         })

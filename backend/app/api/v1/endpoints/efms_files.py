@@ -47,6 +47,7 @@ from app.schemas.efms import (
     SignInitiate, SignVerify, SignatureOut,
 )
 from app.utils.otp import create_otp, verify_otp, send_email as _send_otp_email
+from app.utils.person_info import PersonInfo, person_info_map
 from app.api.v1.endpoints.admin import create_notification
 
 # Roles that can see ALL files (spec §13, §14)
@@ -104,24 +105,137 @@ async def _load_file(file_id: UUID, db: AsyncSession) -> EfmsFile:
     docket_row = await db.execute(
         select(Docket).where(Docket.file_id == file_id, Docket.is_released == True)
     )
-    f.is_released = docket_row.scalar_one_or_none() is not None  # type: ignore[attr-defined]
+    docket = docket_row.scalar_one_or_none()
+    f.is_released = docket is not None  # type: ignore[attr-defined]
+    f.released_at = docket.released_at if docket else None  # type: ignore[attr-defined]
 
-    # Attach signatures with signer names
     sig_rows = await db.execute(
         select(FileSignature).where(FileSignature.file_id == file_id).order_by(FileSignature.created_at)
     )
     sigs = sig_rows.scalars().all()
+
+    # Batch every person referenced anywhere on this file (creator, current
+    # holder, recipient, each route-entry sender/receiver, each signer) into a
+    # single lookup — two queries total (users, departments), no matter how
+    # many people are involved.
+    person_ids = {f.created_by, f.current_holder_id, f.recipient_id}
+    if docket and docket.released_by:
+        person_ids.add(docket.released_by)
+    for e in f.route_entries:
+        person_ids.add(e.from_user_id)
+        person_ids.add(e.to_user_id)
+    for s in sigs:
+        person_ids.add(s.user_id)
+    people = await person_info_map(person_ids, db)
+
+    f.creator_info = people.get(f.created_by)  # type: ignore[attr-defined]
+    f.current_holder_info = people.get(f.current_holder_id) if f.current_holder_id else None  # type: ignore[attr-defined]
+    f.recipient_info = people.get(f.recipient_id) if f.recipient_id else None  # type: ignore[attr-defined]
+    f.released_by_info = people.get(docket.released_by) if docket and docket.released_by else None  # type: ignore[attr-defined]
+
+    for e in f.route_entries:
+        e.from_user_info = people.get(e.from_user_id) if e.from_user_id else None  # type: ignore[attr-defined]
+        e.to_user_info = people.get(e.to_user_id) if e.to_user_id else None  # type: ignore[attr-defined]
+
     enriched = []
     for s in sigs:
-        signer = await db.get(User, s.user_id)
+        signer_info = people.get(s.user_id)
         enriched.append(SignatureOut(
             id=s.id, file_id=s.file_id, user_id=s.user_id,
-            signer_name=signer.full_name if signer else "",
+            signer_name=signer_info.full_name if signer_info else "",
+            signer_info=signer_info,
             pos_x=s.pos_x, pos_y=s.pos_y, page_number=s.page_number,
             status=s.status, signed_at=s.signed_at, verified_at=s.verified_at,
         ))
     f.signatures = enriched  # type: ignore[attr-defined]
     return f
+
+
+async def _assert_file_access(f: EfmsFile, user: User, db: AsyncSession) -> None:
+    """Canonical file-access check — raises 403 unless the user is an admin,
+    the creator, the current holder, a past participant in the routing chain,
+    or a department member of a file released to their department.
+
+    This is the single source of truth for "can this user access this file";
+    shared by get_file and track_file so the two never drift apart."""
+    if user.active_role in _ADMIN_ROLES:
+        return
+    if f.created_by == user.id or f.current_holder_id == user.id:
+        return
+    was_participant = any(
+        e.from_user_id == user.id or e.to_user_id == user.id
+        for e in f.route_entries
+    )
+    if was_participant:
+        return
+    if user.department_id:
+        from app.models.efms_extra import Docket
+        rel = await db.execute(
+            select(Docket).where(
+                Docket.file_id == f.id,
+                Docket.is_released == True,
+                Docket.department_id == user.department_id,
+            )
+        )
+        if rel.scalar_one_or_none():
+            return
+    raise HTTPException(status_code=403, detail="You do not have access to this file.")
+
+
+def _has_full_remark_visibility(f: EfmsFile, viewer: User) -> bool:
+    """True if `viewer` sees every forwarding remark and forwarding attachment
+    on this file: admins, and whoever currently holds the file. Everyone else
+    (creator included, once they've forwarded it on) sees only their own.
+
+    This is the single source of truth for the remarks/forwarding-attachment
+    visibility rule — reused by _visible_file (for get_file/create_file/
+    update_file/save_notesheet/route_file), by get_remarks, and by track_file's
+    per-entry remark redaction, so the rule can never drift between them.
+
+    Because it keys off f.current_holder_id (already updated on every forward,
+    including a return-forward back to a past holder), a future Reopen feature
+    that hands current_holder_id back to the creator gets full visibility for
+    free — no change to this function would be needed.
+    """
+    return viewer.active_role in _ADMIN_ROLES or f.current_holder_id == viewer.id
+
+
+def _first_forward_time(route_entries) -> Optional[datetime]:
+    """Earliest created_at across a file's route entries — the instant it left
+    Draft. Attachments uploaded strictly before this are the permanent
+    "original" attachments from Draft creation; anything at/after is a
+    forwarding attachment, attributable to whoever uploaded it. Returns None
+    for a file that has never been forwarded (still Draft) — callers should
+    treat that as "everything is original"."""
+    times = [e.created_at for e in route_entries if e.created_at is not None]
+    return min(times) if times else None
+
+
+def _visible_file(f: EfmsFile, viewer: User) -> FileOut:
+    """Viewer-scoped serialization of a file. The original notesheet and the
+    full routing-chain skeleton (who/whom/when/action) are always intact —
+    only forwarding attachments and remark text are filtered, per
+    _has_full_remark_visibility.
+
+    IMPORTANT: this filters a *detached Pydantic copy*, never the live ORM
+    object. EfmsFile.attachments and .route_entries are both mapped with
+    cascade="all, delete-orphan" — reassigning those relationship collections
+    directly on `f` would mark excluded rows as orphans and delete them from
+    the database on the next commit. FileOut.model_validate(f) produces an
+    independent copy that is safe to filter/mutate freely.
+    """
+    payload = FileOut.model_validate(f)
+    if _has_full_remark_visibility(f, viewer):
+        return payload
+    first_fwd = _first_forward_time(f.route_entries)
+    payload.attachments = [
+        a for a in payload.attachments
+        if first_fwd is None or a.created_at < first_fwd or a.uploaded_by == viewer.id
+    ]
+    for entry in payload.route_entries:
+        if entry.from_user_id != viewer.id:
+            entry.remarks = None
+    return payload
 
 
 # ── Files CRUD ────────────────────────────────────────────────────────────────
@@ -205,7 +319,17 @@ async def search_files(
 
 @router.get("/{file_id}/track")
 async def track_file(file_id: UUID, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_verified_user)):
-    """Returns enriched route history (forwarding chain + signature events), timestamped."""
+    """Returns enriched route history (forwarding chain + signature events), timestamped.
+
+    Routing events themselves (who forwarded to whom, when, current holder) are
+    never hidden — every authorized viewer sees the complete chain. Only the
+    remark text attached to each event is filtered: full visibility for the
+    current holder (or admin), own-remark-only for everyone else. The entry
+    stays in the list either way; only its "remarks" field is blanked."""
+    f = await _load_file(file_id, db)
+    await _assert_file_access(f, user, db)
+    full_visibility = _has_full_remark_visibility(f, user)
+
     from app.models.efms import RouteEntry
     from app.models.efms_extra import FileRemark
 
@@ -213,36 +337,54 @@ async def track_file(file_id: UUID, db: AsyncSession = Depends(get_db), user: Us
         select(RouteEntry).where(RouteEntry.file_id == file_id).order_by(RouteEntry.created_at)
     )
     entries = result.scalars().all()
+
+    remark_result = await db.execute(
+        select(FileRemark).where(FileRemark.file_id == file_id).order_by(FileRemark.created_at)
+    )
+    remark_rows = remark_result.scalars().all()
+
+    # Batch every person referenced across the whole timeline in one lookup
+    # (two queries total) instead of one query per entry.
+    person_ids = set()
+    for e in entries:
+        person_ids.add(e.from_user_id)
+        person_ids.add(e.to_user_id)
+    for r in remark_rows:
+        person_ids.add(r.user_id)
+    people = await person_info_map(person_ids, db)
+
     out = []
     for e in entries:
-        from_u = await db.get(User, e.from_user_id) if e.from_user_id else None
-        to_u   = await db.get(User, e.to_user_id)   if e.to_user_id   else None
+        from_info = people.get(e.from_user_id) if e.from_user_id else None
+        to_info   = people.get(e.to_user_id)   if e.to_user_id   else None
+        visible_remark = e.remarks if (full_visibility or e.from_user_id == user.id) else None
         out.append({
             "id":             str(e.id),
             "type":           "route",
             "action":         e.action.value if hasattr(e.action, "value") else str(e.action),
             "from_user_id":   str(e.from_user_id) if e.from_user_id else None,
             "to_user_id":     str(e.to_user_id)   if e.to_user_id   else None,
-            "from_user_name": from_u.full_name if from_u else "System",
-            "to_user_name":   to_u.full_name   if to_u   else None,
-            "remarks":        e.remarks,
+            "from_user_name": from_info.full_name if from_info else "System",
+            "to_user_name":   to_info.full_name   if to_info   else None,
+            "from_user_info": from_info.model_dump() if from_info else None,
+            "to_user_info":   to_info.model_dump()   if to_info   else None,
+            "remarks":        visible_remark,
             "is_current":     e.is_current,
             "created_at":     e.created_at.isoformat() if e.created_at else None,
         })
 
-    remark_result = await db.execute(
-        select(FileRemark).where(FileRemark.file_id == file_id).order_by(FileRemark.created_at)
-    )
-    for r in remark_result.scalars().all():
-        ru = await db.get(User, r.user_id) if r.user_id else None
+    for r in remark_rows:
+        r_info = people.get(r.user_id) if r.user_id else None
         out.append({
             "id":             str(r.id),
             "type":           "sign",
             "action":         "sign",
             "from_user_id":   str(r.user_id) if r.user_id else None,
             "to_user_id":     None,
-            "from_user_name": ru.full_name if ru else "System",
+            "from_user_name": r_info.full_name if r_info else "System",
             "to_user_name":   None,
+            "from_user_info": r_info.model_dump() if r_info else None,
+            "to_user_info":   None,
             "remarks":        r.remark,
             "is_current":     False,
             "created_at":     r.created_at.isoformat() if r.created_at else None,
@@ -259,32 +401,8 @@ async def get_file(
     user: User = Depends(get_current_verified_user),
 ):
     f = await _load_file(file_id, db)
-    is_admin = user.active_role in _ADMIN_ROLES
-    if not is_admin:
-        # Creator or current holder always has access
-        if f.created_by == user.id or f.current_holder_id == user.id:
-            return f
-        # Anyone who was ever in the routing chain can view
-        was_participant = any(
-            e.from_user_id == user.id or e.to_user_id == user.id
-            for e in f.route_entries
-        )
-        if was_participant:
-            return f
-        # Dept members can view files released to their department
-        if user.department_id:
-            from app.models.efms_extra import Docket
-            rel = await db.execute(
-                select(Docket).where(
-                    Docket.file_id == file_id,
-                    Docket.is_released == True,
-                    Docket.department_id == user.department_id,
-                )
-            )
-            if rel.scalar_one_or_none():
-                return f
-        raise HTTPException(status_code=403, detail="You do not have access to this file.")
-    return f
+    await _assert_file_access(f, user, db)
+    return _visible_file(f, user)
 
 
 @router.post("", response_model=FileOut, status_code=201)
@@ -334,7 +452,7 @@ async def create_file(
     db.add(notesheet)
     await db.commit()
 
-    return await _load_file(efms_file.id, db)
+    return _visible_file(await _load_file(efms_file.id, db), user)
 
 
 @router.patch("/{file_id}", response_model=FileOut)
@@ -354,7 +472,7 @@ async def update_file(
     for field, val in body.model_dump(exclude_none=True).items():
         setattr(f, field, val)
     await db.commit()
-    return await _load_file(file_id, db)
+    return _visible_file(await _load_file(file_id, db), user)
 
 
 # ── Notesheet ─────────────────────────────────────────────────────────────────
@@ -390,7 +508,7 @@ async def save_notesheet(
         f.notesheet.version += 1
         f.notesheet.last_saved_by = user.id
     await db.commit()
-    return await _load_file(file_id, db)
+    return _visible_file(await _load_file(file_id, db), user)
 
 
 # ── Routing ───────────────────────────────────────────────────────────────────
@@ -404,18 +522,15 @@ async def route_file(
 ):
     f = await _load_file(file_id, db)
 
-    # Current holder can always act. For released files, any dept member of the creator can forward.
+    # Only the current holder can act. Released files have no current holder
+    # (cleared on release) and can no longer be forwarded directly — they must
+    # be reopened first (POST /docket/{file_id}/reopen, creator-only), which
+    # restores current_holder_id and lets the normal Forward flow take over.
     if f.current_holder_id != user.id:
-        can_act = False
-        if getattr(f, "is_released", False) and body.action == RouteAction.forward:
-            creator = await db.get(User, f.created_by)
-            if creator and creator.department_id and creator.department_id == user.department_id:
-                can_act = True
-        if not can_act:
-            raise HTTPException(
-                status_code=403,
-                detail="Only the current holder (or a dept member for released files) can act on this file."
-            )
+        raise HTTPException(
+            status_code=403,
+            detail="Only the current holder can act on this file."
+        )
 
     # Forward requires a destination user
     if body.action == RouteAction.forward and not body.to_user_id:
@@ -490,7 +605,7 @@ async def route_file(
                 f"Please log in to AVFU eFMS to take action.\n\nAVFU eFMS"
             )
 
-    return await _load_file(file_id, db)
+    return _visible_file(await _load_file(file_id, db), user)
 
 
 # ── Attachments ───────────────────────────────────────────────────────────────

@@ -6,7 +6,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api, FILES_BASE_URL, API_URL } from "@/services/api";
 import { toast } from "sonner";
 import { useUser, useActiveRole } from "@/stores/auth.store";
-import { cn, formatDate } from "@/lib/utils";
+import { cn, formatDate, isPreviewable } from "@/lib/utils";
 import {
   ChevronLeft, FileText, Download, ArrowRight,
   Loader2, AlertCircle, Lock, Clock, MessageSquare, Upload, X, PenLine,
@@ -15,24 +15,13 @@ import {
 import { motion, AnimatePresence } from "framer-motion";
 import PdfSignatureCanvas, { type SignatureStamp } from "@/components/signature/pdf-signature-canvas";
 import OtpVerifyModal from "@/components/signature/otp-verify-modal";
+import { PersonBadge, type PersonInfo } from "@/components/shared/person-badge";
 
-const PREVIEWABLE_MIME_TYPES = new Set([
-  "application/pdf",
-  "image/png", "image/jpeg", "image/gif", "image/webp", "image/svg+xml",
-  "text/plain",
-]);
-
-function isPreviewable(att: { mime_type: string | null; original_name: string }): boolean {
-  if (att.mime_type && PREVIEWABLE_MIME_TYPES.has(att.mime_type)) return true;
-  const ext = att.original_name.split(".").pop()?.toLowerCase();
-  return ["pdf", "png", "jpg", "jpeg", "gif", "webp", "svg", "txt"].includes(ext ?? "");
-}
-
-interface RouteEntry { id: string; from_user_id: string | null; to_user_id: string | null; action: string; remarks: string | null; is_current: boolean; created_at: string; }
-interface TrackEntry { id: string; type?: "route" | "sign"; from_user_id: string | null; to_user_id: string | null; from_user_name: string | null; to_user_name: string | null; action: string; remarks: string | null; is_current: boolean; created_at: string; }
+interface RouteEntry { id: string; from_user_id: string | null; to_user_id: string | null; action: string; remarks: string | null; is_current: boolean; created_at: string; from_user_info?: PersonInfo | null; to_user_info?: PersonInfo | null; }
+interface TrackEntry { id: string; type?: "route" | "sign"; from_user_id: string | null; to_user_id: string | null; from_user_name: string | null; to_user_name: string | null; from_user_info?: PersonInfo | null; to_user_info?: PersonInfo | null; action: string; remarks: string | null; is_current: boolean; created_at: string; }
 interface Attachment { id: string; original_name: string; file_size: number | null; mime_type: string | null; stored_name: string; created_at: string; }
 interface Notesheet { id: string; content: string; version: number; is_locked: boolean; }
-interface Signature { id: string; file_id: string; user_id: string; signer_name: string; pos_x: number; pos_y: number; page_number: number; status: "pending" | "verified"; signed_at: string | null; verified_at: string | null; }
+interface Signature { id: string; file_id: string; user_id: string; signer_name: string; signer_info?: PersonInfo | null; pos_x: number; pos_y: number; page_number: number; status: "pending" | "verified"; signed_at: string | null; verified_at: string | null; }
 interface EfmsFile {
   id: string; ref_number: string; subject: string; category: string;
   status: string; priority: string; is_confidential: boolean;
@@ -40,11 +29,12 @@ interface EfmsFile {
   recipient_id: string | null; recipient_name: string | null;
   created_at: string; updated_at: string;
   is_released: boolean;
+  creator_info?: PersonInfo | null; current_holder_info?: PersonInfo | null; recipient_info?: PersonInfo | null;
   notesheet: Notesheet | null; route_entries: RouteEntry[]; attachments: Attachment[];
   signatures: Signature[];
 }
-interface ForwardingRemark { id: string; remark: string; user_name: string; user_id: string; created_at: string; }
-interface SystemUser { id: string; email: string; full_name: string; active_role: string | null; designation: string | null; }
+interface ForwardingRemark { id: string; remark: string; user_name: string; user_id: string; created_at: string; user_info?: PersonInfo | null; to_user_info?: PersonInfo | null; }
+interface SystemUser { id: string; email: string; full_name: string; active_role: string | null; designation: string | null; department_name?: string | null; }
 
 const STATUS_STYLES: Record<string, { bg: string; text: string; label: string }> = {
   draft:      { bg: "bg-gray-100",  text: "text-gray-700",  label: "Draft" },
@@ -105,8 +95,9 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
   const displayStatus = isReleased ? "released" : (file?.status ?? "draft");
   const canForwardDraft = isHolder && isDraft;
   const canForwardAfter = isHolder && !isDraft && !isTerminal && !isReleased;
-  // Dept members can forward a released file (backend enforces same-dept check)
-  const canForwardReleased = isReleased && !isHolder;
+  // Released files can no longer be forwarded from here — the only supported
+  // way to move a released file again is to reopen it via New File -> Use
+  // Existing Released File (creator-only), which restores current_holder_id.
 
   // For confidential files: the only permitted recipient is the other participant.
   // created_by is always user A; recipient_id is always user B.
@@ -115,6 +106,14 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
     : null;
   const confidentialPartner = confidentialPartnerId
     ? users.find((u) => u.id === confidentialPartnerId) ?? null
+    : null;
+
+  // Latest route entry (route_entries is ordered by created_at on the
+  // backend) tells us who most recently forwarded the file to whoever holds
+  // it now — the recipient chosen at creation time is not the right answer
+  // once routing has actually started, and must never be shown as "From".
+  const latestRouteEntry = file?.route_entries.length
+    ? (file.route_entries.find((e) => e.is_current) ?? file.route_entries[file.route_entries.length - 1])
     : null;
 
   const submitAction = useMutation({
@@ -142,6 +141,9 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
       qc.invalidateQueries({ queryKey: ["my-docket"] });
       qc.invalidateQueries({ queryKey: ["docket-released"] });
       qc.invalidateQueries({ queryKey: ["notifications"] });
+      // After a successful forward the file leaves this user's hands — send
+      // them to the Docket rather than leaving them on the (now read-only) page.
+      router.push("/dashboard");
     } catch (err) {
       const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
       toast.error(msg ?? "Action failed.");
@@ -244,7 +246,26 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                 </span>
               </div>
               <h1 className="text-xl font-bold text-gray-900 truncate">{file.subject}</h1>
-              <p className="text-sm text-gray-500 mt-0.5">{file.category} · Created {formatDate(file.created_at, "relative")}{file.recipient_name ? ` · To: ${file.recipient_name}` : ""}</p>
+              <p className="text-sm text-gray-500 mt-0.5">{file.category} · Created {formatDate(file.created_at, "relative")}</p>
+              <div className="flex flex-wrap items-start gap-x-6 gap-y-1.5 mt-2">
+                {latestRouteEntry?.from_user_info ? (
+                  <div className="flex items-start gap-1.5">
+                    <span className="text-xs font-semibold text-gray-400 uppercase mt-0.5">From</span>
+                    <PersonBadge person={latestRouteEntry.from_user_info} compact />
+                  </div>
+                ) : (
+                  <div className="flex items-start gap-1.5">
+                    <span className="text-xs font-semibold text-gray-400 uppercase mt-0.5">From</span>
+                    <span className="text-sm text-gray-400 italic mt-0.5">Not yet forwarded</span>
+                  </div>
+                )}
+                {file.current_holder_info && (
+                  <div className="flex items-start gap-1.5">
+                    <span className="text-xs font-semibold text-gray-400 uppercase mt-0.5">Current Holder</span>
+                    <PersonBadge person={file.current_holder_info} compact />
+                  </div>
+                )}
+              </div>
             </div>
 
             {/* Action buttons */}
@@ -261,12 +282,6 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                   <ArrowRight size={14} /> Forward
                 </button>
               )}
-              {canForwardReleased && (
-                <button onClick={() => { if (confidentialPartnerId) setToUserId(confidentialPartnerId); setActionModal(true); }}
-                  className="flex items-center gap-1.5 px-3 py-2 bg-[#0D6E6E] text-white rounded-xl text-sm font-semibold hover:bg-[#178F8F]">
-                  <ArrowRight size={14} /> Forward
-                </button>
-              )}
             </div>
           </div>
 
@@ -278,7 +293,7 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
               displayStatus === "released" ? "bg-green-500" : "bg-amber-500")} />
             <p className="text-base text-gray-700">
               {displayStatus === "draft"      ? "Draft — not yet forwarded. Use 'Forward to Recipient' when ready." :
-               displayStatus === "active"     ? "Forwarded — awaiting review by the current holder." :
+               displayStatus === "active"     ? (isHolder ? "You are the current holder of this file." : "Forwarded — awaiting review by the current holder.") :
                displayStatus === "released"   ? "Released to the department." :
                displayStatus === "dispatched" ? "Officially dispatched." : "Active."}
             </p>
@@ -370,7 +385,7 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                                     {initials}
                                   </div>
                                   <div>
-                                    <p className="text-sm font-semibold text-gray-900 leading-tight">{r.user_name ?? "Unknown"}</p>
+                                    <PersonBadge person={r.user_info} fallback="Unknown" compact />
                                     {r.user_id === user?.id && (
                                       <p className="text-xs text-[#0D6E6E] font-medium leading-tight">You</p>
                                     )}
@@ -429,17 +444,22 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                               )}
                             </div>
                             {entry.type === "sign" ? (
-                              <p className="text-sm text-gray-600 mt-1">{entry.remarks}</p>
+                              <>
+                                <PersonBadge person={entry.from_user_info} fallback="System" className="mt-1" />
+                                {entry.remarks && <p className="text-sm text-gray-600 mt-1">{entry.remarks}</p>}
+                              </>
                             ) : (
                               <>
-                                <div className="flex items-center gap-2 mt-1 text-sm text-gray-600">
-                                  <span className="font-medium">{entry.from_user_name ?? "System"}</span>
-                                  {entry.to_user_name && <>
-                                    <ArrowRight size={13} className="text-gray-400 shrink-0" />
-                                    <span className="font-medium">{entry.to_user_name}</span>
-                                  </>}
+                                <div className="flex flex-col gap-1.5 mt-2 text-sm">
+                                  <PersonBadge person={entry.from_user_info} fallback="System" />
+                                  {entry.to_user_info && (
+                                    <>
+                                      <ArrowRight size={13} className="text-gray-400 rotate-90 shrink-0" />
+                                      <PersonBadge person={entry.to_user_info} />
+                                    </>
+                                  )}
                                 </div>
-                                {entry.remarks && <p className="text-sm text-gray-500 mt-1 italic">&ldquo;{entry.remarks}&rdquo;</p>}
+                                {entry.remarks && <p className="text-sm text-gray-500 mt-2 italic">&ldquo;{entry.remarks}&rdquo;</p>}
                               </>
                             )}
                           </div>
@@ -542,9 +562,9 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                             ? <CheckCircle2 size={16} className="text-emerald-500 shrink-0" />
                             : <Lock size={16} className="text-amber-500 shrink-0" />
                           }
-                          <div className="flex-1">
-                            <span className="font-semibold text-gray-800">{sig.signer_name}</span>
-                            <span className="text-gray-500 ml-2">· Page {sig.page_number}, {sig.pos_x.toFixed(0)}% × {sig.pos_y.toFixed(0)}%</span>
+                          <div className="flex-1 flex items-center gap-2 flex-wrap">
+                            <PersonBadge person={sig.signer_info} fallback={sig.signer_name || "Unknown"} compact />
+                            <span className="text-gray-500">· Page {sig.page_number}, {sig.pos_x.toFixed(0)}% × {sig.pos_y.toFixed(0)}%</span>
                           </div>
                           <span className={cn("px-2 py-0.5 rounded-full text-xs font-semibold",
                             sig.status === "verified" ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700")}>
@@ -622,10 +642,7 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                   confidentialPartner ? (
                     <div className="w-full border border-[#0D6E6E] bg-[#E6F4F4] rounded-xl px-4 py-3 text-base text-gray-900 flex items-center gap-2">
                       <Lock size={14} className="text-[#0D6E6E] shrink-0" />
-                      <span>
-                        {confidentialPartner.designation ? `${confidentialPartner.designation} — ` : ""}
-                        {confidentialPartner.full_name}
-                      </span>
+                      <PersonBadge person={confidentialPartner} compact />
                     </div>
                   ) : (
                     <p className="text-sm text-amber-600 bg-amber-50 rounded-xl p-3">Confidential partner not found.</p>
@@ -638,7 +655,7 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                     <option value="">Select…</option>
                     {users.map((u) => (
                       <option key={u.id} value={u.id}>
-                        {u.designation ? `${u.designation} — ` : ""}{u.full_name}
+                        {u.full_name}{u.designation ? ` — ${u.designation}` : ""}{u.department_name ? ` (${u.department_name})` : ""}
                       </option>
                     ))}
                   </select>

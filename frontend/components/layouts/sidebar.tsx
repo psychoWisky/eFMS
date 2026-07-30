@@ -1,7 +1,7 @@
 "use client";
 import { motion, AnimatePresence } from "framer-motion";
 import { usePathname } from "next/navigation";
-import { LayoutDashboard, ShieldCheck, ChevronLeft, ChevronRight, Search } from "lucide-react";
+import { LayoutDashboard, ShieldCheck, ChevronLeft, ChevronRight, Search, History } from "lucide-react";
 import { useActiveRole, type EfmsRole } from "@/stores/auth.store";
 import { cn } from "@/lib/utils";
 
@@ -10,6 +10,7 @@ interface NavItem { label: string; icon: React.ElementType; href: string; roles:
 const NAV_ITEMS: NavItem[] = [
   { label: "Dashboard",    icon: LayoutDashboard, href: "/dashboard", roles: ["efms_officer","efms_admin","registrar","dispatch_officer","hod","faculty"] },
   { label: "Search Files", icon: Search,          href: "/search",    roles: ["efms_officer","efms_admin","registrar","dispatch_officer","hod","faculty"] },
+  { label: "Tracking History", icon: History,     href: "/tracking",  roles: ["efms_officer","efms_admin","registrar","dispatch_officer","hod","faculty"] },
   { label: "Admin Panel",  icon: ShieldCheck,     href: "/admin",     roles: ["admin","super_admin"] },
 ];
 
