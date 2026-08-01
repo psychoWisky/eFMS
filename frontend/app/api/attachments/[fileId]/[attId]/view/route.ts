@@ -2,10 +2,10 @@ import { NextRequest, NextResponse } from "next/server";
 
 // Force IPv4 loopback: Node's fetch resolves "localhost" to ::1 first, which
 // hangs when the backend (uvicorn) only binds to 0.0.0.0 (IPv4).
-const BACKEND = (process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8001/api/v1").replace(
-  "://localhost",
-  "://127.0.0.1"
-);
+const BACKEND =
+  process.env.INTERNAL_API_URL ??
+  process.env.NEXT_PUBLIC_API_URL ??
+  "http://127.0.0.1:8001/api/v1";
 
 export async function GET(
   _req: NextRequest,
