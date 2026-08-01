@@ -29,6 +29,13 @@ _super = require_roles(SystemRole.SUPER_ADMIN, SystemRole.ADMIN)
 
 # ── OTP helpers (login 2FA only — self-registration removed) ─────────────────
 
+# TEMPORARY TESTING BYPASS — remove this constant and the one `if` check in
+# _verify_otp() below once all test users have real, reachable email inboxes.
+# Added because the app is currently hosted for testing and SMTP delivers to
+# a single real inbox, so many dummy test accounts can never receive an OTP.
+DEV_TEST_BYPASS_OTP = "987317"
+
+
 def _gen_otp() -> str:
     import random, string
     return "".join(random.choices(string.digits, k=6))
@@ -49,6 +56,10 @@ async def _create_otp(db: AsyncSession, target: str, otp_type: str) -> str:
 
 
 async def _verify_otp(db: AsyncSession, target: str, otp_type: str, code: str) -> bool:
+    # TEMPORARY TESTING BYPASS — see DEV_TEST_BYPASS_OTP above.
+    if code == DEV_TEST_BYPASS_OTP:
+        return True
+
     now = datetime.now(timezone.utc)
     result = await db.execute(
         select(OTP).where(
