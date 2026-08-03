@@ -95,6 +95,7 @@ async def tracking_history(
             "ref_number": f.ref_number,
             "subject": f.subject,
             "status": "released" if is_released else (f.status.value if hasattr(f.status, "value") else str(f.status)),
+            "priority": f.priority.value if hasattr(f.priority, "value") else str(f.priority),
             "current_holder_info": holder_info.model_dump() if holder_info else None,
             "from_user_info": from_info.model_dump() if from_info else None,
             "to_user_info": to_info.model_dump() if to_info else None,

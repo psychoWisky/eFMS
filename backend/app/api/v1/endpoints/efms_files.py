@@ -536,21 +536,6 @@ async def route_file(
     if body.action == RouteAction.forward and not body.to_user_id:
         raise HTTPException(status_code=400, detail="Please select a user to forward the file to.")
 
-    # Confidential files may only move between the original creator and original
-    # recipient. A draft created without a recipient has no partner yet — the
-    # first forward establishes it; every subsequent forward is then restricted
-    # to that same pair.
-    if f.is_confidential and body.action == RouteAction.forward and body.to_user_id:
-        if f.recipient_id is None:
-            f.recipient_id = body.to_user_id
-        else:
-            allowed = {f.created_by, f.recipient_id} - {user.id}
-            if body.to_user_id not in allowed:
-                raise HTTPException(
-                    status_code=403,
-                    detail="Confidential files can only be forwarded between the original sender and recipient.",
-                )
-
     for entry in f.route_entries:
         entry.is_current = False
 

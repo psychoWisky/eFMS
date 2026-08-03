@@ -3,10 +3,11 @@ import { useState } from "react";
 import { motion } from "framer-motion";
 import { useRouter } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
-import { Search, Plus, FileText, AlertCircle, ChevronRight, Loader2 } from "lucide-react";
+import { Search, Plus, FileText, ChevronRight, Loader2 } from "lucide-react";
 import { api } from "@/services/api";
 import { cn, formatDate, fileStatusBadgeClass, fileStatusLabel } from "@/lib/utils";
 import { EmptyState } from "@/components/feedback/empty-state";
+import { FileClassificationBadge } from "@/components/shared/file-classification-badge";
 
 interface EfmsFile {
   id: string;
@@ -101,18 +102,13 @@ export function FilesListPage() {
                   <tr key={file.id} className="cursor-pointer" onClick={() => router.push(`/files/${file.id}`)}>
                     <td>
                       <span className="font-mono text-[13px] text-[#4A5568] bg-[#F0F7F7] px-2 py-0.5 rounded whitespace-nowrap">{file.ref_number}</span>
-                      {file.priority === "urgent" && (
-                        <span className="ml-1.5 text-[11px] text-red-600 font-semibold flex items-center gap-0.5 mt-0.5">
-                          <AlertCircle size={11} /> Urgent
-                        </span>
-                      )}
                     </td>
                     <td className="font-medium text-[#1A1A2E] max-w-[260px]">
                       <p className="truncate">{file.subject}</p>
                     </td>
                     <td><span className="text-[13px] text-[#4A5568] bg-[#F5F7FA] px-2 py-0.5 rounded-md">{file.category}</span></td>
                     <td><span className={cn("badge", fileStatusBadgeClass(displayStatus))}>{fileStatusLabel(displayStatus)}</span></td>
-                    <td><span className="text-[13px] capitalize text-[#4A5568]">{file.priority}</span></td>
+                    <td><FileClassificationBadge priority={file.priority} compact /></td>
                     <td className="text-[#4A5568] whitespace-nowrap text-[14px]">{formatDate(file.updated_at, "relative")}</td>
                     <td onClick={(e) => e.stopPropagation()}>
                       <button onClick={() => router.push(`/files/${file.id}`)} className="btn btn-secondary btn-sm gap-1">

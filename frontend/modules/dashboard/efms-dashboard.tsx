@@ -6,11 +6,12 @@ import { useRouter } from "next/navigation";
 import { api } from "@/services/api";
 import { useUser, useActiveRole } from "@/stores/auth.store";
 import { cn, formatDate, matchesRefSuffix } from "@/lib/utils";
-import { Inbox, FolderOpen, FilePlus2, Loader2, Unlock, Eye, EyeOff, AlertCircle, Clock, Search, FilePlus, FolderSearch } from "lucide-react";
+import { Inbox, FolderOpen, FilePlus2, Loader2, Unlock, Eye, EyeOff, Clock, Search, FilePlus, FolderSearch } from "lucide-react";
 import { toast } from "sonner";
 import { NewFileForm } from "@/modules/files/new-file-page";
 import { ReopenFilePicker } from "@/modules/files/reopen-file-picker";
 import { PersonBadge, type PersonInfo } from "@/components/shared/person-badge";
+import { FileClassificationBadge } from "@/components/shared/file-classification-badge";
 
 interface EfmsFile {
   id: string; ref_number: string; subject: string; category: string;
@@ -179,12 +180,7 @@ export function EFMSDashboard() {
                             <p className="text-base font-semibold text-gray-900 truncate">{f.subject}</p>
                           </td>
                           <td className="px-5 py-4 text-base text-gray-600"><PersonBadge person={f.from_user_info} compact /></td>
-                          <td className="px-5 py-4">
-                            <span className={cn("px-2 py-1 rounded-full text-sm font-medium capitalize",
-                              f.priority === "urgent" ? "bg-red-100 text-red-700" : "bg-gray-100 text-gray-600")}>
-                              {f.priority === "urgent" && <AlertCircle size={12} className="inline mr-1" />}{f.priority}
-                            </span>
-                          </td>
+                          <td className="px-5 py-4"><FileClassificationBadge priority={f.priority} /></td>
                           <td className="px-5 py-4 text-base text-gray-500">
                             <span>{formatDate(f.updated_at, "relative")}</span>
                             {days >= 3 && <span className="block text-sm text-red-500 font-semibold">{days}d waiting</span>}

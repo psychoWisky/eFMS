@@ -9,13 +9,14 @@ import { useUser, useActiveRole } from "@/stores/auth.store";
 import { cn, formatDate, isPreviewable } from "@/lib/utils";
 import {
   ChevronLeft, FileText, Download, ArrowRight,
-  Loader2, AlertCircle, Lock, Clock, MessageSquare, Upload, X, PenLine,
+  Loader2, Lock, Clock, MessageSquare, Upload, X, PenLine,
   CheckCircle2, XCircle,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import PdfSignatureCanvas, { type SignatureStamp } from "@/components/signature/pdf-signature-canvas";
 import OtpVerifyModal from "@/components/signature/otp-verify-modal";
 import { PersonBadge, type PersonInfo } from "@/components/shared/person-badge";
+import { FileClassificationBadge, FileClassificationBanner } from "@/components/shared/file-classification-badge";
 
 interface RouteEntry { id: string; from_user_id: string | null; to_user_id: string | null; action: string; remarks: string | null; is_current: boolean; created_at: string; from_user_info?: PersonInfo | null; to_user_info?: PersonInfo | null; }
 interface TrackEntry { id: string; type?: "route" | "sign"; from_user_id: string | null; to_user_id: string | null; from_user_name: string | null; to_user_name: string | null; from_user_info?: PersonInfo | null; to_user_info?: PersonInfo | null; action: string; remarks: string | null; is_current: boolean; created_at: string; }
@@ -98,15 +99,6 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
   // Released files can no longer be forwarded from here — the only supported
   // way to move a released file again is to reopen it via New File -> Use
   // Existing Released File (creator-only), which restores current_holder_id.
-
-  // For confidential files: the only permitted recipient is the other participant.
-  // created_by is always user A; recipient_id is always user B.
-  const confidentialPartnerId = file?.is_confidential
-    ? (user?.id === file.created_by ? file.recipient_id : file.created_by) ?? null
-    : null;
-  const confidentialPartner = confidentialPartnerId
-    ? users.find((u) => u.id === confidentialPartnerId) ?? null
-    : null;
 
   // Latest route entry (route_entries is ordered by created_at on the
   // backend) tells us who most recently forwarded the file to whoever holds
@@ -234,12 +226,15 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
       <div className="flex-1 flex flex-col overflow-hidden">
         {/* File header */}
         <div className="bg-white border-b border-gray-200 px-6 py-4">
+          {(file.priority === "secret" || file.priority === "urgent") && (
+            <div className="mb-3"><FileClassificationBanner priority={file.priority} /></div>
+          )}
           <div className="flex items-start justify-between gap-4">
             <div className="flex-1 min-w-0">
               <div className="flex items-center gap-2 mb-1 flex-wrap">
                 <span className="font-mono text-sm font-bold text-[#0D6E6E] bg-[#E6F4F4] px-2 py-0.5 rounded">{file.ref_number}</span>
                 <span className={cn("px-2 py-0.5 rounded-full text-sm font-semibold", statusStyle.bg, statusStyle.text)}>{statusStyle.label}</span>
-                {file.priority === "urgent" && <span className="flex items-center gap-1 text-sm text-red-600 font-bold"><AlertCircle size={13} /> URGENT</span>}
+                <FileClassificationBadge priority={file.priority} />
                 <span className={cn("text-sm font-semibold px-2 py-0.5 rounded-full",
                   days > 7 ? "text-red-600 bg-red-50" : days > 3 ? "text-amber-600 bg-amber-50" : "text-green-600 bg-green-50")}>
                   {days}d elapsed
@@ -271,13 +266,13 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
             {/* Action buttons */}
             <div className="flex items-center gap-2 shrink-0">
               {canForwardDraft && (
-                <button onClick={() => { if (confidentialPartnerId) setToUserId(confidentialPartnerId); setActionModal(true); }}
+                <button onClick={() => setActionModal(true)}
                   className="flex items-center gap-1.5 px-4 py-2 bg-[#0D6E6E] text-white rounded-xl text-sm font-semibold hover:bg-[#178F8F]">
                   <ArrowRight size={15} /> Forward to Recipient
                 </button>
               )}
               {canForwardAfter && (
-                <button onClick={() => { if (confidentialPartnerId) setToUserId(confidentialPartnerId); setActionModal(true); }}
+                <button onClick={() => setActionModal(true)}
                   className="flex items-center gap-1.5 px-3 py-2 bg-[#0D6E6E] text-white rounded-xl text-sm font-semibold hover:bg-[#178F8F]">
                   <ArrowRight size={14} /> Forward
                 </button>
@@ -632,22 +627,13 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                 </h3>
               </div>
 
-              {/* Forward: confidential files locked to the one permitted partner; others show full list */}
+              {/* Forward: any eligible user — Confidential files use the same picker as Normal files */}
               <div className="mb-4">
                 <label className="block text-base font-semibold text-gray-700 mb-2">
                   {isDraft ? "Select Recipient *" : "Forward To *"}
                 </label>
 
-                {file?.is_confidential ? (
-                  confidentialPartner ? (
-                    <div className="w-full border border-[#0D6E6E] bg-[#E6F4F4] rounded-xl px-4 py-3 text-base text-gray-900 flex items-center gap-2">
-                      <Lock size={14} className="text-[#0D6E6E] shrink-0" />
-                      <PersonBadge person={confidentialPartner} compact />
-                    </div>
-                  ) : (
-                    <p className="text-sm text-amber-600 bg-amber-50 rounded-xl p-3">Confidential partner not found.</p>
-                  )
-                ) : users.length === 0 ? (
+                {users.length === 0 ? (
                   <p className="text-sm text-amber-600 bg-amber-50 rounded-xl p-3">No users available.</p>
                 ) : (
                   <select value={toUserId} onChange={(e) => setToUserId(e.target.value)}

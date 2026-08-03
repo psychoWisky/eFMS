@@ -4,7 +4,8 @@ import { useRouter } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/services/api";
 import { cn, formatDate } from "@/lib/utils";
-import { Search, Loader2, FileText, Eye, AlertCircle } from "lucide-react";
+import { Search, Loader2, FileText, Eye } from "lucide-react";
+import { FileClassificationBadge } from "@/components/shared/file-classification-badge";
 
 interface SearchResult {
   id: string; ref_number: string; subject: string; category: string;
@@ -141,12 +142,7 @@ export function EFMSSearchPage() {
                           {displayStatus}
                         </span>
                       </td>
-                      <td className="px-5 py-3">
-                        <span className={cn("px-2 py-0.5 rounded-full text-xs font-medium capitalize",
-                          f.priority === "urgent" ? "bg-red-100 text-red-700 flex items-center gap-1" : "bg-gray-100 text-gray-600")}>
-                          {f.priority === "urgent" && <AlertCircle size={11} className="inline" />} {f.priority}
-                        </span>
-                      </td>
+                      <td className="px-5 py-3"><FileClassificationBadge priority={f.priority} compact /></td>
                       <td className="px-5 py-3 text-sm text-gray-500">{formatDate(f.created_at)}</td>
                       <td className="px-5 py-3">
                         <button onClick={() => router.push(`/files/${f.id}`)}

@@ -7,11 +7,12 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "@/services/api";
 import { cn, formatDate, matchesRefSuffix, resolveDateRange, fileStatusBadgeClass, fileStatusLabel, type DateRangePreset } from "@/lib/utils";
 import { PersonBadge, type PersonInfo } from "@/components/shared/person-badge";
+import { FileClassificationBadge } from "@/components/shared/file-classification-badge";
 import { Search, Eye, Loader2, History } from "lucide-react";
 import { TimelineModal } from "./timeline-modal";
 
 interface TrackingItem {
-  file_id: string; ref_number: string; subject: string; status: string;
+  file_id: string; ref_number: string; subject: string; status: string; priority: string;
   current_holder_info: PersonInfo | null;
   from_user_info: PersonInfo | null;
   to_user_info: PersonInfo | null;
@@ -108,7 +109,7 @@ export function FileTrackingHistoryPage() {
             <table className="w-full">
               <thead className="bg-gray-50 border-b border-gray-200">
                 <tr>
-                  {["File Number", "Subject", "Status", "Current Holder", "From", "To", "Forwarded", "Last Action", "Action"].map((h) => (
+                  {["File Number", "Subject", "Status", "Classification", "Current Holder", "From", "To", "Forwarded", "Last Action", "Action"].map((h) => (
                     <th key={h} className="text-left px-4 py-3 text-sm font-semibold text-gray-600 whitespace-nowrap">{h}</th>
                   ))}
                 </tr>
@@ -119,6 +120,7 @@ export function FileTrackingHistoryPage() {
                     <td className="px-4 py-3"><span className="font-mono text-xs font-bold text-[#0D6E6E] bg-[#E6F4F4] px-2 py-1 rounded whitespace-nowrap">{f.ref_number}</span></td>
                     <td className="px-4 py-3 max-w-[220px]"><p className="text-sm font-medium text-gray-900 truncate">{f.subject}</p></td>
                     <td className="px-4 py-3"><span className={cn("badge text-xs", fileStatusBadgeClass(f.status))}>{fileStatusLabel(f.status)}</span></td>
+                    <td className="px-4 py-3"><FileClassificationBadge priority={f.priority} compact /></td>
                     <td className="px-4 py-3"><PersonBadge person={f.current_holder_info} compact /></td>
                     <td className="px-4 py-3"><PersonBadge person={f.from_user_info} compact /></td>
                     <td className="px-4 py-3"><PersonBadge person={f.to_user_info} compact /></td>
