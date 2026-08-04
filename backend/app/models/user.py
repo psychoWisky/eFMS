@@ -23,6 +23,22 @@ class SystemRole(str, enum.Enum):
     DISPATCH_OFFICER = "dispatch_officer"
 
 
+# Single source of truth for "which roles may participate in eFMS administrative
+# workflows" — user creation/edit and every recipient-picker endpoint validate
+# against this set rather than each maintaining their own role list. HOD and
+# FACULTY are included deliberately: they may legitimately route files once
+# AMS/eFMS user sync exists. Student/Academic Cell/DPGS/Result Branch are
+# academic-only roles with no administrative function in eFMS and are excluded.
+# This is independent of where a user record originates (local DB today,
+# a synchronized/shared store later) — only active_role is ever consulted.
+EFMS_ASSIGNABLE_ROLES = frozenset({
+    SystemRole.SUPER_ADMIN, SystemRole.ADMIN,
+    SystemRole.EFMS_OFFICER, SystemRole.EFMS_ADMIN,
+    SystemRole.REGISTRAR, SystemRole.DISPATCH_OFFICER,
+    SystemRole.HOD, SystemRole.FACULTY,
+})
+
+
 class Gender(str, enum.Enum):
     MALE = "male"
     FEMALE = "female"

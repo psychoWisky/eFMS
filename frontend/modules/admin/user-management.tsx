@@ -23,7 +23,10 @@ interface AdminUser {
   active_role: string | null; is_active: boolean; must_change_password: boolean; can_sign: boolean;
 }
 
+// Mirrors backend EFMS_ASSIGNABLE_ROLES (app/models/user.py) — keep in sync.
 const ROLE_OPTIONS = [
+  { value: "super_admin", label: "Super Admin" },
+  { value: "admin", label: "Admin" },
   { value: "efms_officer", label: "eFMS Officer" },
   { value: "efms_admin", label: "eFMS Admin" },
   { value: "registrar", label: "Registrar" },

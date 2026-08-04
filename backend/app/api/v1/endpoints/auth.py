@@ -19,7 +19,7 @@ from app.core.security import (
 )
 from app.core.config import settings
 from app.core.dependencies import get_current_user, require_roles
-from app.models.user import User, UserRole, RefreshToken, SystemRole
+from app.models.user import User, UserRole, RefreshToken, SystemRole, EFMS_ASSIGNABLE_ROLES
 from app.models.efms_extra import OTP
 from app.schemas.auth import LoginRequest, TokenResponse, RefreshRequest, UserBrief
 
@@ -372,6 +372,8 @@ async def create_user(
     role = role_map.get(body.role)
     if not role:
         raise HTTPException(400, "Invalid role.")
+    if role not in EFMS_ASSIGNABLE_ROLES:
+        raise HTTPException(400, "This role cannot be assigned to eFMS users.")
     if not is_password_policy_compliant(body.temp_password):
         raise HTTPException(400, PASSWORD_POLICY_MESSAGE)
 
@@ -453,6 +455,12 @@ async def edit_user(
         role = role_map.get(body.role)
         if not role:
             raise HTTPException(400, "Invalid role.")
+        # Grandfather legacy roles: re-submitting a user's existing role is a
+        # no-op regardless of the allow-list, so editing other fields on a
+        # legacy-role user never breaks just because their role predates
+        # EFMS_ASSIGNABLE_ROLES. Only an actual change is checked against it.
+        if role != user.active_role and role not in EFMS_ASSIGNABLE_ROLES:
+            raise HTTPException(400, "This role cannot be assigned to eFMS users.")
         await _set_single_role(db, user, role)
 
     await db.commit()

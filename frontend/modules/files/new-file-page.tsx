@@ -13,9 +13,12 @@ import { TableCell } from "@tiptap/extension-table-cell";
 import { TableHeader } from "@tiptap/extension-table-header";
 import { Loader2, Upload, X, FileText, Send, AlertTriangle, CheckCircle2, Bold, Italic, Underline as UIcon, AlignLeft, AlignCenter, AlignRight, List, ListOrdered, Grid2x2 } from "lucide-react";
 import { PersonBadge } from "@/components/shared/person-badge";
+import { SearchableSelect } from "@/components/shared/searchable-select";
 
 interface DropItem { id: string; name: string; label?: string; is_active?: boolean; }
-interface SystemUser { id: string; full_name: string; designation: string | null; active_role: string | null; department_name?: string | null; }
+interface Establishment { id: string; name: string; }
+interface DeptItem { id: string; name: string; establishment_id: string | null; }
+interface SystemUser { id: string; full_name: string; designation: string | null; active_role: string | null; department_name?: string | null; employee_code?: string | null; }
 interface Annexure { file: File; name: string; tag: string; }
 
 interface NewFileFormProps { onSuccess?: () => void; }
@@ -33,6 +36,8 @@ export function NewFileForm({ onSuccess }: NewFileFormProps) {
   // only priority that implies is_confidential=true; there is no separate toggle.
   const isConfidential = priority.toLowerCase() === "secret";
   const [recipientId, setRecipientId] = useState("");
+  const [officeId, setOfficeId] = useState("");
+  const [sectionId, setSectionId] = useState("");
   const [draftRestored, setDraftRestored] = useState(false);
   const autoSaveRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [annexures, setAnnexures] = useState<Annexure[]>([]);
@@ -41,10 +46,47 @@ export function NewFileForm({ onSuccess }: NewFileFormProps) {
 
   const { data: categories = [] } = useQuery<DropItem[]>({ queryKey: ["admin-categories"], queryFn: async () => (await api.get("/admin/categories")).data });
   const { data: priorities = [] } = useQuery<DropItem[]>({ queryKey: ["admin-priorities"], queryFn: async () => (await api.get("/admin/priorities")).data });
-  const { data: allUsers = [] } = useQuery<SystemUser[]>({ queryKey: ["admin-users"], queryFn: async () => (await api.get("/admin/users")).data });
+
+  // Office / Section: reuse the existing Establishment/Department APIs — same
+  // cascading pattern already used elsewhere in the app. Both are optional
+  // filters on the recipient list below, never required to pick a recipient.
+  const { data: offices = [] } = useQuery<Establishment[]>({
+    queryKey: ["establishments"],
+    queryFn: async () => (await api.get("/admin/establishments")).data,
+  });
+  const { data: sections = [] } = useQuery<DeptItem[]>({
+    queryKey: ["departments", officeId],
+    queryFn: async () => (await api.get(`/admin/departments?establishment_id=${officeId}`)).data,
+    enabled: !!officeId,
+  });
+
+  // Recipient list — /admin/users extended with optional establishment_id/
+  // department_id filters; omitting both (the default) returns every active
+  // user exactly as before, so this is backward compatible with every other
+  // consumer of this endpoint.
+  const { data: allUsers = [], isFetching: loadingUsers } = useQuery<SystemUser[]>({
+    queryKey: ["admin-users", officeId, sectionId],
+    queryFn: async () => {
+      const params = new URLSearchParams();
+      if (officeId) params.set("establishment_id", officeId);
+      if (sectionId) params.set("department_id", sectionId);
+      return (await api.get(`/admin/users?${params.toString()}`)).data;
+    },
+  });
 
   const activeCategories = categories.filter((c) => c.is_active !== false);
   const activePriorities = priorities.filter((p) => p.is_active !== false);
+
+  // If the currently selected recipient falls outside the active filter
+  // (Office/Section changed, or the recipient was otherwise excluded), clear
+  // it rather than silently keeping a hidden, filtered-out selection. Wait
+  // for the filtered list to finish loading first, so an in-flight refetch
+  // doesn't transiently clear a still-valid selection.
+  useEffect(() => {
+    if (!loadingUsers && recipientId && !allUsers.some((u) => u.id === recipientId)) {
+      setRecipientId("");
+    }
+  }, [allUsers, loadingUsers, recipientId]);
 
   // Tiptap WYSIWYG editor
   const editor = useEditor({
@@ -242,22 +284,47 @@ export function NewFileForm({ onSuccess }: NewFileFormProps) {
           </p>
         )}
 
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-5 mt-5">
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-5 mt-5">
+          <div>
+            <label className="block text-base font-semibold text-gray-700 mb-2">Office</label>
+            <p className="text-sm text-gray-400 mb-2">Optional — narrows the recipient list below.</p>
+            <SearchableSelect
+              options={offices.map((o) => ({ value: o.id, label: o.name }))}
+              value={officeId}
+              onChange={(v) => { setOfficeId(v); setSectionId(""); }}
+              placeholder="All offices…"
+              searchPlaceholder="Search offices…"
+            />
+          </div>
+          <div>
+            <label className="block text-base font-semibold text-gray-700 mb-2">Section</label>
+            <p className="text-sm text-gray-400 mb-2">Optional — requires an Office first.</p>
+            <SearchableSelect
+              options={sections.map((s) => ({ value: s.id, label: s.name }))}
+              value={sectionId}
+              onChange={setSectionId}
+              placeholder={officeId ? "All sections…" : "Select an Office first"}
+              searchPlaceholder="Search sections…"
+              disabled={!officeId}
+            />
+          </div>
           <div>
             <label className="block text-base font-semibold text-gray-700 mb-2">Recipient (optional)</label>
             <p className="text-sm text-gray-400 mb-2">The file is saved as a Draft. You can choose a recipient now or leave it for later — Forward is what actually sends it.</p>
-            {allUsers.length === 0 ? (
-              <p className="text-sm text-amber-600 bg-amber-50 rounded-xl p-3">No users available. Check that users have been approved.</p>
+            {!loadingUsers && allUsers.length === 0 ? (
+              <p className="text-sm text-amber-600 bg-amber-50 rounded-xl p-3">No users found for this filter.</p>
             ) : (
-              <select value={recipientId} onChange={(e) => setRecipientId(e.target.value)}
-                className="w-full border border-gray-300 rounded-xl px-4 py-3 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]">
-                <option value="">No recipient yet…</option>
-                {allUsers.map((u) => (
-                  <option key={u.id} value={u.id}>
-                    {u.full_name}{u.designation ? ` — ${u.designation}` : ""}{u.department_name ? ` (${u.department_name})` : ""}
-                  </option>
-                ))}
-              </select>
+              <SearchableSelect
+                options={allUsers.map((u) => ({
+                  value: u.id,
+                  label: u.employee_code ? `${u.full_name} (${u.employee_code})` : u.full_name,
+                }))}
+                value={recipientId}
+                onChange={setRecipientId}
+                placeholder="No recipient yet…"
+                searchPlaceholder="Search by name or employee code…"
+                disabled={loadingUsers}
+              />
             )}
             {selectedRecipient && (
               <p className="text-sm text-[#0D6E6E] mt-1.5 flex items-center gap-2">

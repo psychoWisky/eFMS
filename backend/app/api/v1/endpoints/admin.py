@@ -1,7 +1,7 @@
 """Super-admin endpoints: manage categories, priorities, recipients, notifications, users."""
 from typing import Optional, List
 from uuid import UUID
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -10,7 +10,7 @@ from pydantic import BaseModel
 
 from app.db.base import get_db
 from app.core.dependencies import require_roles, get_current_user
-from app.models.user import User, SystemRole
+from app.models.user import User, SystemRole, EFMS_ASSIGNABLE_ROLES
 from app.models.admin import FileCategory, FilePriority, FileRecipient, Notification
 from app.models.organization import Establishment, Department
 
@@ -50,6 +50,7 @@ class RecipientOut(BaseModel):
 class UserOut(BaseModel):
     id: UUID; email: str; full_name: str; active_role: Optional[str]; designation: Optional[str]
     department_name: Optional[str] = None
+    employee_code: Optional[str] = None
     model_config = {"from_attributes": True}
 
     @classmethod
@@ -57,7 +58,8 @@ class UserOut(BaseModel):
         return cls(id=u.id, email=u.email, full_name=u.full_name,
                    active_role=u.active_role.value if u.active_role else None,
                    designation=getattr(u, "designation", None),
-                   department_name=u.department.name if u.department else None)
+                   department_name=u.department.name if u.department else None,
+                   employee_code=getattr(u, "employee_code", None))
 
 class NotificationOut(BaseModel):
     id: UUID; title: str; message: Optional[str]; type: str
@@ -197,16 +199,29 @@ async def delete_recipient(rid: UUID, db: AsyncSession = Depends(get_db), _=Depe
         )
 
 
-# ── Users list (for forwarding picker) ───────────────────────────────────────
+# ── Users list (recipient/forward/signature pickers) ─────────────────────────
+# Shared by every user-picker in the app (New File recipient, Forward dialog,
+# Signature Permission grant). Scoped to EFMS_ASSIGNABLE_ROLES so non-
+# administrative accounts (e.g. Student) never appear as selectable, without
+# any consumer needing its own filter.
 
 @router.get("/users", response_model=List[UserOut])
-async def list_users(db: AsyncSession = Depends(get_db), current_user: User = Depends(_any_role)):
-    r = await db.execute(
-        select(User)
-        .where(User.is_active == True, User.id != current_user.id)
-        .options(selectinload(User.department))
-        .order_by(User.first_name)
+async def list_users(
+    establishment_id: Optional[UUID] = Query(None, description="Office filter — optional"),
+    department_id: Optional[UUID] = Query(None, description="Section filter — optional"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(_any_role),
+):
+    q = select(User).where(
+        User.is_active == True,
+        User.id != current_user.id,
+        User.active_role.in_(EFMS_ASSIGNABLE_ROLES),
     )
+    if establishment_id:
+        q = q.where(User.establishment_id == establishment_id)
+    if department_id:
+        q = q.where(User.department_id == department_id)
+    r = await db.execute(q.options(selectinload(User.department)).order_by(User.first_name))
     return [UserOut.from_user(u) for u in r.scalars().all()]
 
 
