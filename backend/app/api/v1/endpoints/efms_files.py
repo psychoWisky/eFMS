@@ -56,9 +56,17 @@ _ADMIN_ROLES = {SystemRole.SUPER_ADMIN, SystemRole.ADMIN, SystemRole.EFMS_ADMIN,
 # A Draft file (metadata + notesheet) is editable for only this long after creation.
 DRAFT_EDIT_WINDOW = timedelta(minutes=30)
 
+# An uploaded attachment may only be deleted by its uploader within this long
+# of the upload — reuses the same "created_at + window" pattern as DRAFT_EDIT_WINDOW.
+ATTACHMENT_DELETE_WINDOW = timedelta(minutes=5)
+
 
 def _draft_edit_expired(f: EfmsFile) -> bool:
     return datetime.now(timezone.utc) - f.created_at > DRAFT_EDIT_WINDOW
+
+
+def _attachment_delete_expired(att: FileAttachment) -> bool:
+    return datetime.now(timezone.utc) - att.created_at > ATTACHMENT_DELETE_WINDOW
 
 router = APIRouter(prefix="/efms/files", tags=["eFMS Files"])
 
@@ -463,13 +471,21 @@ async def update_file(
     user: User = Depends(get_current_verified_user),
 ):
     f = await _load_file(file_id, db)
-    if f.created_by != user.id and user.active_role not in ("efms_admin", "registrar", "admin"):
+    if f.created_by != user.id and user.active_role not in _ADMIN_ROLES:
         raise HTTPException(status_code=403, detail="Only the file creator can update metadata.")
     if f.status != FileStatus.draft:
         raise HTTPException(status_code=400, detail="Metadata can only be edited while the file is a Draft.")
     if _draft_edit_expired(f):
         raise HTTPException(status_code=400, detail="Draft editing window (30 minutes) has expired.")
-    for field, val in body.model_dump(exclude_none=True).items():
+
+    update_data = body.model_dump(exclude_none=True)
+    # recipient_id is authoritative — always re-resolve recipient_name from the
+    # user record (same pattern as create_file) rather than trusting whatever
+    # name the client sends alongside it.
+    if "recipient_id" in update_data:
+        rec_user = await db.get(User, update_data["recipient_id"])
+        update_data["recipient_name"] = rec_user.full_name if rec_user else update_data.get("recipient_name")
+    for field, val in update_data.items():
         setattr(f, field, val)
     await db.commit()
     return _visible_file(await _load_file(file_id, db), user)
@@ -649,6 +665,10 @@ async def delete_attachment(
     att = await db.get(FileAttachment, att_id)
     if not att or att.file_id != file_id:
         raise HTTPException(status_code=404, detail="Attachment not found.")
+    if att.uploaded_by != user.id:
+        raise HTTPException(status_code=403, detail="Only the uploader can delete this attachment.")
+    if _attachment_delete_expired(att):
+        raise HTTPException(status_code=400, detail="Attachment deletion window (5 minutes) has expired.")
     # Remove file from disk
     dest = os.path.join(os.path.abspath(settings.UPLOAD_DIR), att.stored_name)
     if os.path.exists(dest):

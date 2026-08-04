@@ -54,6 +54,9 @@ class FileUpdate(BaseModel):
     priority: Optional[FilePriority] = None
     due_date: Optional[datetime] = None
     is_confidential: Optional[bool] = None
+    department_id: Optional[UUID] = None
+    recipient_id: Optional[UUID] = None
+    recipient_name: Optional[str] = None
 
 
 class RouteEntryOut(BaseModel):

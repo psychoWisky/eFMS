@@ -10,23 +10,40 @@ import { cn, formatDate, isPreviewable } from "@/lib/utils";
 import {
   ChevronLeft, FileText, Download, ArrowRight,
   Loader2, Lock, Clock, MessageSquare, Upload, X, PenLine,
-  CheckCircle2, XCircle,
+  CheckCircle2, XCircle, Trash2, Pencil, Save, AlertCircle,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import PdfSignatureCanvas, { type SignatureStamp } from "@/components/signature/pdf-signature-canvas";
 import OtpVerifyModal from "@/components/signature/otp-verify-modal";
 import { PersonBadge, type PersonInfo } from "@/components/shared/person-badge";
 import { FileClassificationBadge, FileClassificationBanner } from "@/components/shared/file-classification-badge";
+import { SearchableSelect } from "@/components/shared/searchable-select";
+import { useRichTextEditor, RichTextToolbar } from "@/components/shared/rich-text-editor";
+import { EditorContent } from "@tiptap/react";
+
+const DRAFT_EDIT_WINDOW_MS = 30 * 60 * 1000;
+const ATTACHMENT_DELETE_WINDOW_MS = 5 * 60 * 1000;
+
+// Compact prose styling for rendering stored notesheet HTML inside a
+// Notesheet History card (smaller than the main Initial Notesheet document,
+// since these sit inside a timeline entry rather than being the page's
+// primary content).
+const NOTESHEET_PROSE_CLASS = "prose prose-sm max-w-none leading-relaxed " +
+  "[&_h1]:text-lg [&_h1]:font-bold [&_h1]:mt-2 [&_h1]:mb-1 " +
+  "[&_h2]:text-base [&_h2]:font-bold [&_h2]:mt-2 [&_h2]:mb-1 " +
+  "[&_h3]:text-sm [&_h3]:font-semibold [&_h3]:mt-1.5 [&_h3]:mb-1 " +
+  "[&_p]:mb-2 [&_ol]:pl-5 [&_ul]:pl-5 [&_li]:mb-0.5 [&_strong]:font-bold";
 
 interface RouteEntry { id: string; from_user_id: string | null; to_user_id: string | null; action: string; remarks: string | null; is_current: boolean; created_at: string; from_user_info?: PersonInfo | null; to_user_info?: PersonInfo | null; }
 interface TrackEntry { id: string; type?: "route" | "sign"; from_user_id: string | null; to_user_id: string | null; from_user_name: string | null; to_user_name: string | null; from_user_info?: PersonInfo | null; to_user_info?: PersonInfo | null; action: string; remarks: string | null; is_current: boolean; created_at: string; }
-interface Attachment { id: string; original_name: string; file_size: number | null; mime_type: string | null; stored_name: string; created_at: string; }
+interface Attachment { id: string; original_name: string; file_size: number | null; mime_type: string | null; stored_name: string; created_at: string; uploaded_by: string; }
 interface Notesheet { id: string; content: string; version: number; is_locked: boolean; }
 interface Signature { id: string; file_id: string; user_id: string; signer_name: string; signer_info?: PersonInfo | null; pos_x: number; pos_y: number; page_number: number; status: "pending" | "verified"; signed_at: string | null; verified_at: string | null; }
 interface EfmsFile {
   id: string; ref_number: string; subject: string; category: string;
   status: string; priority: string; is_confidential: boolean;
   created_by: string; current_holder_id: string | null;
+  department_id: string | null;
   recipient_id: string | null; recipient_name: string | null;
   created_at: string; updated_at: string;
   is_released: boolean;
@@ -36,6 +53,8 @@ interface EfmsFile {
 }
 interface ForwardingRemark { id: string; remark: string; user_name: string; user_id: string; created_at: string; user_info?: PersonInfo | null; to_user_info?: PersonInfo | null; }
 interface SystemUser { id: string; email: string; full_name: string; active_role: string | null; designation: string | null; department_name?: string | null; }
+interface DropItem { id: string; name: string; label?: string; is_active?: boolean; }
+interface DeptItem { id: string; name: string; }
 
 const STATUS_STYLES: Record<string, { bg: string; text: string; label: string }> = {
   draft:      { bg: "bg-gray-100",  text: "text-gray-700",  label: "Draft" },
@@ -52,7 +71,26 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
   const role = useActiveRole();
   const qc = useQueryClient();
   const [activeTab, setActiveTab] = useState<"notesheet" | "track" | "sign">("notesheet");
-  const [actionModal, setActionModal] = useState(false);
+  // First-forward (Draft -> Active): confirmation-only, no recipient/notesheet re-entry.
+  const [showFirstForwardConfirm, setShowFirstForwardConfirm] = useState(false);
+  // Subsequent forwards: inline recipient + notesheet-entry panel (no modal).
+  const [toUserId, setToUserId] = useState("");
+  const [remarks, setRemarks] = useState("");
+  const [modalFiles, setModalFiles] = useState<{ file: File; name: string; tag: string }[]>([]);
+  // Draft editing (30-minute window)
+  const [editingDraft, setEditingDraft] = useState(false);
+  const [draftSubject, setDraftSubject] = useState("");
+  const [draftDepartmentId, setDraftDepartmentId] = useState("");
+  const [draftCategory, setDraftCategory] = useState("");
+  const [draftPriority, setDraftPriority] = useState("");
+  const [draftRecipientId, setDraftRecipientId] = useState("");
+  const [draftNotesheet, setDraftNotesheet] = useState("");
+  // Ticks every 30s so edit/delete windows expire live without a manual refresh.
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setTick((t) => t + 1), 30_000);
+    return () => clearInterval(id);
+  }, []);
   // Signature state
   const [pendingStamp, setPendingStamp] = useState<{ pos_x: number; pos_y: number } | null>(null);
   const [pendingSignatureId, setPendingSignatureId] = useState<string | null>(null);
@@ -60,10 +98,7 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
   const [otpError, setOtpError] = useState<string | null>(null);
   const [otpLoading, setOtpLoading] = useState(false);
   const [actionType] = useState<"forward">("forward");
-  const [toUserId, setToUserId] = useState("");
-  const [remarks, setRemarks] = useState("");
   const [selectedPdf, setSelectedPdf] = useState<Attachment | null>(null);
-  const [modalFiles, setModalFiles] = useState<{ file: File; name: string; tag: string }[]>([]);
 
   const { data: file, isLoading, isError } = useQuery<EfmsFile>({
     queryKey: ["efms-file", fileId],
@@ -88,10 +123,32 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
     queryFn: async () => (await api.get("/admin/users")).data,
   });
 
+  // Draft-edit dropdown sources — same endpoints New File creation already uses.
+  const { data: departments = [] } = useQuery<DeptItem[]>({
+    queryKey: ["admin-departments"],
+    queryFn: async () => (await api.get("/admin/departments")).data,
+    enabled: editingDraft,
+  });
+  const { data: categories = [] } = useQuery<DropItem[]>({
+    queryKey: ["admin-categories"],
+    queryFn: async () => (await api.get("/admin/categories")).data,
+    enabled: editingDraft,
+  });
+  const { data: priorities = [] } = useQuery<DropItem[]>({
+    queryKey: ["admin-priorities"],
+    queryFn: async () => (await api.get("/admin/priorities")).data,
+    enabled: editingDraft,
+  });
+
   const isHolder = file?.current_holder_id === user?.id;
+  const isCreator = file?.created_by === user?.id;
   const isDraft = file?.status === "draft";
   const isTerminal = file?.status === "dispatched";
   const isReleased = file?.is_released ?? false;
+  // Backend is the real enforcement (DRAFT_EDIT_WINDOW); this mirrors it
+  // client-side purely so the Edit Draft affordance disappears on its own.
+  const draftEditExpired = file ? Date.now() - new Date(file.created_at).getTime() > DRAFT_EDIT_WINDOW_MS : true;
+  const canEditDraft = isDraft && isCreator && !draftEditExpired;
   // Released overrides the underlying workflow status for display purposes.
   const displayStatus = isReleased ? "released" : (file?.status ?? "draft");
   const canForwardDraft = isHolder && isDraft;
@@ -108,16 +165,47 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
     ? (file.route_entries.find((e) => e.is_current) ?? file.route_entries[file.route_entries.length - 1])
     : null;
 
+  // Single routing mutation, reused by both the first-forward confirm dialog
+  // and the subsequent-forward panel — the endpoint and payload shape are
+  // unchanged; only what populates `remarks`/`to_user_id` differs by caller.
   const submitAction = useMutation({
     mutationFn: (data: { action: string; remarks: string; to_user_id?: string | null }) =>
       api.post(`/efms/files/${fileId}/route`, data),
   });
 
+  async function afterForwardSuccess() {
+    toast.success("File forwarded.");
+    setShowFirstForwardConfirm(false);
+    setRemarks(""); setToUserId(""); setModalFiles([]);
+    qc.invalidateQueries({ queryKey: ["efms-file", fileId] });
+    qc.invalidateQueries({ queryKey: ["efms-files"] });
+    qc.invalidateQueries({ queryKey: ["efms-files-outbox"] });
+    qc.invalidateQueries({ queryKey: ["my-docket"] });
+    qc.invalidateQueries({ queryKey: ["docket-released"] });
+    qc.invalidateQueries({ queryKey: ["notifications"] });
+    // After a successful forward the file leaves this user's hands — send
+    // them to the Docket rather than leaving them on the (now read-only) page.
+    router.push("/dashboard");
+  }
+
+  // First forward (Draft -> Active): no recipient/notesheet re-entry — reuses
+  // the recipient already stored on the draft (file.recipient_id).
+  async function handleFirstForward() {
+    if (!file?.recipient_id) return;
+    try {
+      await submitAction.mutateAsync({ action: actionType, remarks: "", to_user_id: file.recipient_id });
+      await afterForwardSuccess();
+    } catch (err) {
+      const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      toast.error(msg ?? "Action failed.");
+    }
+  }
+
+  // Subsequent forwards: recipient + notesheet entry chosen inline in the panel.
   async function handleSubmitAction() {
     if (!toUserId) { toast.warning("Please select a person to forward to."); return; }
     try {
       await submitAction.mutateAsync({ action: actionType, remarks, to_user_id: toUserId || null });
-      // Upload any attachments added in this modal
       for (const mf of modalFiles) {
         const form = new FormData();
         form.append("upload", mf.file, `${mf.tag}-${mf.name || mf.file.name}`);
@@ -125,22 +213,80 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
           headers: { "Content-Type": "multipart/form-data" },
         }).catch(() => {});
       }
-      toast.success("File forwarded.");
-      setActionModal(false); setRemarks(""); setToUserId(""); setModalFiles([]);
-      qc.invalidateQueries({ queryKey: ["efms-file", fileId] });
-      qc.invalidateQueries({ queryKey: ["efms-files"] });
-      qc.invalidateQueries({ queryKey: ["efms-files-outbox"] });
-      qc.invalidateQueries({ queryKey: ["my-docket"] });
-      qc.invalidateQueries({ queryKey: ["docket-released"] });
-      qc.invalidateQueries({ queryKey: ["notifications"] });
-      // After a successful forward the file leaves this user's hands — send
-      // them to the Docket rather than leaving them on the (now read-only) page.
-      router.push("/dashboard");
+      await afterForwardSuccess();
     } catch (err) {
       const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
       toast.error(msg ?? "Action failed.");
     }
   }
+
+  // Draft editing — reuses the existing PATCH .../{id} and PATCH .../notesheet
+  // endpoints; no new API. Only the file creator, within DRAFT_EDIT_WINDOW.
+  const updateFileMutation = useMutation({
+    mutationFn: (data: Record<string, unknown>) => api.patch(`/efms/files/${fileId}`, data),
+  });
+  const updateNotesheetMutation = useMutation({
+    mutationFn: (content: string) => api.patch(`/efms/files/${fileId}/notesheet`, { content }),
+  });
+
+  async function handleSaveDraft() {
+    try {
+      await updateFileMutation.mutateAsync({
+        subject: draftSubject,
+        category: draftCategory,
+        priority: draftPriority,
+        department_id: draftDepartmentId || null,
+        recipient_id: draftRecipientId || null,
+      });
+      await updateNotesheetMutation.mutateAsync(draftNotesheet);
+      toast.success("Draft updated.");
+      setEditingDraft(false);
+      qc.invalidateQueries({ queryKey: ["efms-file", fileId] });
+    } catch (err) {
+      const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      toast.error(msg ?? "Could not save draft changes.");
+    }
+  }
+
+  function openEditDraft() {
+    if (!file) return;
+    setDraftSubject(file.subject);
+    setDraftDepartmentId(file.department_id ?? "");
+    setDraftCategory(file.category);
+    setDraftPriority(file.priority);
+    setDraftRecipientId(file.recipient_id ?? "");
+    setDraftNotesheet(file.notesheet?.content ?? "");
+    setEditingDraft(true);
+  }
+
+  // Attachment deletion — reuses the existing DELETE endpoint; the backend
+  // enforces uploader-only + 5-minute window, this mirrors it client-side
+  // only to hide/disable the button.
+  const deleteAttachmentMutation = useMutation({
+    mutationFn: (attId: string) => api.delete(`/efms/files/${fileId}/attachments/${attId}`),
+    onSuccess: () => {
+      toast.success("Attachment deleted.");
+      qc.invalidateQueries({ queryKey: ["efms-file", fileId] });
+    },
+    onError: (err: unknown) => {
+      const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      toast.error(msg ?? "Could not delete attachment.");
+    },
+  });
+
+  const draftEditor = useRichTextEditor({ content: draftNotesheet, onChange: setDraftNotesheet, editable: true });
+  useEffect(() => {
+    if (editingDraft && draftEditor && draftEditor.getHTML() !== draftNotesheet) {
+      draftEditor.commands.setContent(draftNotesheet);
+    }
+    // Only re-sync when the panel opens — not on every keystroke, which would fight the editor's own state.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editingDraft]);
+
+  // Forward panel's notesheet entry — same shared editor as Initial Notesheet
+  // and Edit Draft, just a second independent instance (its own empty
+  // starting content, cleared after each successful forward).
+  const forwardEditor = useRichTextEditor({ content: "", onChange: setRemarks, editable: true });
 
   useEffect(() => {
     if (file?.attachments.length && !selectedPdf) setSelectedPdf(file.attachments[0]);
@@ -173,7 +319,12 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
           {file.attachments.length === 0 ? (
             <p className="text-sm text-gray-400 text-center py-8">No attachments</p>
           ) : (
-            file.attachments.map((att) => (
+            file.attachments.map((att) => {
+              // Backend is the real enforcement (uploader-only + 5 minutes);
+              // this mirrors it client-side purely to hide/disable the button.
+              const canDelete = att.uploaded_by === user?.id
+                && Date.now() - new Date(att.created_at).getTime() < ATTACHMENT_DELETE_WINDOW_MS;
+              return (
               <div key={att.id}
                 className={cn("w-full flex items-start gap-3 p-3 rounded-xl border text-left transition-all",
                   selectedPdf?.id === att.id ? "border-[#0D6E6E] bg-[#E6F4F4]" : "border-gray-100 bg-gray-50")}>
@@ -206,10 +357,21 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                     >
                       Download
                     </a>
+                    {canDelete && (
+                      <button
+                        type="button"
+                        onClick={() => deleteAttachmentMutation.mutate(att.id)}
+                        disabled={deleteAttachmentMutation.isPending}
+                        className="text-xs text-red-400 hover:text-red-600 flex items-center gap-1 ml-auto disabled:opacity-50"
+                      >
+                        <Trash2 size={12} /> Delete
+                      </button>
+                    )}
                   </div>
                 </div>
               </div>
-            ))
+              );
+            })
           )}
         </div>
         {selectedPdf && (
@@ -265,14 +427,26 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
 
             {/* Action buttons */}
             <div className="flex items-center gap-2 shrink-0">
-              {canForwardDraft && (
-                <button onClick={() => setActionModal(true)}
-                  className="flex items-center gap-1.5 px-4 py-2 bg-[#0D6E6E] text-white rounded-xl text-sm font-semibold hover:bg-[#178F8F]">
-                  <ArrowRight size={15} /> Forward to Recipient
+              {canEditDraft && (
+                <button onClick={openEditDraft}
+                  className="flex items-center gap-1.5 px-3 py-2 border border-gray-300 text-gray-700 rounded-xl text-sm font-semibold hover:bg-gray-50">
+                  <Pencil size={14} /> Edit Draft
                 </button>
               )}
+              {canForwardDraft && (
+                file.recipient_id ? (
+                  <button onClick={() => setShowFirstForwardConfirm(true)}
+                    className="flex items-center gap-1.5 px-4 py-2 bg-[#0D6E6E] text-white rounded-xl text-sm font-semibold hover:bg-[#178F8F]">
+                    <ArrowRight size={15} /> Forward to Recipient
+                  </button>
+                ) : (
+                  <span className="flex items-center gap-1.5 px-3 py-2 text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-xl">
+                    <AlertCircle size={14} /> Edit the draft to select a recipient before forwarding.
+                  </span>
+                )
+              )}
               {canForwardAfter && (
-                <button onClick={() => setActionModal(true)}
+                <button onClick={() => setActiveTab("notesheet")}
                   className="flex items-center gap-1.5 px-3 py-2 bg-[#0D6E6E] text-white rounded-xl text-sm font-semibold hover:bg-[#178F8F]">
                   <ArrowRight size={14} /> Forward
                 </button>
@@ -300,7 +474,7 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
             <button onClick={() => setActiveTab("notesheet")}
               className={cn("px-4 py-2 text-sm font-semibold rounded-lg transition-colors",
                 activeTab === "notesheet" ? "bg-[#0D6E6E] text-white" : "text-gray-600 hover:bg-gray-100")}>
-              <MessageSquare size={13} className="inline mr-1" />Notesheet &amp; Remarks
+              <MessageSquare size={13} className="inline mr-1" />Notesheet
             </button>
             <button onClick={() => setActiveTab("track")}
               className={cn("px-4 py-2 text-sm font-semibold rounded-lg transition-colors",
@@ -320,90 +494,222 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
         {/* Tab content */}
         <div className="flex-1 overflow-y-auto">
           {activeTab === "notesheet" && (
-            <div className="p-6 space-y-5">
-              {/* Official Notesheet (read-only) */}
-              <div className="bg-white rounded-2xl border border-gray-200 shadow-sm">
-                <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
-                  <h2 className="text-lg font-bold text-gray-800">Official Notesheet</h2>
-                  <span className="text-sm text-gray-400 flex items-center gap-1"><Lock size={13} /> Read-only</span>
-                </div>
-                {file.notesheet?.content ? (
-                  <div className="px-6 py-5 prose max-w-none text-base leading-relaxed
-                    [&_h1]:text-2xl [&_h1]:font-bold [&_h1]:mt-4 [&_h1]:mb-2
-                    [&_h2]:text-xl [&_h2]:font-bold [&_h2]:mt-4 [&_h2]:mb-2
-                    [&_h3]:text-lg [&_h3]:font-semibold [&_h3]:mt-3 [&_h3]:mb-1
-                    [&_p]:mb-3 [&_ol]:pl-6 [&_ul]:pl-6 [&_li]:mb-1 [&_strong]:font-bold"
-                    dangerouslySetInnerHTML={{ __html: file.notesheet.content }} />
-                ) : (
-                  <div className="px-6 py-10 text-center text-gray-400">
-                    <p className="text-base">No notesheet content provided.</p>
+            <div className="p-6 grid grid-cols-1 lg:grid-cols-3 gap-5">
+              {/* LEFT: Initial Notesheet + Notesheet History (read-only) */}
+              <div className="lg:col-span-2 space-y-5">
+                <div className="bg-white rounded-2xl border border-gray-200 shadow-sm">
+                  <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+                    <h2 className="text-lg font-bold text-gray-800">Initial Notesheet</h2>
+                    <span className="text-sm text-gray-400 flex items-center gap-1"><Lock size={13} /> Read-only</span>
                   </div>
-                )}
-              </div>
-
-              {/* Forwarding remarks — professional document log */}
-              <div className="bg-white rounded-2xl border border-gray-200 shadow-sm">
-                <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
-                  <div>
-                    <h2 className="text-lg font-bold text-gray-800">Forwarding Remarks</h2>
-                    <p className="text-sm text-gray-500 mt-0.5">Official remarks recorded during file movement</p>
-                  </div>
-                  {forwardingRemarks.filter((r) => r.remark).length > 0 && (
-                    <span className="text-xs font-semibold bg-gray-100 text-gray-600 px-2.5 py-1 rounded-full">
-                      {forwardingRemarks.filter((r) => r.remark).length} entr{forwardingRemarks.filter((r) => r.remark).length === 1 ? "y" : "ies"}
-                    </span>
+                  {file.notesheet?.content ? (
+                    <div className="px-6 py-5 prose max-w-none text-base leading-relaxed
+                      [&_h1]:text-2xl [&_h1]:font-bold [&_h1]:mt-4 [&_h1]:mb-2
+                      [&_h2]:text-xl [&_h2]:font-bold [&_h2]:mt-4 [&_h2]:mb-2
+                      [&_h3]:text-lg [&_h3]:font-semibold [&_h3]:mt-3 [&_h3]:mb-1
+                      [&_p]:mb-3 [&_ol]:pl-6 [&_ul]:pl-6 [&_li]:mb-1 [&_strong]:font-bold"
+                      dangerouslySetInnerHTML={{ __html: file.notesheet.content }} />
+                  ) : (
+                    <div className="px-6 py-10 text-center text-gray-400">
+                      <p className="text-base">No notesheet content provided.</p>
+                    </div>
                   )}
                 </div>
-                {forwardingRemarks.filter((r) => r.remark).length === 0 ? (
-                  <div className="px-6 py-10 text-center text-gray-400">
-                    <p className="text-base">No forwarding remarks recorded.</p>
+
+                {/* Notesheet History — one entry per completed forward (RouteEntry.remarks),
+                    same data GET /docket/remarks/{fileId} already returns; only completed
+                    forwards ever produce a RouteEntry, so the current user's in-progress
+                    entry never appears here until they actually forward. */}
+                <div className="bg-white rounded-2xl border border-gray-200 shadow-sm">
+                  <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
+                    <div>
+                      <h2 className="text-lg font-bold text-gray-800">Notesheet History</h2>
+                      <p className="text-sm text-gray-500 mt-0.5">Every notesheet entry recorded as the file moved, oldest first</p>
+                    </div>
+                    {forwardingRemarks.filter((r) => r.remark).length > 0 && (
+                      <span className="text-xs font-semibold bg-gray-100 text-gray-600 px-2.5 py-1 rounded-full">
+                        {forwardingRemarks.filter((r) => r.remark).length} entr{forwardingRemarks.filter((r) => r.remark).length === 1 ? "y" : "ies"}
+                      </span>
+                    )}
                   </div>
-                ) : (
-                  <div className="divide-y divide-gray-100">
-                    {forwardingRemarks.filter((r) => r.remark).map((r, idx, arr) => {
-                      const dt = new Date(r.created_at);
-                      const dateStr = dt.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
-                      const timeStr = dt.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", hour12: true });
-                      const initials = (r.user_name ?? "?").split(" ").map((w: string) => w[0]).slice(0, 2).join("").toUpperCase();
-                      return (
-                        <div key={r.id} className="px-6 py-5">
-                          <div className="flex items-start gap-4">
-                            {/* Serial number */}
-                            <div className="w-7 h-7 rounded-full bg-gray-100 border border-gray-200 flex items-center justify-center shrink-0 mt-0.5">
-                              <span className="text-xs font-bold text-gray-500">{arr.length - idx}</span>
+                  {forwardingRemarks.filter((r) => r.remark).length === 0 ? (
+                    <div className="px-6 py-10 text-center text-gray-400">
+                      <p className="text-base">No notesheet entries recorded yet.</p>
+                    </div>
+                  ) : (
+                    <div className="px-6 py-5">
+                      {forwardingRemarks.filter((r) => r.remark).map((r, idx, arr) => (
+                        <div key={r.id} className="flex items-start gap-4">
+                          {/* Numbered marker + connecting line — same timeline
+                              language as the Track Status tab's icon + line. */}
+                          <div className="flex flex-col items-center">
+                            <div className="w-9 h-9 rounded-full flex items-center justify-center shrink-0 border-2 bg-[#0D6E6E] border-[#0D6E6E]">
+                              <span className="text-xs font-bold text-white">{arr.length - idx}</span>
                             </div>
-                            <div className="flex-1 min-w-0">
-                              {/* Header row */}
-                              <div className="flex items-center justify-between gap-3 flex-wrap mb-3">
-                                <div className="flex items-center gap-2.5">
-                                  <div className="w-8 h-8 rounded-full bg-[#0D6E6E] flex items-center justify-center text-white text-xs font-bold shrink-0">
-                                    {initials}
-                                  </div>
-                                  <div>
-                                    <PersonBadge person={r.user_info} fallback="Unknown" compact />
-                                    {r.user_id === user?.id && (
-                                      <p className="text-xs text-[#0D6E6E] font-medium leading-tight">You</p>
-                                    )}
-                                  </div>
-                                </div>
-                                <div className="flex items-center gap-1.5 text-sm font-medium text-gray-600 shrink-0">
-                                  <Clock size={14} className="text-gray-500" />
-                                  <span>{dateStr}</span>
-                                  <span className="text-gray-400">|</span>
-                                  <span>{timeStr}</span>
-                                </div>
+                            {idx < arr.length - 1 && <div className="w-0.5 flex-1 min-h-[24px] mt-1 bg-gray-200" />}
+                          </div>
+                          <div className="flex-1 min-w-0 pb-6">
+                            <div className="flex items-center justify-end mb-2">
+                              <span className="flex items-center gap-1.5 text-xs font-medium text-gray-500">
+                                <Clock size={12} className="text-gray-400" />{formatDate(r.created_at, "datetime")}
+                              </span>
+                            </div>
+                            {/* Sender -> Forwarded To -> Recipient, one horizontal row */}
+                            <div className="flex items-center gap-3 mb-3">
+                              <div className="flex-1 min-w-0">
+                                <PersonBadge person={r.user_info} fallback="Unknown" compact />
+                                {r.user_id === user?.id && (
+                                  <p className="text-xs text-[#0D6E6E] font-medium leading-tight">You</p>
+                                )}
                               </div>
-                              {/* Remark body */}
-                              <div className="bg-gray-50 border border-gray-200 rounded-xl px-4 py-3">
-                                <p className="text-sm text-gray-800 leading-relaxed whitespace-pre-wrap">{r.remark}</p>
-                              </div>
+                              {r.to_user_info && (
+                                <>
+                                  <div className="flex flex-col items-center gap-0.5 shrink-0 text-gray-300">
+                                    <ArrowRight size={13} />
+                                    <span className="text-[10px] font-bold text-gray-400 tracking-wide whitespace-nowrap">FORWARDED TO</span>
+                                    <ArrowRight size={13} />
+                                  </div>
+                                  <div className="flex-1 min-w-0 text-right">
+                                    <PersonBadge person={r.to_user_info} compact />
+                                  </div>
+                                </>
+                              )}
+                            </div>
+                            {/* Notesheet content — same prose rendering as the Initial Notesheet card */}
+                            <div>
+                              <p className="text-xs font-semibold text-gray-400 uppercase mb-1">Notesheet</p>
+                              <div className={cn("bg-gray-50 border border-gray-200 rounded-xl px-4 py-3", NOTESHEET_PROSE_CLASS)}
+                                dangerouslySetInnerHTML={{ __html: r.remark }} />
                             </div>
                           </div>
                         </div>
-                      );
-                    })}
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* RIGHT: Edit Draft (creator, within window) or Forward panel (subsequent holders) */}
+              <div className="lg:col-span-1 space-y-5">
+                {editingDraft ? (
+                  <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-5 space-y-4">
+                    <div className="flex items-center justify-between">
+                      <h2 className="text-base font-bold text-gray-800">Edit Draft</h2>
+                      <span className="text-xs text-amber-600 bg-amber-50 border border-amber-200 rounded-full px-2 py-0.5">30-min window</span>
+                    </div>
+                    <div>
+                      <label className="block text-sm font-semibold text-gray-700 mb-1.5">Subject</label>
+                      <input value={draftSubject} onChange={(e) => setDraftSubject(e.target.value)}
+                        className="w-full border border-gray-300 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]" />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-semibold text-gray-700 mb-1.5">Department</label>
+                      <select value={draftDepartmentId} onChange={(e) => setDraftDepartmentId(e.target.value)}
+                        className="w-full border border-gray-300 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]">
+                        <option value="">None</option>
+                        {departments.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-sm font-semibold text-gray-700 mb-1.5">Category</label>
+                      <select value={draftCategory} onChange={(e) => setDraftCategory(e.target.value)}
+                        className="w-full border border-gray-300 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]">
+                        {categories.filter((c) => c.is_active !== false).map((c) => <option key={c.id} value={c.name}>{c.name}</option>)}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-sm font-semibold text-gray-700 mb-1.5">Priority</label>
+                      <select value={draftPriority} onChange={(e) => setDraftPriority(e.target.value)}
+                        className="w-full border border-gray-300 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]">
+                        {priorities.filter((p) => p.is_active !== false).map((p) => <option key={p.id} value={p.name}>{p.label ?? p.name}</option>)}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-sm font-semibold text-gray-700 mb-1.5">Recipient</label>
+                      <SearchableSelect
+                        options={users.map((u) => ({ value: u.id, label: u.full_name + (u.designation ? ` — ${u.designation}` : "") }))}
+                        value={draftRecipientId}
+                        onChange={setDraftRecipientId}
+                        placeholder="No recipient yet…"
+                        searchPlaceholder="Search users…"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-semibold text-gray-700 mb-1.5">Notesheet</label>
+                      <div className="border border-gray-200 rounded-xl overflow-hidden">
+                        <RichTextToolbar editor={draftEditor} />
+                        <EditorContent editor={draftEditor} className="min-h-[160px] text-sm" />
+                      </div>
+                    </div>
+                    <div className="flex gap-2 pt-1">
+                      <button onClick={() => setEditingDraft(false)}
+                        className="flex-1 py-2.5 text-sm border border-gray-200 rounded-xl hover:bg-gray-50 font-medium">Cancel</button>
+                      <button onClick={handleSaveDraft} disabled={updateFileMutation.isPending || updateNotesheetMutation.isPending}
+                        className="flex-1 py-2.5 text-sm rounded-xl font-bold flex items-center justify-center gap-2 bg-[#0D6E6E] text-white hover:bg-[#178F8F] disabled:opacity-50">
+                        {(updateFileMutation.isPending || updateNotesheetMutation.isPending) ? <Loader2 size={15} className="animate-spin" /> : <Save size={15} />}
+                        Save
+                      </button>
+                    </div>
                   </div>
-                )}
+                ) : canForwardAfter ? (
+                  <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-5 space-y-4">
+                    <h2 className="text-base font-bold text-gray-800">Forward This File</h2>
+                    <div>
+                      <label className="block text-sm font-semibold text-gray-700 mb-1.5">Forward To *</label>
+                      {users.length === 0 ? (
+                        <p className="text-sm text-amber-600 bg-amber-50 rounded-xl p-3">No users available.</p>
+                      ) : (
+                        <SearchableSelect
+                          options={users.map((u) => ({ value: u.id, label: u.full_name + (u.designation ? ` — ${u.designation}` : "") + (u.department_name ? ` (${u.department_name})` : "") }))}
+                          value={toUserId}
+                          onChange={setToUserId}
+                          placeholder="Select…"
+                          searchPlaceholder="Search users…"
+                        />
+                      )}
+                    </div>
+                    <div>
+                      <label className="block text-sm font-semibold text-gray-700 mb-1.5">Notesheet</label>
+                      <div className="border border-gray-200 rounded-xl overflow-hidden">
+                        <RichTextToolbar editor={forwardEditor} />
+                        <EditorContent editor={forwardEditor} className="min-h-[160px] text-sm" />
+                      </div>
+                    </div>
+                    <div>
+                      <label className="flex items-center gap-2 cursor-pointer w-full border-2 border-dashed border-gray-200 hover:border-[#0D6E6E] rounded-xl px-3 py-2.5 text-sm text-gray-500 hover:text-[#0D6E6E] transition-colors">
+                        <Upload size={14} />
+                        <span>Attach document (optional)…</span>
+                        <input type="file" multiple className="sr-only" onChange={(e) => {
+                          if (!e.target.files) return;
+                          const next = [...modalFiles];
+                          Array.from(e.target.files).forEach((f, i) => {
+                            const idx = next.length + i + 1;
+                            next.push({ file: f, name: f.name, tag: `doc-${idx}` });
+                          });
+                          setModalFiles(next.slice(0, 10));
+                          e.target.value = "";
+                        }} />
+                      </label>
+                      {modalFiles.length > 0 && (
+                        <div className="mt-2 space-y-1.5">
+                          {modalFiles.map((mf, i) => (
+                            <div key={i} className="flex items-center gap-2 p-2 bg-gray-50 rounded-lg border border-gray-100 text-xs">
+                              <FileText size={13} className="text-[#0D6E6E] shrink-0" />
+                              <span className="flex-1 truncate">{mf.name}</span>
+                              <button type="button" onClick={() => setModalFiles((a) => a.filter((_, idx) => idx !== i))}
+                                className="text-red-400 hover:text-red-600 shrink-0"><X size={13} /></button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                    <button onClick={handleSubmitAction} disabled={submitAction.isPending}
+                      className="w-full py-2.5 text-sm rounded-xl font-bold flex items-center justify-center gap-2 bg-[#0D6E6E] text-white hover:bg-[#178F8F] disabled:opacity-50">
+                      {submitAction.isPending ? <Loader2 size={15} className="animate-spin" /> : <ArrowRight size={15} />}
+                      Forward
+                    </button>
+                  </div>
+                ) : null}
               </div>
             </div>
           )}
@@ -611,108 +917,29 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
         />
       )}
 
-      {/* Action Modal */}
+      {/* First-forward confirmation — no recipient/notesheet re-entry; uses
+          the recipient already stored on the draft (file.recipient_id). */}
       <AnimatePresence>
-        {actionModal && (
+        {showFirstForwardConfirm && file.recipient_info && (
           <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
             className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-6"
-            onClick={() => setActionModal(false)}>
+            onClick={() => setShowFirstForwardConfirm(false)}>
             <motion.div initial={{ scale: 0.95 }} animate={{ scale: 1 }} exit={{ scale: 0.95 }}
               onClick={(e) => e.stopPropagation()}
-              className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6">
-              <div className="flex items-center gap-3 mb-5">
+              className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6">
+              <div className="flex items-center gap-3 mb-4">
                 <ArrowRight size={24} className="text-[#0D6E6E]" />
-                <h3 className="text-xl font-bold text-gray-900">
-                  {isDraft ? "Forward to Recipient" : "Forward File"}
-                </h3>
+                <h3 className="text-xl font-bold text-gray-900">Forward File</h3>
               </div>
-
-              {/* Forward: any eligible user — Confidential files use the same picker as Normal files */}
-              <div className="mb-4">
-                <label className="block text-base font-semibold text-gray-700 mb-2">
-                  {isDraft ? "Select Recipient *" : "Forward To *"}
-                </label>
-
-                {users.length === 0 ? (
-                  <p className="text-sm text-amber-600 bg-amber-50 rounded-xl p-3">No users available.</p>
-                ) : (
-                  <select value={toUserId} onChange={(e) => setToUserId(e.target.value)}
-                    className="w-full border border-gray-300 rounded-xl px-4 py-3 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]">
-                    <option value="">Select…</option>
-                    {users.map((u) => (
-                      <option key={u.id} value={u.id}>
-                        {u.full_name}{u.designation ? ` — ${u.designation}` : ""}{u.department_name ? ` (${u.department_name})` : ""}
-                      </option>
-                    ))}
-                  </select>
-                )}
+              <p className="text-base text-gray-700 mb-2">Are you sure you want to forward this file to:</p>
+              <div className="bg-[#F5F7FA] rounded-xl px-4 py-3 mb-5">
+                <PersonBadge person={file.recipient_info} />
               </div>
-
-              <textarea value={remarks} onChange={(e) => setRemarks(e.target.value)} rows={3}
-                placeholder="Add remarks (optional)…"
-                className="w-full border border-gray-300 rounded-xl px-4 py-3 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E] resize-none mb-4" />
-
-              {/* Attach document (available for all action types) */}
-              <div className="mb-4">
-                <label className="block text-sm font-semibold text-gray-700 mb-2">Attach Document (optional)</label>
-                <label className="flex items-center gap-2 cursor-pointer w-full border-2 border-dashed border-gray-200 hover:border-[#0D6E6E] rounded-xl px-4 py-3 text-sm text-gray-500 hover:text-[#0D6E6E] transition-colors">
-                  <Upload size={15} />
-                  <span>Browse or drop files…</span>
-                  <input type="file" multiple className="sr-only" onChange={(e) => {
-                    if (!e.target.files) return;
-                    const next = [...modalFiles];
-                    Array.from(e.target.files).forEach((f, i) => {
-                      const idx = next.length + i + 1;
-                      next.push({ file: f, name: f.name, tag: `doc-${idx}` });
-                    });
-                    setModalFiles(next.slice(0, 10));
-                    e.target.value = "";
-                  }} />
-                </label>
-                {modalFiles.length > 0 && (
-                  <div className="mt-2 space-y-2">
-                    {modalFiles.map((mf, i) => (
-                      <div key={i} className="flex items-center gap-2 p-2.5 bg-gray-50 rounded-xl border border-gray-100">
-                        <FileText size={15} className="text-[#0D6E6E] shrink-0" />
-                        <div className="flex-1 grid grid-cols-2 gap-2">
-                          <div>
-                            <p className="text-xs text-gray-400 mb-0.5">Name</p>
-                            <input value={mf.name}
-                              onChange={(e) => setModalFiles((a) => a.map((x, idx) => idx === i ? { ...x, name: e.target.value } : x))}
-                              className="w-full border border-gray-200 rounded-lg px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-[#0D6E6E]" />
-                          </div>
-                          <div>
-                            <p className="text-xs text-gray-400 mb-0.5">Tag</p>
-                            <select value={mf.tag}
-                              onChange={(e) => setModalFiles((a) => a.map((x, idx) => idx === i ? { ...x, tag: e.target.value } : x))}
-                              className="w-full border border-gray-200 rounded-lg px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-[#0D6E6E]">
-                              {[
-                                ...Array.from({ length: 10 }, (_, k) => `doc-${k + 1}`),
-                                "Annexure 1","Annexure 2","Annexure 3","Annexure 4","Annexure 5",
-                                "Annexure A","Annexure B","Annexure C",
-                                "Supporting Document","Reference Document",
-                                "Enclosure 1","Enclosure 2","Enclosure 3",
-                                "Exhibit 1","Exhibit 2",
-                                "Proof of Identity","Proof of Address","Certificate","Other",
-                              ].map((opt) => (
-                                <option key={opt} value={opt}>{opt}</option>
-                              ))}
-                            </select>
-                          </div>
-                        </div>
-                        <button type="button" onClick={() => setModalFiles((a) => a.filter((_, idx) => idx !== i))}
-                          className="text-red-400 hover:text-red-600 shrink-0"><X size={14} /></button>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-
               <div className="flex gap-3">
-                <button onClick={() => { setActionModal(false); setToUserId(""); setRemarks(""); setModalFiles([]); }}
+                <button onClick={() => setShowFirstForwardConfirm(false)}
                   className="flex-1 py-3 text-base border border-gray-200 rounded-xl hover:bg-gray-50 font-medium">Cancel</button>
                 <button
-                  onClick={handleSubmitAction}
+                  onClick={handleFirstForward}
                   disabled={submitAction.isPending}
                   className="flex-1 py-3 text-base rounded-xl font-bold flex items-center justify-center gap-2 bg-[#0D6E6E] text-white hover:bg-[#178F8F] disabled:opacity-50">
                   {submitAction.isPending ? <Loader2 size={18} className="animate-spin" /> : "Forward"}
