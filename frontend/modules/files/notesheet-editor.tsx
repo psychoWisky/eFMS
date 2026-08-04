@@ -34,6 +34,27 @@ const NOTESHEET_PROSE_CLASS = "prose prose-sm max-w-none leading-relaxed " +
   "[&_h3]:text-sm [&_h3]:font-semibold [&_h3]:mt-1.5 [&_h3]:mb-1 " +
   "[&_p]:mb-2 [&_ol]:pl-5 [&_ul]:pl-5 [&_li]:mb-0.5 [&_strong]:font-bold";
 
+// RouteEntry.remarks holds two eras of data in the same plain-text column:
+// HTML from the Rich Text Editor (current) and legacy plain text from the
+// pre-editor <textarea> (historical). Detect which one a given value is and
+// normalize both to safe HTML for a single dangerouslySetInnerHTML render
+// path — no duplicate rendering component, no backend/data change.
+const HTML_TAG_PATTERN = /<([a-z][a-z0-9]*)\b[^>]*>/i;
+
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function toSafeNotesheetHtml(raw: string): string {
+  if (HTML_TAG_PATTERN.test(raw)) return raw; // Rich Text Editor output — already safe HTML, render as-is.
+  return escapeHtml(raw).replace(/\r\n|\r|\n/g, "<br />"); // Legacy plain text — escape, then preserve line breaks.
+}
+
 interface RouteEntry { id: string; from_user_id: string | null; to_user_id: string | null; action: string; remarks: string | null; is_current: boolean; created_at: string; from_user_info?: PersonInfo | null; to_user_info?: PersonInfo | null; }
 interface TrackEntry { id: string; type?: "route" | "sign"; from_user_id: string | null; to_user_id: string | null; from_user_name: string | null; to_user_name: string | null; from_user_info?: PersonInfo | null; to_user_info?: PersonInfo | null; action: string; remarks: string | null; is_current: boolean; created_at: string; }
 interface Attachment { id: string; original_name: string; file_size: number | null; mime_type: string | null; stored_name: string; created_at: string; uploaded_by: string; }
@@ -579,7 +600,7 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                             <div>
                               <p className="text-xs font-semibold text-gray-400 uppercase mb-1">Notesheet</p>
                               <div className={cn("bg-gray-50 border border-gray-200 rounded-xl px-4 py-3", NOTESHEET_PROSE_CLASS)}
-                                dangerouslySetInnerHTML={{ __html: r.remark }} />
+                                dangerouslySetInnerHTML={{ __html: toSafeNotesheetHtml(r.remark) }} />
                             </div>
                           </div>
                         </div>
