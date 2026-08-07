@@ -2,10 +2,10 @@
 // Reusable Select2-style searchable dropdown. No search library exists in
 // this project yet — every other dropdown is a plain native <select> — so
 // this is the one shared implementation any screen needing a searchable
-// picker (Office/Section/Person, etc.) should reuse instead of hand-rolling
-// another one.
+// picker (Office/Section/Person, Favorite Recipients, etc.) should reuse
+// instead of hand-rolling another one.
 import { useEffect, useRef, useState } from "react";
-import { ChevronDown, Search, X } from "lucide-react";
+import { ChevronDown, Search, X, Star } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 export interface SearchableSelectOption {
@@ -13,8 +13,18 @@ export interface SearchableSelectOption {
   label: string;
 }
 
-interface SearchableSelectProps {
+export interface SearchableSelectGroup {
+  label: string;
   options: SearchableSelectOption[];
+}
+
+interface SearchableSelectProps {
+  /** Flat option list — ignored if `groups` is also provided. */
+  options?: SearchableSelectOption[];
+  /** Sectioned option list (e.g. "⭐ Favorite Recipients" / "All Recipients").
+   * Each group's options are filtered independently by search, and empty
+   * groups are hidden — search naturally spans every group at once. */
+  groups?: SearchableSelectGroup[];
   value: string;
   onChange: (value: string) => void;
   placeholder?: string;
@@ -23,20 +33,33 @@ interface SearchableSelectProps {
   disabled?: boolean;
   clearable?: boolean;
   className?: string;
+  /** When provided alongside onToggleFavorite, a star toggle renders on
+   * every option row. Both are optional so existing callers are unaffected. */
+  isFavorite?: (value: string) => boolean;
+  onToggleFavorite?: (value: string) => void;
+  showFavoriteToggle?: boolean;
 }
 
 export function SearchableSelect({
-  options, value, onChange, placeholder = "Select…", searchPlaceholder = "Search…",
+  options, groups, value, onChange, placeholder = "Select…", searchPlaceholder = "Search…",
   emptyMessage = "No options found.", disabled = false, clearable = true, className,
+  isFavorite, onToggleFavorite, showFavoriteToggle,
 }: SearchableSelectProps) {
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
   const rootRef = useRef<HTMLDivElement>(null);
 
-  const selected = options.find((o) => o.value === value) ?? null;
-  const filtered = search.trim()
-    ? options.filter((o) => o.label.toLowerCase().includes(search.trim().toLowerCase()))
-    : options;
+  const effectiveGroups: SearchableSelectGroup[] = groups ?? [{ label: "", options: options ?? [] }];
+  const allOptions = effectiveGroups.flatMap((g) => g.options);
+  const selected = allOptions.find((o) => o.value === value) ?? null;
+
+  const q = search.trim().toLowerCase();
+  const filteredGroups = (q
+    ? effectiveGroups.map((g) => ({ ...g, options: g.options.filter((o) => o.label.toLowerCase().includes(q)) }))
+    : effectiveGroups
+  ).filter((g) => g.options.length > 0);
+
+  const canShowStar = showFavoriteToggle ?? !!(isFavorite && onToggleFavorite);
 
   useEffect(() => {
     function onClickOutside(e: MouseEvent) {
@@ -98,22 +121,49 @@ export function SearchableSelect({
               />
             </div>
           </div>
-          <div className="max-h-56 overflow-y-auto">
-            {filtered.length === 0 ? (
+          <div className="max-h-64 overflow-y-auto">
+            {filteredGroups.length === 0 ? (
               <p className="text-sm text-gray-400 text-center py-4 px-3">{emptyMessage}</p>
             ) : (
-              filtered.map((o) => (
-                <button
-                  key={o.value}
-                  type="button"
-                  onClick={() => select(o.value)}
-                  className={cn(
-                    "w-full text-left px-3 py-2 text-sm hover:bg-gray-50 truncate",
-                    o.value === value && "bg-[#E6F4F4] text-[#0D6E6E] font-semibold",
+              filteredGroups.map((g) => (
+                <div key={g.label || "default"}>
+                  {g.label && (
+                    <p className="px-3 pt-2.5 pb-1 text-xs font-bold text-gray-400 uppercase tracking-wide">{g.label}</p>
                   )}
-                >
-                  {o.label}
-                </button>
+                  {g.options.map((o) => (
+                    <div
+                      key={o.value}
+                      className={cn(
+                        "flex items-center gap-1 hover:bg-gray-50",
+                        o.value === value && "bg-[#E6F4F4]",
+                      )}
+                    >
+                      <button
+                        type="button"
+                        onClick={() => select(o.value)}
+                        className={cn(
+                          "flex-1 min-w-0 text-left px-3 py-2 text-sm truncate",
+                          o.value === value && "text-[#0D6E6E] font-semibold",
+                        )}
+                      >
+                        {o.label}
+                      </button>
+                      {canShowStar && isFavorite && onToggleFavorite && (
+                        <button
+                          type="button"
+                          title={isFavorite(o.value) ? "Remove from favorites" : "Add to favorites"}
+                          onClick={(e) => { e.stopPropagation(); onToggleFavorite(o.value); }}
+                          className={cn(
+                            "shrink-0 p-1.5 mr-1 rounded-lg",
+                            isFavorite(o.value) ? "text-amber-400 hover:text-amber-500" : "text-gray-300 hover:text-amber-400",
+                          )}
+                        >
+                          <Star size={15} fill={isFavorite(o.value) ? "currentColor" : "none"} />
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                </div>
               ))
             )}
           </div>

@@ -13,6 +13,21 @@ import { TableCell } from "@tiptap/extension-table-cell";
 import { TableHeader } from "@tiptap/extension-table-header";
 import { Bold, Italic, Underline as UIcon, AlignLeft, AlignCenter, AlignRight, List, ListOrdered, Grid2x2 } from "lucide-react";
 
+// This project has no @tailwindcss/typography plugin, so the bare "prose"
+// class applies no styling — Tailwind's Preflight reset otherwise strips
+// default list markers (list-style: none) and heading typography (font-size/
+// weight: inherit), which made Bullet List / Numbered List / H1-H3 (and
+// table borders) look non-functional even though the underlying Tiptap
+// commands were always executing correctly and producing valid HTML.
+export const NOTESHEET_EDITOR_CONTENT_CLASS =
+  "prose max-w-none focus:outline-none min-h-[400px] p-5 text-base leading-relaxed " +
+  "[&_h1]:text-2xl [&_h1]:font-bold [&_h1]:mt-4 [&_h1]:mb-2 " +
+  "[&_h2]:text-xl [&_h2]:font-bold [&_h2]:mt-4 [&_h2]:mb-2 " +
+  "[&_h3]:text-lg [&_h3]:font-semibold [&_h3]:mt-3 [&_h3]:mb-1 " +
+  "[&_p]:mb-3 [&_strong]:font-bold " +
+  "[&_ul]:list-disc [&_ul]:pl-6 [&_ul]:mb-3 [&_ol]:list-decimal [&_ol]:pl-6 [&_ol]:mb-3 [&_li]:mb-1 " +
+  "[&_table]:border-collapse [&_table]:my-3 [&_td]:border [&_td]:border-gray-300 [&_td]:p-2 [&_th]:border [&_th]:border-gray-300 [&_th]:p-2 [&_th]:bg-gray-50";
+
 function transformPastedHTML(html: string): string {
   // Remove MS Word / LibreOffice proprietary tags and attributes while
   // keeping structural HTML (headings, bold, italic, lists, tables)
@@ -49,7 +64,7 @@ export function useRichTextEditor({ content, onChange, editable = true }: {
     content,
     editable,
     editorProps: {
-      attributes: { class: "prose max-w-none focus:outline-none min-h-[400px] p-5 text-base leading-relaxed" },
+      attributes: { class: NOTESHEET_EDITOR_CONTENT_CLASS },
       transformPastedHTML,
     },
     onUpdate: ({ editor }) => onChange?.(editor.getHTML()),

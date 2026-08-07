@@ -623,6 +623,13 @@ async def upload_attachment(
     if not f:
         raise HTTPException(status_code=404, detail="File not found.")
 
+    ext = _get_ext(upload.filename or "").lstrip(".").lower()
+    if ext not in settings.allowed_extensions_list:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file type '.{ext}'. Allowed: {', '.join(settings.allowed_extensions_list)}.",
+        )
+
     content = await upload.read()
     stored_name = f"{_uuid.uuid4()}{_get_ext(upload.filename or '')}"
 
@@ -667,6 +674,9 @@ async def delete_attachment(
         raise HTTPException(status_code=404, detail="Attachment not found.")
     if att.uploaded_by != user.id:
         raise HTTPException(status_code=403, detail="Only the uploader can delete this attachment.")
+    f = await db.get(EfmsFile, file_id)
+    if not f or f.current_holder_id != user.id:
+        raise HTTPException(status_code=403, detail="You can only delete attachments while you are the current holder of this file.")
     if _attachment_delete_expired(att):
         raise HTTPException(status_code=400, detail="Attachment deletion window (5 minutes) has expired.")
     # Remove file from disk

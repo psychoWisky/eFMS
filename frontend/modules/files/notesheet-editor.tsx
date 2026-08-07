@@ -20,6 +20,9 @@ import { FileClassificationBadge, FileClassificationBanner } from "@/components/
 import { SearchableSelect } from "@/components/shared/searchable-select";
 import { useRichTextEditor, RichTextToolbar } from "@/components/shared/rich-text-editor";
 import { EditorContent } from "@tiptap/react";
+import { useFavoriteRecipients, type FavoritableUser } from "@/hooks/use-favorite-recipients";
+import { useAttachmentQueue } from "@/hooks/use-attachment-queue";
+import { ALLOWED_ATTACHMENT_ACCEPT } from "@/lib/attachment-constants";
 
 const DRAFT_EDIT_WINDOW_MS = 30 * 60 * 1000;
 const ATTACHMENT_DELETE_WINDOW_MS = 5 * 60 * 1000;
@@ -73,7 +76,7 @@ interface EfmsFile {
   signatures: Signature[];
 }
 interface ForwardingRemark { id: string; remark: string; user_name: string; user_id: string; created_at: string; user_info?: PersonInfo | null; to_user_info?: PersonInfo | null; }
-interface SystemUser { id: string; email: string; full_name: string; active_role: string | null; designation: string | null; department_name?: string | null; }
+interface SystemUser extends FavoritableUser { email: string; active_role: string | null; }
 interface DropItem { id: string; name: string; label?: string; is_active?: boolean; }
 interface DeptItem { id: string; name: string; }
 
@@ -97,7 +100,8 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
   // Subsequent forwards: inline recipient + notesheet-entry panel (no modal).
   const [toUserId, setToUserId] = useState("");
   const [remarks, setRemarks] = useState("");
-  const [modalFiles, setModalFiles] = useState<{ file: File; name: string; tag: string }[]>([]);
+  const forwardAttachments = useAttachmentQueue();
+  const { toggleFavorite, buildGroups } = useFavoriteRecipients();
   // Draft editing (30-minute window)
   const [editingDraft, setEditingDraft] = useState(false);
   const [draftSubject, setDraftSubject] = useState("");
@@ -197,7 +201,8 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
   async function afterForwardSuccess() {
     toast.success("File forwarded.");
     setShowFirstForwardConfirm(false);
-    setRemarks(""); setToUserId(""); setModalFiles([]);
+    setRemarks(""); setToUserId("");
+    if (forwardDraftKey) localStorage.removeItem(forwardDraftKey);
     qc.invalidateQueries({ queryKey: ["efms-file", fileId] });
     qc.invalidateQueries({ queryKey: ["efms-files"] });
     qc.invalidateQueries({ queryKey: ["efms-files-outbox"] });
@@ -222,18 +227,14 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
     }
   }
 
-  // Subsequent forwards: recipient + notesheet entry chosen inline in the panel.
+  // Subsequent forwards: recipient + notesheet entry chosen inline in the
+  // panel. Attachments are no longer uploaded here — the Forward panel now
+  // uploads each file immediately on selection (see forwardAttachments.uploadNow
+  // in the file input below), so they're already persisted before this runs.
   async function handleSubmitAction() {
     if (!toUserId) { toast.warning("Please select a person to forward to."); return; }
     try {
       await submitAction.mutateAsync({ action: actionType, remarks, to_user_id: toUserId || null });
-      for (const mf of modalFiles) {
-        const form = new FormData();
-        form.append("upload", mf.file, `${mf.tag}-${mf.name || mf.file.name}`);
-        await api.post(`/efms/files/${fileId}/attachments`, form, {
-          headers: { "Content-Type": "multipart/form-data" },
-        }).catch(() => {});
-      }
       await afterForwardSuccess();
     } catch (err) {
       const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
@@ -309,6 +310,34 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
   // starting content, cleared after each successful forward).
   const forwardEditor = useRichTextEditor({ content: "", onChange: setRemarks, editable: true });
 
+  // In-progress forward notesheet entry survives closing the page before
+  // actually forwarding — same localStorage autosave pattern already used
+  // by New File creation (DRAFT_KEY), just scoped per file + holder instead
+  // of a single global key. Attachments don't need this: they now upload
+  // immediately (see the Forward panel's file input) instead of being queued
+  // client-side, so they're already persisted server-side as soon as chosen.
+  const forwardDraftKey = user?.id ? `efms-forward-draft-${fileId}-${user.id}` : null;
+
+  useEffect(() => {
+    if (!canForwardAfter || !forwardDraftKey || !forwardEditor) return;
+    const saved = localStorage.getItem(forwardDraftKey);
+    if (!saved) return;
+    try {
+      const { content } = JSON.parse(saved);
+      if (content) { forwardEditor.commands.setContent(content); setRemarks(content); }
+    } catch { /* ignore */ }
+    // Restore once, when the forward panel first becomes available for this file.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [canForwardAfter, forwardDraftKey]);
+
+  useEffect(() => {
+    if (!canForwardAfter || !forwardDraftKey) return;
+    const id = setInterval(() => {
+      localStorage.setItem(forwardDraftKey, JSON.stringify({ content: remarks }));
+    }, 30_000);
+    return () => clearInterval(id);
+  }, [canForwardAfter, forwardDraftKey, remarks]);
+
   useEffect(() => {
     if (file?.attachments.length && !selectedPdf) setSelectedPdf(file.attachments[0]);
   }, [file]);
@@ -341,9 +370,13 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
             <p className="text-sm text-gray-400 text-center py-8">No attachments</p>
           ) : (
             file.attachments.map((att) => {
-              // Backend is the real enforcement (uploader-only + 5 minutes);
-              // this mirrors it client-side purely to hide/disable the button.
+              // Backend is the real enforcement (uploader-only + 5 minutes +
+              // still-current-holder); this mirrors it client-side purely to
+              // hide/disable the button. Deletion must stop the moment the
+              // file is forwarded on, even if the 5-minute window hasn't
+              // elapsed yet — the uploader is no longer the current holder.
               const canDelete = att.uploaded_by === user?.id
+                && isHolder
                 && Date.now() - new Date(att.created_at).getTime() < ATTACHMENT_DELETE_WINDOW_MS;
               return (
               <div key={att.id}
@@ -648,9 +681,14 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                     <div>
                       <label className="block text-sm font-semibold text-gray-700 mb-1.5">Recipient</label>
                       <SearchableSelect
-                        options={users.map((u) => ({ value: u.id, label: u.full_name + (u.designation ? ` — ${u.designation}` : "") }))}
+                        groups={buildGroups(users, (u) => u.full_name + (u.designation ? ` — ${u.designation}` : ""))}
                         value={draftRecipientId}
                         onChange={setDraftRecipientId}
+                        isFavorite={(id) => !!users.find((u) => u.id === id)?.is_favorite}
+                        onToggleFavorite={(id) => {
+                          const u = users.find((u) => u.id === id);
+                          if (u) toggleFavorite(id, !!u.is_favorite);
+                        }}
                         placeholder="No recipient yet…"
                         searchPlaceholder="Search users…"
                       />
@@ -681,9 +719,14 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                         <p className="text-sm text-amber-600 bg-amber-50 rounded-xl p-3">No users available.</p>
                       ) : (
                         <SearchableSelect
-                          options={users.map((u) => ({ value: u.id, label: u.full_name + (u.designation ? ` — ${u.designation}` : "") + (u.department_name ? ` (${u.department_name})` : "") }))}
+                          groups={buildGroups(users, (u) => u.full_name + (u.designation ? ` — ${u.designation}` : "") + (u.department_name ? ` (${u.department_name})` : ""))}
                           value={toUserId}
                           onChange={setToUserId}
+                          isFavorite={(id) => !!users.find((u) => u.id === id)?.is_favorite}
+                          onToggleFavorite={(id) => {
+                            const u = users.find((u) => u.id === id);
+                            if (u) toggleFavorite(id, !!u.is_favorite);
+                          }}
                           placeholder="Select…"
                           searchPlaceholder="Search users…"
                         />
@@ -700,29 +743,20 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                       <label className="flex items-center gap-2 cursor-pointer w-full border-2 border-dashed border-gray-200 hover:border-[#0D6E6E] rounded-xl px-3 py-2.5 text-sm text-gray-500 hover:text-[#0D6E6E] transition-colors">
                         <Upload size={14} />
                         <span>Attach document (optional)…</span>
-                        <input type="file" multiple className="sr-only" onChange={(e) => {
-                          if (!e.target.files) return;
-                          const next = [...modalFiles];
-                          Array.from(e.target.files).forEach((f, i) => {
-                            const idx = next.length + i + 1;
-                            next.push({ file: f, name: f.name, tag: `doc-${idx}` });
-                          });
-                          setModalFiles(next.slice(0, 10));
+                        <input type="file" multiple accept={ALLOWED_ATTACHMENT_ACCEPT} className="sr-only" onChange={async (e) => {
+                          const files = e.target.files;
                           e.target.value = "";
+                          const count = await forwardAttachments.uploadNow(fileId, files);
+                          if (count > 0) {
+                            toast.success(`${count} file${count > 1 ? "s" : ""} uploaded.`);
+                            qc.invalidateQueries({ queryKey: ["efms-file", fileId] });
+                          }
                         }} />
                       </label>
-                      {modalFiles.length > 0 && (
-                        <div className="mt-2 space-y-1.5">
-                          {modalFiles.map((mf, i) => (
-                            <div key={i} className="flex items-center gap-2 p-2 bg-gray-50 rounded-lg border border-gray-100 text-xs">
-                              <FileText size={13} className="text-[#0D6E6E] shrink-0" />
-                              <span className="flex-1 truncate">{mf.name}</span>
-                              <button type="button" onClick={() => setModalFiles((a) => a.filter((_, idx) => idx !== i))}
-                                className="text-red-400 hover:text-red-600 shrink-0"><X size={13} /></button>
-                            </div>
-                          ))}
-                        </div>
-                      )}
+                      {/* Uploaded files persist immediately (not just on Forward) and
+                          appear in the "Attached Files" panel on the left — reusing
+                          that existing list instead of a second, parallel one here. */}
+                      <p className="text-xs text-gray-400 mt-1.5">Uploaded files appear in Attached Files on the left.</p>
                     </div>
                     <button onClick={handleSubmitAction} disabled={submitAction.isPending}
                       className="w-full py-2.5 text-sm rounded-xl font-bold flex items-center justify-center gap-2 bg-[#0D6E6E] text-white hover:bg-[#178F8F] disabled:opacity-50">

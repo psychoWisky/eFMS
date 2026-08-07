@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Boolean, Enum, ForeignKey, Date, DateTime
+from sqlalchemy import Column, String, Boolean, Enum, ForeignKey, Date, DateTime, UniqueConstraint
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
 from sqlalchemy.dialects.postgresql import UUID
@@ -106,3 +106,19 @@ class RefreshToken(Base, UUIDMixin, TimestampMixin):
     expires_at = Column(DateTime(timezone=True), nullable=False)
 
     user = relationship("User", back_populates="refresh_tokens")
+
+
+class FavoriteRecipient(Base, UUIDMixin, TimestampMixin):
+    """A user's personal recipient shortlist — created_at (via TimestampMixin)
+    is kept for future "recently favorited" ordering even though no such
+    ordering is needed today; no manual sort_order column, since favorites
+    are always alphabetical within their group, matching every other
+    recipient list in eFMS."""
+    __tablename__ = "favorite_recipients"
+
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    recipient_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "recipient_id", name="uq_favorite_recipient"),
+    )

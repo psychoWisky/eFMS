@@ -1,4 +1,5 @@
 """Super-admin endpoints: manage categories, priorities, recipients, notifications, users."""
+from datetime import datetime
 from typing import Optional, List
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -10,7 +11,7 @@ from pydantic import BaseModel
 
 from app.db.base import get_db
 from app.core.dependencies import require_roles, get_current_user
-from app.models.user import User, SystemRole, EFMS_ASSIGNABLE_ROLES
+from app.models.user import User, SystemRole, EFMS_ASSIGNABLE_ROLES, FavoriteRecipient
 from app.models.admin import FileCategory, FilePriority, FileRecipient, Notification
 from app.models.organization import Establishment, Department
 
@@ -51,6 +52,8 @@ class UserOut(BaseModel):
     id: UUID; email: str; full_name: str; active_role: Optional[str]; designation: Optional[str]
     department_name: Optional[str] = None
     employee_code: Optional[str] = None
+    is_favorite: bool = False
+    favorite_created_at: Optional[datetime] = None
     model_config = {"from_attributes": True}
 
     @classmethod
@@ -222,7 +225,73 @@ async def list_users(
     if department_id:
         q = q.where(User.department_id == department_id)
     r = await db.execute(q.options(selectinload(User.department)).order_by(User.first_name))
-    return [UserOut.from_user(u) for u in r.scalars().all()]
+    users = r.scalars().all()
+
+    # One batched query for the caller's favorites — same "batch everything,
+    # never N+1" style already used by person_info_map() elsewhere in eFMS.
+    fav_result = await db.execute(
+        select(FavoriteRecipient).where(FavoriteRecipient.user_id == current_user.id)
+    )
+    favorites = {f.recipient_id: f.created_at for f in fav_result.scalars().all()}
+
+    out = []
+    for u in users:
+        item = UserOut.from_user(u)
+        if u.id in favorites:
+            item.is_favorite = True
+            item.favorite_created_at = favorites[u.id]
+        out.append(item)
+    return out
+
+
+# ── Favorite recipients (per-user, no admin privilege required) ──────────────
+# A favorite is a relationship between the caller and another user, not an
+# attribute of GET /admin/users itself — hence its own tiny resource rather
+# than another query param on the list endpoint.
+
+@router.post("/favorites/{recipient_id}", status_code=201)
+async def add_favorite(
+    recipient_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(_any_role),
+):
+    existing = await db.execute(
+        select(FavoriteRecipient).where(
+            FavoriteRecipient.user_id == current_user.id,
+            FavoriteRecipient.recipient_id == recipient_id,
+        )
+    )
+    if existing.scalar_one_or_none():
+        return {"message": "Already a favorite."}
+    db.add(FavoriteRecipient(user_id=current_user.id, recipient_id=recipient_id))
+    try:
+        await db.commit()
+    except IntegrityError:
+        # Concurrent duplicate add — the row already exists, which is the
+        # desired end state, so this is not an error from the caller's view.
+        await db.rollback()
+    return {"message": "Added to favorites."}
+
+
+@router.delete("/favorites/{recipient_id}", status_code=204)
+async def remove_favorite(
+    recipient_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(_any_role),
+):
+    result = await db.execute(
+        select(FavoriteRecipient).where(
+            FavoriteRecipient.user_id == current_user.id,
+            FavoriteRecipient.recipient_id == recipient_id,
+        )
+    )
+    fav = result.scalar_one_or_none()
+    if fav:
+        await db.delete(fav)
+        await db.commit()
+    # Deleting a favorite that doesn't exist is already the desired end
+    # state — no error, matching the idempotent-delete convention used
+    # elsewhere in this router (e.g. mark_read on a missing notification).
 
 
 # ── Notifications ─────────────────────────────────────────────────────────────

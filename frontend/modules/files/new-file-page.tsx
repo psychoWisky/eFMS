@@ -8,12 +8,16 @@ import { Loader2, Upload, X, FileText, Send, AlertTriangle, CheckCircle2 } from 
 import { PersonBadge } from "@/components/shared/person-badge";
 import { SearchableSelect } from "@/components/shared/searchable-select";
 import { useRichTextEditor, RichTextToolbar } from "@/components/shared/rich-text-editor";
+import { useFavoriteRecipients, type FavoritableUser } from "@/hooks/use-favorite-recipients";
+import { useAttachmentQueue, resolveAttachmentTag } from "@/hooks/use-attachment-queue";
+import {
+  ATTACHMENT_TAGS, CUSTOM_TAG_VALUE, ALLOWED_ATTACHMENT_ACCEPT, ALLOWED_ATTACHMENT_HELP_TEXT, validateCustomTag,
+} from "@/lib/attachment-constants";
 
 interface DropItem { id: string; name: string; label?: string; is_active?: boolean; }
 interface Establishment { id: string; name: string; }
 interface DeptItem { id: string; name: string; establishment_id: string | null; }
-interface SystemUser { id: string; full_name: string; designation: string | null; active_role: string | null; department_name?: string | null; employee_code?: string | null; }
-interface Annexure { file: File; name: string; tag: string; }
+interface SystemUser extends FavoritableUser { active_role: string | null; }
 
 interface NewFileFormProps { onSuccess?: () => void; }
 
@@ -34,9 +38,11 @@ export function NewFileForm({ onSuccess }: NewFileFormProps) {
   const [sectionId, setSectionId] = useState("");
   const [draftRestored, setDraftRestored] = useState(false);
   const autoSaveRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const [annexures, setAnnexures] = useState<Annexure[]>([]);
+  const attachmentQueue = useAttachmentQueue();
+  const { items: annexures } = attachmentQueue;
   const [confirm, setConfirm] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
+  const { toggleFavorite, buildGroups, personLabel } = useFavoriteRecipients();
 
   const { data: categories = [] } = useQuery<DropItem[]>({ queryKey: ["admin-categories"], queryFn: async () => (await api.get("/admin/categories")).data });
   const { data: priorities = [] } = useQuery<DropItem[]>({ queryKey: ["admin-priorities"], queryFn: async () => (await api.get("/admin/priorities")).data });
@@ -125,16 +131,7 @@ export function NewFileForm({ onSuccess }: NewFileFormProps) {
         initial_content: noteContent,
       });
       const fileId = res.data.id;
-
-      // Upload each annexure
-      for (let i = 0; i < annexures.length; i++) {
-        const ann = annexures[i];
-        const form = new FormData();
-        form.append("upload", ann.file, `${ann.tag}-${ann.name || ann.file.name}`);
-        await api.post(`/efms/files/${fileId}/attachments`, form, {
-          headers: { "Content-Type": "multipart/form-data" },
-        }).catch(() => {});
-      }
+      await attachmentQueue.uploadAll(fileId);
       return res.data;
     },
     onSuccess: () => {
@@ -143,7 +140,7 @@ export function NewFileForm({ onSuccess }: NewFileFormProps) {
       qc.invalidateQueries({ queryKey: ["efms-files-outbox"] });
       onSuccess?.();
       // Reset form
-      setSubject(""); setCategory(""); setPriority(""); setRecipientId(""); setAnnexures([]); setDraftRestored(false);
+      setSubject(""); setCategory(""); setPriority(""); setRecipientId(""); attachmentQueue.clear(); setDraftRestored(false);
       localStorage.removeItem(DRAFT_KEY);
       editor?.commands.clearContent();
       setConfirm(false);
@@ -157,21 +154,9 @@ export function NewFileForm({ onSuccess }: NewFileFormProps) {
     },
   });
 
-  function addAnnexure(files: FileList | null) {
-    if (!files) return;
-    const next = [...annexures];
-    Array.from(files).forEach((f, i) => {
-      const idx = next.length + i + 1;
-      next.push({ file: f, name: f.name, tag: `doc-${idx}` });
-    });
-    setAnnexures(next.slice(0, 10));
-  }
-
-  function removeAnnexure(i: number) { setAnnexures((a) => a.filter((_, idx) => idx !== i)); }
-
   function handleDrop(e: React.DragEvent) {
     e.preventDefault(); setIsDragging(false);
-    addAnnexure(e.dataTransfer.files);
+    attachmentQueue.addFiles(e.dataTransfer.files);
   }
 
   function handleSubmit(e: React.FormEvent) {
@@ -180,6 +165,7 @@ export function NewFileForm({ onSuccess }: NewFileFormProps) {
     if (subject.trim().length < 5) { toast.error("Subject must be at least 5 characters."); return; }
     if (!category) { toast.error("Category is required."); return; }
     if (!priority) { toast.error("Priority is required."); return; }
+    if (attachmentQueue.hasInvalidCustomTags()) { toast.error("Please enter a valid custom tag for every attachment marked \"Other\"."); return; }
     setConfirm(true);
   }
 
@@ -269,15 +255,19 @@ export function NewFileForm({ onSuccess }: NewFileFormProps) {
             <label className="block text-base font-semibold text-gray-700 mb-2">Recipient (optional)</label>
             <p className="text-sm text-gray-400 mb-2">The file is saved as a Draft. You can choose a recipient now or leave it for later — Forward is what actually sends it.</p>
             {!loadingUsers && allUsers.length === 0 ? (
-              <p className="text-sm text-amber-600 bg-amber-50 rounded-xl p-3">No users found for this filter.</p>
+              <p className="text-sm text-amber-600 bg-amber-50 rounded-xl p-3">
+                {officeId || sectionId ? "No users found for this filter." : "No eligible recipients are currently available."}
+              </p>
             ) : (
               <SearchableSelect
-                options={allUsers.map((u) => ({
-                  value: u.id,
-                  label: u.employee_code ? `${u.full_name} (${u.employee_code})` : u.full_name,
-                }))}
+                groups={buildGroups(allUsers, personLabel)}
                 value={recipientId}
                 onChange={setRecipientId}
+                isFavorite={(id) => !!allUsers.find((u) => u.id === id)?.is_favorite}
+                onToggleFavorite={(id) => {
+                  const u = allUsers.find((u) => u.id === id);
+                  if (u) toggleFavorite(id, !!u.is_favorite);
+                }}
                 placeholder="No recipient yet…"
                 searchPlaceholder="Search by name or employee code…"
                 disabled={loadingUsers}
@@ -299,8 +289,8 @@ export function NewFileForm({ onSuccess }: NewFileFormProps) {
         <div onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }} onDragLeave={() => setIsDragging(false)} onDrop={handleDrop}
           className={`border-2 border-dashed rounded-xl p-6 text-center transition-colors mb-4 ${isDragging ? "border-[#0D6E6E] bg-[#E6F4F4]" : "border-gray-200 hover:border-gray-300"}`}>
           <Upload className="w-8 h-8 mx-auto mb-2 text-gray-300" />
-          <p className="text-base text-gray-500">Drag files here or <label className="text-[#0D6E6E] cursor-pointer hover:underline font-medium">browse<input type="file" multiple className="sr-only" onChange={(e) => addAnnexure(e.target.files)} /></label></p>
-          <p className="text-sm text-gray-400 mt-1">PDF, DOC, DOCX, JPG, PNG · Max 10 MB each · Up to 10 files</p>
+          <p className="text-base text-gray-500">Drag files here or <label className="text-[#0D6E6E] cursor-pointer hover:underline font-medium">browse<input type="file" multiple accept={ALLOWED_ATTACHMENT_ACCEPT} className="sr-only" onChange={(e) => { attachmentQueue.addFiles(e.target.files); e.target.value = ""; }} /></label></p>
+          <p className="text-sm text-gray-400 mt-1">{ALLOWED_ATTACHMENT_HELP_TEXT} · Max 10 MB each · Up to 10 files</p>
         </div>
         {annexures.length > 0 && (
           <div className="space-y-2">
@@ -310,29 +300,31 @@ export function NewFileForm({ onSuccess }: NewFileFormProps) {
                 <div className="flex-1 grid grid-cols-2 gap-3">
                   <div>
                     <label className="block text-xs font-medium text-gray-500 mb-1">File Name</label>
-                    <input value={ann.name} onChange={(e) => setAnnexures((a) => a.map((x, idx) => idx === i ? { ...x, name: e.target.value } : x))}
+                    <input value={ann.name} onChange={(e) => attachmentQueue.renameItem(i, e.target.value)}
                       className="w-full border border-gray-200 rounded-lg px-2.5 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-[#0D6E6E]" />
                   </div>
                   <div>
                     <label className="block text-xs font-medium text-gray-500 mb-1">Tag</label>
-                    <select value={ann.tag} onChange={(e) => setAnnexures((a) => a.map((x, idx) => idx === i ? { ...x, tag: e.target.value } : x))}
+                    <select value={ann.tag} onChange={(e) => attachmentQueue.setTag(i, e.target.value)}
                       className="w-full border border-gray-200 rounded-lg px-2.5 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-[#0D6E6E]">
-                      {[
-                        ...Array.from({ length: 10 }, (_, k) => `doc-${k + 1}`),
-                        "Annexure 1","Annexure 2","Annexure 3","Annexure 4","Annexure 5",
-                        "Annexure A","Annexure B","Annexure C",
-                        "Supporting Document","Reference Document",
-                        "Enclosure 1","Enclosure 2","Enclosure 3",
-                        "Exhibit 1","Exhibit 2",
-                        "Proof of Identity","Proof of Address","Certificate","Other",
-                      ].map((opt) => (
+                      {ATTACHMENT_TAGS.map((opt) => (
                         <option key={opt} value={opt}>{opt}</option>
                       ))}
                     </select>
+                    {ann.tag === CUSTOM_TAG_VALUE && (
+                      <input
+                        value={ann.customTag ?? ""}
+                        onChange={(e) => attachmentQueue.setCustomTag(i, e.target.value)}
+                        placeholder="Enter custom tag…"
+                        maxLength={60}
+                        autoFocus
+                        className="mt-1.5 w-full border border-gray-200 rounded-lg px-2.5 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-[#0D6E6E]"
+                      />
+                    )}
                   </div>
                 </div>
                 <span className="text-sm text-gray-400 shrink-0">{(ann.file.size / 1024).toFixed(0)} KB</span>
-                <button type="button" onClick={() => removeAnnexure(i)} className="text-red-400 hover:text-red-600 shrink-0"><X size={16} /></button>
+                <button type="button" onClick={() => attachmentQueue.removeItem(i)} className="text-red-400 hover:text-red-600 shrink-0"><X size={16} /></button>
               </div>
             ))}
           </div>
@@ -378,7 +370,7 @@ export function NewFileForm({ onSuccess }: NewFileFormProps) {
               <div><span className="font-semibold text-gray-600">Priority:</span> <span className="capitalize">{priority}</span></div>
               {isConfidential && <div><span className="font-semibold text-gray-600">Confidential:</span> <span className="text-purple-700 font-semibold">Yes — restricted to sender and recipient only</span></div>}
               <div className="flex items-start gap-2"><span className="font-semibold text-gray-600 shrink-0">Intended recipient:</span> {selectedRecipient ? <PersonBadge person={selectedRecipient} compact /> : <span>Not chosen yet</span>}</div>
-              {annexures.length > 0 && <div><span className="font-semibold text-gray-600">Annexures:</span> <span>{annexures.map((a) => a.tag).join(", ")}</span></div>}
+              {annexures.length > 0 && <div><span className="font-semibold text-gray-600">Annexures:</span> <span>{annexures.map((a) => resolveAttachmentTag(a)).join(", ")}</span></div>}
             </div>
             <div className="flex gap-3">
               <button type="button" onClick={() => setConfirm(false)} className="flex-1 px-5 py-3 text-base border border-gray-200 rounded-xl hover:bg-gray-50 font-medium">Edit</button>

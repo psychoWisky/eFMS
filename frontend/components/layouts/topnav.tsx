@@ -1,13 +1,14 @@
 "use client";
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { Bell, ChevronDown, LogOut, Loader2, CheckCheck, FileText } from "lucide-react";
+import { Bell, ChevronDown, LogOut, Loader2, CheckCheck, FileText, Star } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useAuthStore, useUser, useActiveRole, type EfmsRole } from "@/stores/auth.store";
 import { api } from "@/services/api";
 import { toast } from "sonner";
 import { cn, getInitials, formatDate } from "@/lib/utils";
+import { ManageFavoritesDialog } from "@/components/shared/manage-favorites-dialog";
 
 interface Notification { id: string; title: string; message: string | null; type: string; file_id: string | null; is_read: boolean; }
 
@@ -25,6 +26,7 @@ export function EFMSTopNav({ sidebarWidth }: { sidebarWidth: number }) {
   const qc = useQueryClient();
   const [menuOpen, setMenuOpen] = useState(false);
   const [notifOpen, setNotifOpen] = useState(false);
+  const [showFavorites, setShowFavorites] = useState(false);
 
   const { data: notifications = [] } = useQuery<Notification[]>({
     queryKey: ["notifications"],
@@ -136,6 +138,12 @@ export function EFMSTopNav({ sidebarWidth }: { sidebarWidth: number }) {
                   <p className="text-xs text-[#0D6E6E] font-medium mt-0.5">{activeRole ? ROLE_LABELS[activeRole] : ""}</p>
                 </div>
                 <div className="border-t border-[#D1D9E0] mt-1">
+                  <button onClick={() => { setShowFavorites(true); setMenuOpen(false); }}
+                    className="w-full flex items-center gap-3 px-4 py-2.5 text-base text-[#1A1A2E] hover:bg-[#F0F7F7]">
+                    <Star size={15} /> Manage Favorite Recipients
+                  </button>
+                </div>
+                <div className="border-t border-[#D1D9E0] mt-1">
                   <button onClick={handleLogout}
                     className="w-full flex items-center gap-3 px-4 py-2.5 text-base text-red-600 hover:bg-red-50">
                     <LogOut size={15} /> Sign Out
@@ -146,6 +154,7 @@ export function EFMSTopNav({ sidebarWidth }: { sidebarWidth: number }) {
           </AnimatePresence>
         </div>
       </div>
+      {showFavorites && <ManageFavoritesDialog onClose={() => setShowFavorites(false)} />}
     </header>
   );
 }
