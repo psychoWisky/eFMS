@@ -7,6 +7,7 @@ import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/services/api";
 import { toast } from "sonner";
+import { confirmAction, showSuccess } from "@/lib/alert";
 import {
   Plus, Loader2, X, Copy, RefreshCw, Eye, EyeOff, Pencil,
   Power, PowerOff, ShieldAlert,
@@ -158,7 +159,7 @@ function CreateUserModal({ onClose, establishments, departments }: {
     }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["user-management-users"] });
-      toast.success("User created.");
+      showSuccess("User created.");
       onClose();
     },
     onError: (err: unknown) => {
@@ -311,7 +312,7 @@ function EditUserModal({ user, onClose, establishments, departments }: {
     }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["user-management-users"] });
-      toast.success("User updated.");
+      showSuccess("User updated.");
       onClose();
     },
     onError: (err: unknown) => {
@@ -364,7 +365,7 @@ export function UserManagementSection() {
       api.patch(`/auth/admin/users/${id}/status`, { is_active }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["user-management-users"] });
-      toast.success("User status updated.");
+      showSuccess("User status updated.");
     },
     onError: () => toast.error("Could not update user status."),
   });
@@ -411,7 +412,18 @@ export function UserManagementSection() {
                         <Pencil size={15} />
                       </button>
                       <button
-                        onClick={() => toggleStatus.mutate({ id: u.id, is_active: !u.is_active })}
+                        onClick={async () => {
+                          if (u.is_active) {
+                            const confirmed = await confirmAction({
+                              title: "Deactivate this user?",
+                              text: `${u.full_name} will no longer be able to sign in.`,
+                              confirmText: "Deactivate",
+                              danger: true,
+                            });
+                            if (!confirmed) return;
+                          }
+                          toggleStatus.mutate({ id: u.id, is_active: !u.is_active });
+                        }}
                         title={u.is_active ? "Deactivate" : "Activate"}
                         className={`p-2 rounded-lg hover:bg-gray-100 ${u.is_active ? "text-gray-400 hover:text-red-500" : "text-gray-400 hover:text-green-600"}`}
                       >

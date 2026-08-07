@@ -6,6 +6,7 @@ import { useMutation } from "@tanstack/react-query";
 import { api } from "@/services/api";
 import { useAuthStore } from "@/stores/auth.store";
 import { toast } from "sonner";
+import { showSuccess } from "@/lib/alert";
 
 type Step = "credentials" | "otp";
 
@@ -42,7 +43,7 @@ export default function LoginPage() {
     onSuccess: (res) => {
       const { user, access_token, refresh_token } = res.data;
       setAuth(user, access_token, refresh_token);
-      toast.success(`Welcome, ${user.full_name}`);
+      showSuccess(`Welcome, ${user.full_name}`);
       if (user.must_change_password) {
         router.replace("/change-password");
         return;

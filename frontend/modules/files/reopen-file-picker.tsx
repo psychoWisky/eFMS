@@ -6,6 +6,7 @@ import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/services/api";
 import { toast } from "sonner";
+import { showSuccess } from "@/lib/alert";
 import { ChevronLeft, Search, Unlock, Loader2, FolderOpen } from "lucide-react";
 import { formatDate, matchesRefSuffix } from "@/lib/utils";
 
@@ -40,7 +41,7 @@ export function ReopenFilePicker({
       qc.invalidateQueries({ queryKey: ["docket-released"] });
       qc.invalidateQueries({ queryKey: ["efms-files-outbox"] });
       qc.invalidateQueries({ queryKey: ["my-docket"] });
-      toast.success("File reopened.");
+      showSuccess("File reopened.");
       onReopened(fileId);
     },
     onError: (err: unknown) => {

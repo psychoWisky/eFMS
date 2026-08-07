@@ -22,10 +22,17 @@ router = APIRouter(prefix="/docket", tags=["Docket"])
 
 @router.get("", response_model=List[dict])
 async def my_docket(db: AsyncSession = Depends(get_db), user: User = Depends(get_current_verified_user)):
-    """Files currently forwarded TO me (I am the current holder)."""
+    """Files currently forwarded TO me (I am the current holder).
+
+    A file's creator is also its initial current_holder_id (set at creation,
+    before any routing), so a never-forwarded Draft would otherwise show up
+    in its own creator's Docket despite not being "received" work at all —
+    excluded here via status != draft, which is equivalent to "never
+    forwarded" since the first forward always flips status off draft
+    (see route_file)."""
     result = await db.execute(
         select(EfmsFile)
-        .where(EfmsFile.current_holder_id == user.id)
+        .where(EfmsFile.current_holder_id == user.id, EfmsFile.status != FileStatus.draft)
         .order_by(EfmsFile.updated_at.desc())
     )
     files = result.scalars().all()

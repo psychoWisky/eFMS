@@ -3,6 +3,7 @@ import { useState, useCallback, useEffect, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/services/api";
 import { toast } from "sonner";
+import { showSuccess } from "@/lib/alert";
 import { EditorContent } from "@tiptap/react";
 import { Loader2, Upload, X, FileText, Send, AlertTriangle, CheckCircle2 } from "lucide-react";
 import { PersonBadge } from "@/components/shared/person-badge";
@@ -135,7 +136,7 @@ export function NewFileForm({ onSuccess }: NewFileFormProps) {
       return res.data;
     },
     onSuccess: () => {
-      toast.success("File created and submitted successfully.");
+      showSuccess("File created and submitted successfully.");
       qc.invalidateQueries({ queryKey: ["efms-files"] });
       qc.invalidateQueries({ queryKey: ["efms-files-outbox"] });
       onSuccess?.();

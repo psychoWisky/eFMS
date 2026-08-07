@@ -10,6 +10,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/services/api";
 import { useAuthStore, useIsAuthenticated, useMustChangePassword, useActiveRole } from "@/stores/auth.store";
 import { toast } from "sonner";
+import { showSuccess } from "@/lib/alert";
 
 export default function ChangePasswordPage() {
   const router = useRouter();
@@ -48,7 +49,7 @@ export default function ChangePasswordPage() {
     }),
     onSuccess: () => {
       updateUser({ must_change_password: false });
-      toast.success("Password changed successfully.");
+      showSuccess("Password changed successfully.");
       const isAdmin = ["admin", "super_admin"].includes(activeRole ?? "");
       router.replace(isAdmin ? "/admin" : "/dashboard");
     },

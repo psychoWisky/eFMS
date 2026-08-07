@@ -3,6 +3,7 @@ import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/services/api";
 import { toast } from "sonner";
+import { confirmAction, showSuccess } from "@/lib/alert";
 import {
   Plus, Trash2, Eye, EyeOff, Tag, Users, Building2, Layers,
   Loader2, AlertTriangle, PenLine, ShieldX,
@@ -21,6 +22,15 @@ const INPUT = "w-full border border-gray-300 rounded-lg px-3 py-2.5 text-base fo
 const LABEL = "block text-sm font-semibold text-gray-600 mb-1";
 
 function Row({ name, sub, active, onToggle, onDelete }: { name: string; sub?: string; active: boolean; onToggle: () => void; onDelete: () => void }) {
+  async function handleDelete() {
+    const confirmed = await confirmAction({
+      title: "Delete this item?",
+      text: `"${name}" will be permanently deleted. This cannot be undone.`,
+      confirmText: "Delete",
+      danger: true,
+    });
+    if (confirmed) onDelete();
+  }
   return (
     <div className={`flex items-center justify-between px-4 py-3 rounded-lg border mb-2 ${active ? "bg-white border-gray-200" : "bg-gray-50 border-gray-100 opacity-60"}`}>
       <div className="min-w-0 flex-1">
@@ -32,7 +42,7 @@ function Row({ name, sub, active, onToggle, onDelete }: { name: string; sub?: st
         <button onClick={onToggle} title={active ? "Hide" : "Show"} className="p-2 rounded-lg hover:bg-gray-100 text-gray-400 hover:text-gray-600">
           {active ? <Eye size={16} /> : <EyeOff size={16} />}
         </button>
-        <button onClick={onDelete} title="Delete" className="p-2 rounded-lg hover:bg-red-50 text-gray-400 hover:text-red-500">
+        <button onClick={handleDelete} title="Delete" className="p-2 rounded-lg hover:bg-red-50 text-gray-400 hover:text-red-500">
           <Trash2 size={16} />
         </button>
       </div>
@@ -61,7 +71,7 @@ export function AdminPanel() {
     try {
       await fn();
       (Array.isArray(keys) ? keys : [keys]).forEach((k) => qc.invalidateQueries({ queryKey: [k] }));
-      toast.success("Done");
+      showSuccess("Done");
     } catch (err: unknown) {
       const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
       toast.error(msg ?? "Action failed");
@@ -236,9 +246,19 @@ export function AdminPanel() {
                     <p className="text-xs text-gray-500 mt-0.5">{u.email} · {u.designation ?? "—"} · {u.active_role?.replace(/_/g, " ") ?? "—"}</p>
                   </div>
                   <button
-                    onClick={() => act("sign-permissions", () =>
-                      api.patch(`/admin/users/${u.id}/sign-permission`, { can_sign: false })
-                    )}
+                    onClick={async () => {
+                      const confirmed = await confirmAction({
+                        title: "Revoke signature permission?",
+                        text: `${u.full_name} will no longer be able to digitally sign documents.`,
+                        confirmText: "Revoke",
+                        danger: true,
+                      });
+                      if (confirmed) {
+                        act("sign-permissions", () =>
+                          api.patch(`/admin/users/${u.id}/sign-permission`, { can_sign: false })
+                        );
+                      }
+                    }}
                     className="flex items-center gap-1 px-3 py-1.5 border border-red-200 text-red-600 rounded-lg text-xs hover:bg-red-50 shrink-0 ml-3"
                     title="Revoke signature permission"
                   >

@@ -5,14 +5,14 @@ import { useRouter } from "next/navigation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api, FILES_BASE_URL, API_URL } from "@/services/api";
 import { toast } from "sonner";
+import { confirmAction, showSuccess, escapeHtml } from "@/lib/alert";
 import { useUser, useActiveRole } from "@/stores/auth.store";
 import { cn, formatDate, isPreviewable } from "@/lib/utils";
 import {
   ChevronLeft, FileText, Download, ArrowRight,
   Loader2, Lock, Clock, MessageSquare, Upload, X, PenLine,
-  CheckCircle2, XCircle, Trash2, Pencil, Save, AlertCircle,
+  CheckCircle2, XCircle, Trash2, Pencil, Save,
 } from "lucide-react";
-import { motion, AnimatePresence } from "framer-motion";
 import PdfSignatureCanvas, { type SignatureStamp } from "@/components/signature/pdf-signature-canvas";
 import OtpVerifyModal from "@/components/signature/otp-verify-modal";
 import { PersonBadge, type PersonInfo } from "@/components/shared/person-badge";
@@ -43,15 +43,6 @@ const NOTESHEET_PROSE_CLASS = "prose prose-sm max-w-none leading-relaxed " +
 // normalize both to safe HTML for a single dangerouslySetInnerHTML render
 // path — no duplicate rendering component, no backend/data change.
 const HTML_TAG_PATTERN = /<([a-z][a-z0-9]*)\b[^>]*>/i;
-
-function escapeHtml(text: string): string {
-  return text
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
-}
 
 function toSafeNotesheetHtml(raw: string): string {
   if (HTML_TAG_PATTERN.test(raw)) return raw; // Rich Text Editor output — already safe HTML, render as-is.
@@ -96,7 +87,6 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
   const qc = useQueryClient();
   const [activeTab, setActiveTab] = useState<"notesheet" | "track" | "sign">("notesheet");
   // First-forward (Draft -> Active): confirmation-only, no recipient/notesheet re-entry.
-  const [showFirstForwardConfirm, setShowFirstForwardConfirm] = useState(false);
   // Subsequent forwards: inline recipient + notesheet-entry panel (no modal).
   const [toUserId, setToUserId] = useState("");
   const [remarks, setRemarks] = useState("");
@@ -174,9 +164,27 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
   // client-side purely so the Edit Draft affordance disappears on its own.
   const draftEditExpired = file ? Date.now() - new Date(file.created_at).getTime() > DRAFT_EDIT_WINDOW_MS : true;
   const canEditDraft = isDraft && isCreator && !draftEditExpired;
+  // Whole-file deletion (distinct from Edit Draft/attachment delete): creator,
+  // still a Draft, never forwarded. Not time-gated — a draft that's expired
+  // its edit window must still have an escape hatch (delete or forward),
+  // otherwise it gets permanently stuck. Backend (_delete_draft_file) is the
+  // real enforcement; this only hides/shows the button to match it.
+  const canDeleteDraft = isDraft && isCreator && (file?.route_entries.length ?? 0) === 0;
   // Released overrides the underlying workflow status for display purposes.
   const displayStatus = isReleased ? "released" : (file?.status ?? "draft");
-  const canForwardDraft = isHolder && isDraft;
+  // Quick one-click forward: window still open, recipient already on record —
+  // Edit Draft remains the single path to set/change it while editable.
+  const canForwardDraft = isHolder && isDraft && !draftEditExpired && !!file?.recipient_id;
+  // Once the edit window closes, Edit Draft (and with it, the only place
+  // recipient selection normally lives) disappears. Routing must still work,
+  // so a recipient-only picker takes over here — pre-filled with the existing
+  // recipient if any, changeable, with no document/notesheet editing exposed.
+  // This is deliberately NOT the same "Forward This File" panel used below for
+  // subsequent forwards: that panel also exposes a remarks/notesheet editor,
+  // which would violate "document editing must remain locked."
+  const needsRecipientPicker = isHolder && isDraft && draftEditExpired;
+  // Subsequent forwards only (never for a still-draft file) — recipient +
+  // notesheet-entry + attachments, unrelated to the draft-edit window.
   const canForwardAfter = isHolder && !isDraft && !isTerminal && !isReleased;
   // Released files can no longer be forwarded from here — the only supported
   // way to move a released file again is to reopen it via New File -> Use
@@ -199,8 +207,7 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
   });
 
   async function afterForwardSuccess() {
-    toast.success("File forwarded.");
-    setShowFirstForwardConfirm(false);
+    showSuccess("File forwarded.");
     setRemarks(""); setToUserId("");
     if (forwardDraftKey) localStorage.removeItem(forwardDraftKey);
     qc.invalidateQueries({ queryKey: ["efms-file", fileId] });
@@ -214,12 +221,16 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
     router.push("/dashboard");
   }
 
-  // First forward (Draft -> Active): no recipient/notesheet re-entry — reuses
-  // the recipient already stored on the draft (file.recipient_id).
-  async function handleFirstForward() {
-    if (!file?.recipient_id) return;
+  // First forward (Draft -> Active): no notesheet re-entry — reuses the
+  // recipient already stored on the draft (file.recipient_id) by default, or
+  // an explicit recipientId when called from the post-window recipient-only
+  // picker (needsRecipientPicker), which lets the user pick/change one even
+  // though the rest of the draft is locked.
+  async function handleFirstForward(recipientId?: string) {
+    const target = recipientId ?? file?.recipient_id;
+    if (!target) return;
     try {
-      await submitAction.mutateAsync({ action: actionType, remarks: "", to_user_id: file.recipient_id });
+      await submitAction.mutateAsync({ action: actionType, remarks: "", to_user_id: target });
       await afterForwardSuccess();
     } catch (err) {
       const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
@@ -231,8 +242,17 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
   // panel. Attachments are no longer uploaded here — the Forward panel now
   // uploads each file immediately on selection (see forwardAttachments.uploadNow
   // in the file input below), so they're already persisted before this runs.
+  // Confirmed via the shared confirmAction() (lib/alert.ts) before the API
+  // call actually runs — same pattern as every other forward/delete action.
   async function handleSubmitAction() {
     if (!toUserId) { toast.warning("Please select a person to forward to."); return; }
+    const selected = users.find((u) => u.id === toUserId);
+    const confirmed = await confirmAction({
+      title: "Forward File",
+      html: `Are you sure you want to forward this file to <strong>${escapeHtml(selected?.full_name ?? "the selected recipient")}</strong>?`,
+      confirmText: "Forward",
+    });
+    if (!confirmed) return;
     try {
       await submitAction.mutateAsync({ action: actionType, remarks, to_user_id: toUserId || null });
       await afterForwardSuccess();
@@ -251,6 +271,34 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
     mutationFn: (content: string) => api.patch(`/efms/files/${fileId}/notesheet`, { content }),
   });
 
+  // Permanent whole-file delete — reuses DELETE /efms/files/{id}. Backend is
+  // the source of truth for creator/draft/never-forwarded/30-min checks;
+  // canDeleteDraft above only hides the button, it never authorizes the call.
+  const deleteFileMutation = useMutation({
+    mutationFn: () => api.delete(`/efms/files/${fileId}`),
+  });
+
+  async function handleDeleteDraft() {
+    const confirmed = await confirmAction({
+      title: "Delete this draft file?",
+      text: "This will permanently delete the entire file, including its notesheet and attachments. This cannot be undone.",
+      confirmText: "Delete",
+      danger: true,
+    });
+    if (!confirmed) return;
+    try {
+      await deleteFileMutation.mutateAsync();
+      showSuccess("Draft file deleted.");
+      qc.invalidateQueries({ queryKey: ["efms-files"] });
+      qc.invalidateQueries({ queryKey: ["efms-files-outbox"] });
+      qc.invalidateQueries({ queryKey: ["my-docket"] });
+      router.push("/dashboard");
+    } catch (err) {
+      const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      toast.error(msg ?? "Could not delete this file.");
+    }
+  }
+
   async function handleSaveDraft() {
     try {
       await updateFileMutation.mutateAsync({
@@ -261,7 +309,7 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
         recipient_id: draftRecipientId || null,
       });
       await updateNotesheetMutation.mutateAsync(draftNotesheet);
-      toast.success("Draft updated.");
+      showSuccess("Draft updated.");
       setEditingDraft(false);
       qc.invalidateQueries({ queryKey: ["efms-file", fileId] });
     } catch (err) {
@@ -287,7 +335,7 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
   const deleteAttachmentMutation = useMutation({
     mutationFn: (attId: string) => api.delete(`/efms/files/${fileId}/attachments/${attId}`),
     onSuccess: () => {
-      toast.success("Attachment deleted.");
+      showSuccess("Attachment deleted.");
       qc.invalidateQueries({ queryKey: ["efms-file", fileId] });
     },
     onError: (err: unknown) => {
@@ -304,6 +352,15 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
     // Only re-sync when the panel opens — not on every keystroke, which would fight the editor's own state.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editingDraft]);
+
+  // Pre-fill the recipient-only picker (needsRecipientPicker) with whatever
+  // recipient is already on the draft, if any — the user can still change it.
+  useEffect(() => {
+    if (needsRecipientPicker && file?.recipient_id && !toUserId) {
+      setToUserId(file.recipient_id);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [needsRecipientPicker, file?.recipient_id]);
 
   // Forward panel's notesheet entry — same shared editor as Initial Notesheet
   // and Edit Draft, just a second independent instance (its own empty
@@ -414,7 +471,15 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                     {canDelete && (
                       <button
                         type="button"
-                        onClick={() => deleteAttachmentMutation.mutate(att.id)}
+                        onClick={async () => {
+                          const confirmed = await confirmAction({
+                            title: "Delete this attachment?",
+                            text: `"${att.original_name}" will be permanently removed from this file.`,
+                            confirmText: "Delete",
+                            danger: true,
+                          });
+                          if (confirmed) deleteAttachmentMutation.mutate(att.id);
+                        }}
                         disabled={deleteAttachmentMutation.isPending}
                         className="text-xs text-red-400 hover:text-red-600 flex items-center gap-1 ml-auto disabled:opacity-50"
                       >
@@ -487,22 +552,23 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                   <Pencil size={14} /> Edit Draft
                 </button>
               )}
-              {canForwardDraft && (
-                file.recipient_id ? (
-                  <button onClick={() => setShowFirstForwardConfirm(true)}
-                    className="flex items-center gap-1.5 px-4 py-2 bg-[#0D6E6E] text-white rounded-xl text-sm font-semibold hover:bg-[#178F8F]">
-                    <ArrowRight size={15} /> Forward to Recipient
-                  </button>
-                ) : (
-                  <span className="flex items-center gap-1.5 px-3 py-2 text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-xl">
-                    <AlertCircle size={14} /> Edit the draft to select a recipient before forwarding.
-                  </span>
-                )
+              {canDeleteDraft && (
+                <button onClick={handleDeleteDraft} disabled={deleteFileMutation.isPending}
+                  className="flex items-center gap-1.5 px-3 py-2 border border-red-200 text-red-600 rounded-xl text-sm font-semibold hover:bg-red-50 disabled:opacity-50">
+                  <Trash2 size={14} /> Delete Draft
+                </button>
               )}
-              {canForwardAfter && (
-                <button onClick={() => setActiveTab("notesheet")}
-                  className="flex items-center gap-1.5 px-3 py-2 bg-[#0D6E6E] text-white rounded-xl text-sm font-semibold hover:bg-[#178F8F]">
-                  <ArrowRight size={14} /> Forward
+              {canForwardDraft && (
+                <button onClick={async () => {
+                  const confirmed = await confirmAction({
+                    title: "Forward File",
+                    html: `Are you sure you want to forward this file to <strong>${escapeHtml(file?.recipient_info?.full_name ?? "the selected recipient")}</strong>?`,
+                    confirmText: "Forward",
+                  });
+                  if (confirmed) handleFirstForward();
+                }}
+                  className="flex items-center gap-1.5 px-4 py-2 bg-[#0D6E6E] text-white rounded-xl text-sm font-semibold hover:bg-[#178F8F]">
+                  <ArrowRight size={15} /> Forward to Recipient
                 </button>
               )}
             </div>
@@ -643,7 +709,8 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                 </div>
               </div>
 
-              {/* RIGHT: Edit Draft (creator, within window) or Forward panel (subsequent holders) */}
+              {/* RIGHT: Edit Draft (creator, within window) / recipient-only picker
+                  (draft, window closed) / Forward panel (subsequent holders) */}
               <div className="lg:col-span-1 space-y-5">
                 {editingDraft ? (
                   <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-5 space-y-4">
@@ -709,6 +776,50 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                         Save
                       </button>
                     </div>
+                  </div>
+                ) : needsRecipientPicker ? (
+                  <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-5 space-y-4">
+                    <div className="flex items-center justify-between">
+                      <h2 className="text-base font-bold text-gray-800">Select Recipient</h2>
+                      <span className="text-xs text-gray-500 bg-gray-50 border border-gray-200 rounded-full px-2 py-0.5">Editing locked</span>
+                    </div>
+                    <p className="text-sm text-gray-500">
+                      The 30-minute editing window has closed, so the subject, category, priority and notesheet
+                      are now read-only. You can still choose who to forward this file to.
+                    </p>
+                    <div>
+                      <label className="block text-sm font-semibold text-gray-700 mb-1.5">Forward To *</label>
+                      {users.length === 0 ? (
+                        <p className="text-sm text-amber-600 bg-amber-50 rounded-xl p-3">No users available.</p>
+                      ) : (
+                        <SearchableSelect
+                          groups={buildGroups(users, (u) => u.full_name + (u.designation ? ` — ${u.designation}` : "") + (u.department_name ? ` (${u.department_name})` : ""))}
+                          value={toUserId}
+                          onChange={setToUserId}
+                          isFavorite={(id) => !!users.find((u) => u.id === id)?.is_favorite}
+                          onToggleFavorite={(id) => {
+                            const u = users.find((u) => u.id === id);
+                            if (u) toggleFavorite(id, !!u.is_favorite);
+                          }}
+                          placeholder="Select…"
+                          searchPlaceholder="Search users…"
+                        />
+                      )}
+                    </div>
+                    <button onClick={async () => {
+                      if (!toUserId) { toast.warning("Please select a recipient to forward to."); return; }
+                      const selected = users.find((u) => u.id === toUserId);
+                      const confirmed = await confirmAction({
+                        title: "Forward File",
+                        html: `Are you sure you want to forward this file to <strong>${escapeHtml(selected?.full_name ?? "the selected recipient")}</strong>?`,
+                        confirmText: "Forward",
+                      });
+                      if (confirmed) handleFirstForward(toUserId);
+                    }} disabled={submitAction.isPending}
+                      className="w-full py-2.5 text-sm rounded-xl font-bold flex items-center justify-center gap-2 bg-[#0D6E6E] text-white hover:bg-[#178F8F] disabled:opacity-50">
+                      {submitAction.isPending ? <Loader2 size={15} className="animate-spin" /> : <ArrowRight size={15} />}
+                      Forward
+                    </button>
                   </div>
                 ) : canForwardAfter ? (
                   <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-5 space-y-4">
@@ -956,7 +1067,7 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
             setOtpError(null);
             try {
               await api.post(`/efms/files/${fileId}/sign/${pendingSignatureId}/verify`, { otp_code: otp });
-              toast.success("Signature verified! ✓");
+              showSuccess("Signature verified!");
               setShowOtpModal(false);
               setPendingStamp(null);
               setPendingSignatureId(null);
@@ -972,38 +1083,6 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
         />
       )}
 
-      {/* First-forward confirmation — no recipient/notesheet re-entry; uses
-          the recipient already stored on the draft (file.recipient_id). */}
-      <AnimatePresence>
-        {showFirstForwardConfirm && file.recipient_info && (
-          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-            className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-6"
-            onClick={() => setShowFirstForwardConfirm(false)}>
-            <motion.div initial={{ scale: 0.95 }} animate={{ scale: 1 }} exit={{ scale: 0.95 }}
-              onClick={(e) => e.stopPropagation()}
-              className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6">
-              <div className="flex items-center gap-3 mb-4">
-                <ArrowRight size={24} className="text-[#0D6E6E]" />
-                <h3 className="text-xl font-bold text-gray-900">Forward File</h3>
-              </div>
-              <p className="text-base text-gray-700 mb-2">Are you sure you want to forward this file to:</p>
-              <div className="bg-[#F5F7FA] rounded-xl px-4 py-3 mb-5">
-                <PersonBadge person={file.recipient_info} />
-              </div>
-              <div className="flex gap-3">
-                <button onClick={() => setShowFirstForwardConfirm(false)}
-                  className="flex-1 py-3 text-base border border-gray-200 rounded-xl hover:bg-gray-50 font-medium">Cancel</button>
-                <button
-                  onClick={handleFirstForward}
-                  disabled={submitAction.isPending}
-                  className="flex-1 py-3 text-base rounded-xl font-bold flex items-center justify-center gap-2 bg-[#0D6E6E] text-white hover:bg-[#178F8F] disabled:opacity-50">
-                  {submitAction.isPending ? <Loader2 size={18} className="animate-spin" /> : "Forward"}
-                </button>
-              </div>
-            </motion.div>
-          </motion.div>
-        )}
-      </AnimatePresence>
     </div>
   );
 }

@@ -8,6 +8,7 @@ import { useUser, useActiveRole } from "@/stores/auth.store";
 import { cn, formatDate, matchesRefSuffix } from "@/lib/utils";
 import { Inbox, FolderOpen, FilePlus2, Loader2, Unlock, Eye, EyeOff, Clock, Search, FilePlus, FolderSearch } from "lucide-react";
 import { toast } from "sonner";
+import { showSuccess } from "@/lib/alert";
 import { NewFileForm } from "@/modules/files/new-file-page";
 import { ReopenFilePicker } from "@/modules/files/reopen-file-picker";
 import { PersonBadge, type PersonInfo } from "@/components/shared/person-badge";
@@ -78,7 +79,7 @@ export function EFMSDashboard() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["my-docket"] });
       qc.invalidateQueries({ queryKey: ["docket-released"] });
-      toast.success("File released to your department.");
+      showSuccess("File released to your department.");
     },
     onError: (err: unknown) => {
       const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;

@@ -491,6 +491,40 @@ async def update_file(
     return _visible_file(await _load_file(file_id, db), user)
 
 
+@router.delete("/{file_id}", status_code=204)
+async def delete_draft_file(
+    file_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_verified_user),
+):
+    """Permanently delete an entire Draft file. Distinct from attachment
+    deletion (delete_attachment above) — this removes the whole file record.
+    Allowed only for the creator, only while the file is still a Draft, and
+    only if it has never been forwarded. Deliberately NOT gated by
+    DRAFT_EDIT_WINDOW/_draft_edit_expired (unlike metadata/notesheet editing):
+    once that window closes, deletion is the creator's only remaining way to
+    get rid of a draft they can no longer edit, so it must stay available for
+    as long as the file is still an untouched Draft."""
+    f = await _load_file(file_id, db)
+    if f.created_by != user.id:
+        raise HTTPException(status_code=403, detail="Only the file creator can delete this file.")
+    if f.status != FileStatus.draft:
+        raise HTTPException(status_code=400, detail="Only a Draft file can be deleted.")
+    if f.route_entries:
+        raise HTTPException(status_code=400, detail="This file has already been forwarded and can no longer be deleted.")
+
+    # Remove attachment files from disk before the DB row (and its ORM-cascaded
+    # attachment rows) disappear — same pattern as delete_attachment.
+    upload_dir = os.path.abspath(settings.UPLOAD_DIR)
+    for att in f.attachments:
+        dest = os.path.join(upload_dir, att.stored_name)
+        if os.path.exists(dest):
+            os.remove(dest)
+
+    await db.delete(f)
+    await db.commit()
+
+
 # ── Notesheet ─────────────────────────────────────────────────────────────────
 
 @router.patch("/{file_id}/notesheet", response_model=FileOut)
