@@ -6,10 +6,12 @@
 // markers are synthesized client-side from data those endpoints already
 // return; nothing is fabricated (see report: no "Reopened" event exists in
 // the underlying data, so none is shown here).
+import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api, API_URL } from "@/services/api";
-import { cn, formatDate, isPreviewable } from "@/lib/utils";
+import { cn, formatDate, getAttachmentPreviewKind } from "@/lib/utils";
 import { PersonBadge, type PersonInfo } from "@/components/shared/person-badge";
+import { AttachmentPreviewModal } from "@/components/shared/attachment-preview-modal";
 import { X, FileText, ArrowRight, PenLine, Unlock, Loader2 } from "lucide-react";
 
 interface Attachment { id: string; original_name: string; file_size: number | null; mime_type: string | null; uploaded_by: string; created_at: string; }
@@ -82,6 +84,7 @@ const EVENT_STYLE: Record<TimelineEvent["type"], { bg: string; icon: React.Eleme
 };
 
 export function TimelineModal({ fileId, onClose }: { fileId: string; onClose: () => void }) {
+  const [previewAttachment, setPreviewAttachment] = useState<Attachment | null>(null);
   const { data: file, isLoading: loadingFile } = useQuery<FileDetail>({
     queryKey: ["tracking-file-detail", fileId],
     queryFn: async () => (await api.get(`/efms/files/${fileId}`)).data,
@@ -95,6 +98,7 @@ export function TimelineModal({ fileId, onClose }: { fileId: string; onClose: ()
   const events = file ? buildTimeline(file, trackEntries) : [];
 
   return (
+    <>
     <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-6" onClick={onClose}>
       <div
         className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[85vh] flex flex-col"
@@ -160,11 +164,16 @@ export function TimelineModal({ fileId, onClose }: { fileId: string; onClose: ()
                             <div key={a.id} className="flex items-center gap-1.5 text-xs bg-gray-50 border border-gray-200 rounded-lg px-2 py-1">
                               <FileText size={12} className="text-gray-400 shrink-0" />
                               <span className="truncate max-w-[140px]">{a.original_name}</span>
-                              {isPreviewable(a) ? (
-                                <a href={`/api/attachments/${fileId}/${a.id}/view`} target="_blank" rel="noreferrer" className="text-[#0D6E6E] font-semibold hover:underline">View</a>
-                              ) : (
-                                <span className="text-gray-400">No preview</span>
-                              )}
+                              {(() => {
+                                const kind = getAttachmentPreviewKind(a);
+                                if (kind === "native") {
+                                  return <a href={`/api/attachments/${fileId}/${a.id}/view`} target="_blank" rel="noreferrer" className="text-[#0D6E6E] font-semibold hover:underline">View</a>;
+                                }
+                                if (kind === "none") {
+                                  return <span className="text-gray-400">No preview</span>;
+                                }
+                                return <button type="button" onClick={() => setPreviewAttachment(a)} className="text-[#0D6E6E] font-semibold hover:underline">View</button>;
+                              })()}
                               <a href={`${API_URL}/efms/files/${fileId}/attachments/${a.id}/download`} className="text-gray-500 hover:underline">Download</a>
                             </div>
                           ))}
@@ -179,5 +188,13 @@ export function TimelineModal({ fileId, onClose }: { fileId: string; onClose: ()
         </div>
       </div>
     </div>
+    {previewAttachment && (
+      <AttachmentPreviewModal
+        fileId={fileId}
+        attachment={previewAttachment}
+        onClose={() => setPreviewAttachment(null)}
+      />
+    )}
+    </>
   );
 }

@@ -49,12 +49,33 @@ const PREVIEWABLE_MIME_TYPES = new Set([
   "image/png", "image/jpeg", "image/gif", "image/webp", "image/svg+xml",
   "text/plain",
 ]);
+const NATIVE_PREVIEW_EXTENSIONS = ["pdf", "png", "jpg", "jpeg", "gif", "webp", "svg", "txt"];
+const SHEET_PREVIEW_EXTENSIONS = ["xls", "xlsx", "csv"];
+
+export type AttachmentPreviewKind = "native" | "docx" | "doc" | "sheet" | "none";
+
+/**
+ * Classifies how an attachment should be previewed. "native" = the browser's
+ * own PDF/image viewer (unchanged, opened directly via the /view endpoint).
+ * "docx"/"doc" = the shared DocxViewer (doc goes through the on-the-fly
+ * preview-docx conversion first). "sheet" = client-side HTML table render
+ * (xls/xlsx/csv). "none" = no preview available — show the fallback message.
+ * Single source of truth reused by the attachment list, the Attachment
+ * Preview modal, and the File Tracking History timeline, so they can never
+ * classify the same file differently.
+ */
+export function getAttachmentPreviewKind(att: { mime_type: string | null; original_name: string }): AttachmentPreviewKind {
+  const ext = att.original_name.split(".").pop()?.toLowerCase() ?? "";
+  if ((att.mime_type && PREVIEWABLE_MIME_TYPES.has(att.mime_type)) || NATIVE_PREVIEW_EXTENSIONS.includes(ext)) return "native";
+  if (att.mime_type === "application/vnd.openxmlformats-officedocument.wordprocessingml.document" || ext === "docx") return "docx";
+  if (att.mime_type === "application/msword" || ext === "doc") return "doc";
+  if (SHEET_PREVIEW_EXTENSIONS.includes(ext)) return "sheet";
+  return "none";
+}
 
 /** Shared by the attachment panel and the File Tracking History timeline. */
 export function isPreviewable(att: { mime_type: string | null; original_name: string }): boolean {
-  if (att.mime_type && PREVIEWABLE_MIME_TYPES.has(att.mime_type)) return true;
-  const ext = att.original_name.split(".").pop()?.toLowerCase();
-  return ["pdf", "png", "jpg", "jpeg", "gif", "webp", "svg", "txt"].includes(ext ?? "");
+  return getAttachmentPreviewKind(att) !== "none";
 }
 
 export function fileStatusBadgeClass(status: string): string {

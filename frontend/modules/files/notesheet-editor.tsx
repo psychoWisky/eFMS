@@ -7,11 +7,11 @@ import { api, FILES_BASE_URL, API_URL } from "@/services/api";
 import { toast } from "sonner";
 import { confirmAction, showSuccess, escapeHtml } from "@/lib/alert";
 import { useUser, useActiveRole } from "@/stores/auth.store";
-import { cn, formatDate, isPreviewable } from "@/lib/utils";
+import { cn, formatDate, getAttachmentPreviewKind } from "@/lib/utils";
 import {
   ChevronLeft, FileText, Download, ArrowRight,
   Loader2, Lock, Clock, MessageSquare, Upload, X, PenLine,
-  CheckCircle2, XCircle, Trash2, Pencil, Save,
+  CheckCircle2, XCircle, Trash2, Pencil, Save, FileX2,
 } from "lucide-react";
 import PdfSignatureCanvas, { type SignatureStamp } from "@/components/signature/pdf-signature-canvas";
 import OtpVerifyModal from "@/components/signature/otp-verify-modal";
@@ -20,9 +20,12 @@ import { FileClassificationBadge, FileClassificationBanner } from "@/components/
 import { SearchableSelect } from "@/components/shared/searchable-select";
 import { useRichTextEditor, RichTextToolbar } from "@/components/shared/rich-text-editor";
 import { EditorContent } from "@tiptap/react";
-import { useFavoriteRecipients, type FavoritableUser } from "@/hooks/use-favorite-recipients";
+import { useFavoriteRecipients } from "@/hooks/use-favorite-recipients";
+import { useRecipientFilter } from "@/hooks/use-recipient-filter";
+import { OfficeSectionFilter } from "@/components/shared/office-section-filter";
 import { useAttachmentQueue } from "@/hooks/use-attachment-queue";
-import { ALLOWED_ATTACHMENT_ACCEPT } from "@/lib/attachment-constants";
+import { ATTACHMENT_TAGS, CUSTOM_TAG_VALUE, ALLOWED_ATTACHMENT_ACCEPT, getFileExtension } from "@/lib/attachment-constants";
+import { AttachmentPreviewModal } from "@/components/shared/attachment-preview-modal";
 
 const DRAFT_EDIT_WINDOW_MS = 30 * 60 * 1000;
 const ATTACHMENT_DELETE_WINDOW_MS = 5 * 60 * 1000;
@@ -67,7 +70,6 @@ interface EfmsFile {
   signatures: Signature[];
 }
 interface ForwardingRemark { id: string; remark: string; user_name: string; user_id: string; created_at: string; user_info?: PersonInfo | null; to_user_info?: PersonInfo | null; }
-interface SystemUser extends FavoritableUser { email: string; active_role: string | null; }
 interface DropItem { id: string; name: string; label?: string; is_active?: boolean; }
 interface DeptItem { id: string; name: string; }
 
@@ -91,6 +93,11 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
   const [toUserId, setToUserId] = useState("");
   const [remarks, setRemarks] = useState("");
   const forwardAttachments = useAttachmentQueue();
+  // True while forwardAttachments.uploadAll() is in flight — same manual
+  // loading flag New File creation doesn't need (its upload only ever
+  // happens once, at final submit) but this panel's Upload button does,
+  // since it can be clicked repeatedly as more files are queued.
+  const [uploadingQueue, setUploadingQueue] = useState(false);
   const { toggleFavorite, buildGroups } = useFavoriteRecipients();
   // Draft editing (30-minute window)
   const [editingDraft, setEditingDraft] = useState(false);
@@ -113,7 +120,11 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
   const [otpError, setOtpError] = useState<string | null>(null);
   const [otpLoading, setOtpLoading] = useState(false);
   const [actionType] = useState<"forward">("forward");
+  const [downloadingNotesheet, setDownloadingNotesheet] = useState(false);
   const [selectedPdf, setSelectedPdf] = useState<Attachment | null>(null);
+  // Attachment Preview modal (docx/doc/xls/xlsx/csv) — native pdf/image/text
+  // attachments still open directly via the /view endpoint, unchanged.
+  const [previewAttachment, setPreviewAttachment] = useState<Attachment | null>(null);
 
   const { data: file, isLoading, isError } = useQuery<EfmsFile>({
     queryKey: ["efms-file", fileId],
@@ -133,10 +144,11 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
     enabled: activeTab === "track",
   });
 
-  const { data: users = [] } = useQuery<SystemUser[]>({
-    queryKey: ["admin-users"],
-    queryFn: async () => (await api.get("/admin/users")).data,
-  });
+  // Office/Section -> Recipient cascade — same shared hook/filtering logic as
+  // New File creation, so recipient selection on an existing/received file
+  // (Edit Draft, the post-window recipient picker, and Forward) behaves
+  // identically instead of only ever seeing the unfiltered user list.
+  const { officeId, setOfficeId, sectionId, setSectionId, offices, sections, users, loadingUsers } = useRecipientFilter();
 
   // Draft-edit dropdown sources — same endpoints New File creation already uses.
   const { data: departments = [] } = useQuery<DeptItem[]>({
@@ -239,9 +251,9 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
   }
 
   // Subsequent forwards: recipient + notesheet entry chosen inline in the
-  // panel. Attachments are no longer uploaded here — the Forward panel now
-  // uploads each file immediately on selection (see forwardAttachments.uploadNow
-  // in the file input below), so they're already persisted before this runs.
+  // panel. Attachments are no longer submitted here — the Forward panel's own
+  // "Upload N files" button (forwardAttachments.uploadAll, below) already
+  // persisted them, with whatever filename/tag the user chose, before this runs.
   // Confirmed via the shared confirmAction() (lib/alert.ts) before the API
   // call actually runs — same pattern as every other forward/delete action.
   async function handleSubmitAction() {
@@ -296,6 +308,43 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
     } catch (err) {
       const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
       toast.error(msg ?? "Could not delete this file.");
+    }
+  }
+
+  // Notesheet download must go through the shared `api` client (not a plain
+  // <a href>) so its Authorization-header interceptor actually runs — the
+  // backend endpoint requires a real Bearer token (get_current_verified_user
+  // + _assert_file_access), unlike the attachment view/download endpoints,
+  // which are deliberately unauthenticated. Fetched as a blob and downloaded
+  // client-side instead of navigating the browser to the API URL directly.
+  async function handleDownloadNotesheet() {
+    if (!file) return;
+    setDownloadingNotesheet(true);
+    try {
+      const res = await api.get(`/efms/files/${fileId}/notesheet/download`, { responseType: "blob" });
+      const blobUrl = URL.createObjectURL(res.data as Blob);
+      const link = document.createElement("a");
+      link.href = blobUrl;
+      link.download = `${file.ref_number.replace(/\//g, "-")}-notesheet.pdf`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(blobUrl);
+    } catch (err) {
+      // With responseType "blob", an error response body also arrives as a
+      // Blob (axios doesn't auto-parse it as JSON) — read/parse it manually
+      // to surface the backend's actual {"detail": "..."} message.
+      let msg = "Could not download the notesheet.";
+      const errBlob = (err as { response?: { data?: unknown } })?.response?.data;
+      if (errBlob instanceof Blob) {
+        try {
+          const parsed = JSON.parse(await errBlob.text());
+          if (typeof parsed?.detail === "string") msg = parsed.detail;
+        } catch { /* not JSON — keep the generic message */ }
+      }
+      toast.error(msg);
+    } finally {
+      setDownloadingNotesheet(false);
     }
   }
 
@@ -362,6 +411,21 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [needsRecipientPicker, file?.recipient_id]);
 
+  // If Office/Section narrows the recipient list to exclude whichever
+  // recipient is currently selected, clear that selection rather than
+  // silently keeping a hidden, filtered-out pick — same behavior as New
+  // File creation's identical effect, kept consistent across both.
+  useEffect(() => {
+    if (!loadingUsers && draftRecipientId && !users.some((u) => u.id === draftRecipientId)) {
+      setDraftRecipientId("");
+    }
+  }, [users, loadingUsers, draftRecipientId]);
+  useEffect(() => {
+    if (!loadingUsers && toUserId && !users.some((u) => u.id === toUserId)) {
+      setToUserId("");
+    }
+  }, [users, loadingUsers, toUserId]);
+
   // Forward panel's notesheet entry — same shared editor as Initial Notesheet
   // and Edit Draft, just a second independent instance (its own empty
   // starting content, cleared after each successful forward).
@@ -419,8 +483,21 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
           <button onClick={() => router.back()} className="flex items-center gap-1 text-sm text-[#0D6E6E] hover:underline mb-3">
             <ChevronLeft size={14} /> Back
           </button>
-          <h2 className="text-base font-bold text-gray-900">Attached Files</h2>
-          <p className="text-xs text-gray-400 mt-0.5">PDF versions for download</p>
+          <div className="flex items-center justify-between gap-2">
+            <div>
+              <h2 className="text-base font-bold text-gray-900">Attached Files</h2>
+              <p className="text-xs text-gray-400 mt-0.5">PDF versions for download</p>
+            </div>
+            {file.attachments.length > 0 && (
+              <a
+                href={`${API_URL}/efms/files/${fileId}/attachments/zip`}
+                title="Download all attachments as a ZIP"
+                className="flex items-center gap-1 text-xs text-gray-500 hover:text-[#0D6E6E] border border-gray-200 rounded-lg px-2 py-1.5 shrink-0"
+              >
+                <Download size={12} /> All
+              </a>
+            )}
+          </div>
         </div>
         <div className="flex-1 overflow-y-auto p-3 space-y-2">
           {file.attachments.length === 0 ? (
@@ -444,24 +521,41 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                   <p className="text-sm font-semibold text-gray-900 truncate">{att.original_name}</p>
                   <p className="text-xs text-gray-500 mt-0.5">{att.file_size ? `${(att.file_size/1024).toFixed(0)} KB · ` : ""}{formatDate(att.created_at, "relative")}</p>
                   <div className="flex items-center gap-3 mt-2">
-                    {isPreviewable(att) ? (
-                      <a
-                        href={`/api/attachments/${fileId}/${att.id}/view`}
-                        target="_blank"
-                        rel="noreferrer"
-                        onClick={() => setSelectedPdf(att)}
-                        className="text-xs text-[#0D6E6E] font-semibold hover:underline"
-                      >
-                        View
-                      </a>
-                    ) : (
-                      <span
-                        title="Preview is not available for this file type. Please download the file to view it."
-                        className="text-xs text-gray-400 cursor-default"
-                      >
-                        No preview
-                      </span>
-                    )}
+                    {(() => {
+                      const kind = getAttachmentPreviewKind(att);
+                      if (kind === "native") {
+                        return (
+                          <a
+                            href={`/api/attachments/${fileId}/${att.id}/view`}
+                            target="_blank"
+                            rel="noreferrer"
+                            onClick={() => setSelectedPdf(att)}
+                            className="text-xs text-[#0D6E6E] font-semibold hover:underline"
+                          >
+                            View
+                          </a>
+                        );
+                      }
+                      if (kind === "none") {
+                        return (
+                          <span
+                            title="Preview is not available for this file type. Please download the file to view it."
+                            className="text-xs text-gray-400 cursor-default"
+                          >
+                            No preview
+                          </span>
+                        );
+                      }
+                      return (
+                        <button
+                          type="button"
+                          onClick={() => { setSelectedPdf(att); setPreviewAttachment(att); }}
+                          className="text-xs text-[#0D6E6E] font-semibold hover:underline"
+                        >
+                          View
+                        </button>
+                      );
+                    })()}
                     <a
                       href={`${API_URL}/efms/files/${fileId}/attachments/${att.id}/download`}
                       className="text-xs text-gray-500 hover:text-gray-700 hover:underline"
@@ -546,6 +640,16 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
 
             {/* Action buttons */}
             <div className="flex items-center gap-2 shrink-0">
+              {isHolder && file.notesheet && (
+                <button
+                  onClick={handleDownloadNotesheet}
+                  disabled={downloadingNotesheet}
+                  className="flex items-center gap-1.5 px-3 py-2 border border-gray-300 text-gray-700 rounded-xl text-sm font-semibold hover:bg-gray-50 disabled:opacity-50"
+                >
+                  {downloadingNotesheet ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
+                  Download Notesheet
+                </button>
+              )}
               {canEditDraft && (
                 <button onClick={openEditDraft}
                   className="flex items-center gap-1.5 px-3 py-2 border border-gray-300 text-gray-700 rounded-xl text-sm font-semibold hover:bg-gray-50">
@@ -745,6 +849,14 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                         {priorities.filter((p) => p.is_active !== false).map((p) => <option key={p.id} value={p.name}>{p.label ?? p.name}</option>)}
                       </select>
                     </div>
+                    <OfficeSectionFilter
+                      officeId={officeId}
+                      sectionId={sectionId}
+                      offices={offices}
+                      sections={sections}
+                      onOfficeChange={setOfficeId}
+                      onSectionChange={setSectionId}
+                    />
                     <div>
                       <label className="block text-sm font-semibold text-gray-700 mb-1.5">Recipient</label>
                       <SearchableSelect
@@ -787,6 +899,14 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                       The 30-minute editing window has closed, so the subject, category, priority and notesheet
                       are now read-only. You can still choose who to forward this file to.
                     </p>
+                    <OfficeSectionFilter
+                      officeId={officeId}
+                      sectionId={sectionId}
+                      offices={offices}
+                      sections={sections}
+                      onOfficeChange={setOfficeId}
+                      onSectionChange={setSectionId}
+                    />
                     <div>
                       <label className="block text-sm font-semibold text-gray-700 mb-1.5">Forward To *</label>
                       {users.length === 0 ? (
@@ -824,6 +944,14 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                 ) : canForwardAfter ? (
                   <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-5 space-y-4">
                     <h2 className="text-base font-bold text-gray-800">Forward This File</h2>
+                    <OfficeSectionFilter
+                      officeId={officeId}
+                      sectionId={sectionId}
+                      offices={offices}
+                      sections={sections}
+                      onOfficeChange={setOfficeId}
+                      onSectionChange={setSectionId}
+                    />
                     <div>
                       <label className="block text-sm font-semibold text-gray-700 mb-1.5">Forward To *</label>
                       {users.length === 0 ? (
@@ -851,22 +979,76 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                       </div>
                     </div>
                     <div>
+                      <label className="block text-sm font-semibold text-gray-700 mb-1.5">Attachments</label>
                       <label className="flex items-center gap-2 cursor-pointer w-full border-2 border-dashed border-gray-200 hover:border-[#0D6E6E] rounded-xl px-3 py-2.5 text-sm text-gray-500 hover:text-[#0D6E6E] transition-colors">
                         <Upload size={14} />
                         <span>Attach document (optional)…</span>
-                        <input type="file" multiple accept={ALLOWED_ATTACHMENT_ACCEPT} className="sr-only" onChange={async (e) => {
-                          const files = e.target.files;
+                        <input type="file" multiple accept={ALLOWED_ATTACHMENT_ACCEPT} className="sr-only" onChange={(e) => {
+                          forwardAttachments.addFiles(e.target.files, file.attachments.length);
                           e.target.value = "";
-                          const count = await forwardAttachments.uploadNow(fileId, files);
-                          if (count > 0) {
-                            toast.success(`${count} file${count > 1 ? "s" : ""} uploaded.`);
-                            qc.invalidateQueries({ queryKey: ["efms-file", fileId] });
-                          }
                         }} />
                       </label>
-                      {/* Uploaded files persist immediately (not just on Forward) and
-                          appear in the "Attached Files" panel on the left — reusing
-                          that existing list instead of a second, parallel one here. */}
+                      {/* Same editable filename/tag rows as New File creation
+                          (reuses attachmentQueue.items/renameItem/setTag/setCustomTag)
+                          instead of uploading immediately with an unchangeable
+                          auto-generated name — the user can rename or re-tag each
+                          file, including a custom tag, before it's actually sent. */}
+                      {forwardAttachments.items.length > 0 && (
+                        <div className="space-y-2 mt-3">
+                          {forwardAttachments.items.map((ann, i) => (
+                            <div key={i} className="flex items-center gap-2 p-2.5 bg-gray-50 rounded-xl border border-gray-100">
+                              <FileText size={15} className="text-[#0D6E6E] shrink-0" />
+                              <div className="flex-1 grid grid-cols-2 gap-2">
+                                <div>
+                                  <label className="block text-[11px] font-medium text-gray-500 mb-0.5">File Name</label>
+                                  <input value={ann.name} onChange={(e) => forwardAttachments.renameItem(i, e.target.value)}
+                                    className="w-full border border-gray-200 rounded-lg px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-[#0D6E6E]" />
+                                </div>
+                                <div>
+                                  <label className="block text-[11px] font-medium text-gray-500 mb-0.5">Tag</label>
+                                  <select value={ann.tag} onChange={(e) => forwardAttachments.setTag(i, e.target.value)}
+                                    className="w-full border border-gray-200 rounded-lg px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-[#0D6E6E]">
+                                    {ATTACHMENT_TAGS.map((opt) => <option key={opt} value={opt}>{opt}</option>)}
+                                  </select>
+                                  {ann.tag === CUSTOM_TAG_VALUE && (
+                                    <input
+                                      value={ann.customTag ?? ""}
+                                      onChange={(e) => forwardAttachments.setCustomTag(i, e.target.value)}
+                                      placeholder="Enter custom tag…"
+                                      maxLength={60}
+                                      className="mt-1 w-full border border-gray-200 rounded-lg px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-[#0D6E6E]"
+                                    />
+                                  )}
+                                </div>
+                              </div>
+                              <button type="button" onClick={() => forwardAttachments.removeItem(i)} className="text-red-400 hover:text-red-600 shrink-0"><X size={14} /></button>
+                            </div>
+                          ))}
+                          <button type="button" disabled={uploadingQueue} onClick={async () => {
+                            if (forwardAttachments.hasInvalidCustomTags()) {
+                              toast.error("Please enter a valid custom tag for every attachment marked \"Other\".");
+                              return;
+                            }
+                            setUploadingQueue(true);
+                            const count = forwardAttachments.items.length;
+                            try {
+                              await forwardAttachments.uploadAll(fileId);
+                              forwardAttachments.clear();
+                              toast.success(`${count} file${count > 1 ? "s" : ""} uploaded.`);
+                              qc.invalidateQueries({ queryKey: ["efms-file", fileId] });
+                            } finally {
+                              setUploadingQueue(false);
+                            }
+                          }}
+                            className="w-full py-2 text-xs font-semibold rounded-lg bg-[#0D6E6E] text-white hover:bg-[#178F8F] disabled:opacity-50 flex items-center justify-center gap-1.5">
+                            {uploadingQueue ? <Loader2 size={13} className="animate-spin" /> : <Upload size={13} />}
+                            Upload {forwardAttachments.items.length} file{forwardAttachments.items.length > 1 ? "s" : ""}
+                          </button>
+                        </div>
+                      )}
+                      {/* Uploaded files appear in the "Attached Files" panel on
+                          the left — reusing that existing list instead of a
+                          second, parallel one here. */}
                       <p className="text-xs text-gray-400 mt-1.5">Uploaded files appear in Attached Files on the left.</p>
                     </div>
                     <button onClick={handleSubmitAction} disabled={submitAction.isPending}
@@ -985,9 +1167,16 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                 {/* Document canvas with overlay */}
                 <div className="p-4">
                   {(() => {
-                    const signTarget = selectedPdf ?? file.attachments[0];
+                    // signTarget is only ever assigned below, once we know the candidate
+                    // is actually signable — an Excel/CSV attachment (via selectedPdf,
+                    // set whenever the user clicked "View" on it, or via the
+                    // file.attachments[0] default) must never reach PdfSignatureCanvas
+                    // or become the signing target. Reuses the same classification
+                    // (getAttachmentPreviewKind) as the attachment list and preview
+                    // modal instead of a separate file-type check.
+                    const signCandidate = selectedPdf ?? file.attachments[0];
 
-                    if (!signTarget) {
+                    if (!signCandidate) {
                       return (
                         <div className="text-center py-16 text-gray-400">
                           <FileText size={40} className="mx-auto mb-3 opacity-40" />
@@ -996,10 +1185,28 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                       );
                     }
 
+                    if (getAttachmentPreviewKind(signCandidate) === "sheet") {
+                      return (
+                        <div className="text-center py-16 text-gray-400">
+                          <FileX2 size={40} className="mx-auto mb-3 opacity-40" />
+                          <p className="font-semibold text-gray-600">eSign is not available for Excel files.</p>
+                          <p className="text-sm mt-1">eSign is currently supported only for PDF and Word documents.</p>
+                        </div>
+                      );
+                    }
+
+                    const signTarget = signCandidate;
+
+                    // Legacy .doc: the canvas needs a real .docx to render (docx-preview
+                    // can't parse legacy binary Word), so it's fed the on-the-fly
+                    // preview-docx conversion instead of the raw stored file — same
+                    // conversion workflow the Attachment Preview modal uses.
+                    const isLegacyDoc = getFileExtension(signTarget.original_name) === "doc";
                     return (
                       <PdfSignatureCanvas
                         fileUrl={`${FILES_BASE_URL}/uploads/${signTarget.stored_name}`}
                         mimeType={signTarget.mime_type}
+                        docPreviewUrl={isLegacyDoc ? `${API_URL}/efms/files/${fileId}/attachments/${signTarget.id}/preview-docx` : undefined}
                         existingSignatures={(file.signatures ?? []).map((s) => ({ ...s, status: s.status as "pending" | "verified", verified_at: s.verified_at ?? undefined }))}
                         onPlace={(pos_x, pos_y) => {
                           setPendingStamp({ pos_x, pos_y });
@@ -1080,6 +1287,14 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
               setOtpLoading(false);
             }
           }}
+        />
+      )}
+
+      {previewAttachment && (
+        <AttachmentPreviewModal
+          fileId={fileId}
+          attachment={previewAttachment}
+          onClose={() => setPreviewAttachment(null)}
         />
       )}
 

@@ -5,7 +5,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useRouter } from "next/navigation";
 import { api } from "@/services/api";
 import { useUser, useActiveRole } from "@/stores/auth.store";
-import { cn, formatDate, matchesRefSuffix } from "@/lib/utils";
+import { cn, formatDate, matchesRefSuffix, truncate } from "@/lib/utils";
 import { Inbox, FolderOpen, FilePlus2, Loader2, Unlock, Eye, EyeOff, Clock, Search, FilePlus, FolderSearch } from "lucide-react";
 import { toast } from "sonner";
 import { showSuccess } from "@/lib/alert";
@@ -248,7 +248,7 @@ export function EFMSDashboard() {
                 <table className="w-full">
                   <thead className="bg-gray-50 border-b border-gray-200">
                     <tr>
-                      {["Note ID", "File Category", "File / Doc Number", "Created At", "Status", "Action"].map((h) => (
+                      {["Note ID", "Subject", "File Category", "File / Doc Number", "Created At", "Status", "Action"].map((h) => (
                         <th key={h} className="text-left px-5 py-4 text-base font-semibold text-gray-600">{h}</th>
                       ))}
                     </tr>
@@ -261,6 +261,7 @@ export function EFMSDashboard() {
                       return (
                       <tr key={f.id} className="hover:bg-gray-50">
                         <td className="px-5 py-4 text-base text-gray-500 font-mono">{(idx + 1).toString().padStart(4, "0")}</td>
+                        <td className="px-5 py-4 text-base text-gray-900 max-w-xs truncate" title={f.subject}>{truncate(f.subject, 60)}</td>
                         <td className="px-5 py-4 text-base text-gray-700">{f.category}</td>
                         <td className="px-5 py-4">
                           <span className="font-mono text-sm font-bold text-[#0D6E6E] bg-[#E6F4F4] px-2 py-1 rounded">{f.ref_number}</span>

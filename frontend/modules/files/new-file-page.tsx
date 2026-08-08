@@ -9,16 +9,14 @@ import { Loader2, Upload, X, FileText, Send, AlertTriangle, CheckCircle2 } from 
 import { PersonBadge } from "@/components/shared/person-badge";
 import { SearchableSelect } from "@/components/shared/searchable-select";
 import { useRichTextEditor, RichTextToolbar } from "@/components/shared/rich-text-editor";
-import { useFavoriteRecipients, type FavoritableUser } from "@/hooks/use-favorite-recipients";
+import { useFavoriteRecipients } from "@/hooks/use-favorite-recipients";
+import { useRecipientFilter } from "@/hooks/use-recipient-filter";
 import { useAttachmentQueue, resolveAttachmentTag } from "@/hooks/use-attachment-queue";
 import {
   ATTACHMENT_TAGS, CUSTOM_TAG_VALUE, ALLOWED_ATTACHMENT_ACCEPT, ALLOWED_ATTACHMENT_HELP_TEXT, validateCustomTag,
 } from "@/lib/attachment-constants";
 
 interface DropItem { id: string; name: string; label?: string; is_active?: boolean; }
-interface Establishment { id: string; name: string; }
-interface DeptItem { id: string; name: string; establishment_id: string | null; }
-interface SystemUser extends FavoritableUser { active_role: string | null; }
 
 interface NewFileFormProps { onSuccess?: () => void; }
 
@@ -35,8 +33,6 @@ export function NewFileForm({ onSuccess }: NewFileFormProps) {
   // only priority that implies is_confidential=true; there is no separate toggle.
   const isConfidential = priority.toLowerCase() === "secret";
   const [recipientId, setRecipientId] = useState("");
-  const [officeId, setOfficeId] = useState("");
-  const [sectionId, setSectionId] = useState("");
   const [draftRestored, setDraftRestored] = useState(false);
   const autoSaveRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const attachmentQueue = useAttachmentQueue();
@@ -45,35 +41,13 @@ export function NewFileForm({ onSuccess }: NewFileFormProps) {
   const [isDragging, setIsDragging] = useState(false);
   const { toggleFavorite, buildGroups, personLabel } = useFavoriteRecipients();
 
+  // Office / Section -> Recipient cascade — shared with Edit Draft/Forward on
+  // an existing file (useRecipientFilter) so every recipient picker in the
+  // app filters identically instead of each screen re-implementing this.
+  const { officeId, setOfficeId, sectionId, setSectionId, offices, sections, users: allUsers, loadingUsers } = useRecipientFilter();
+
   const { data: categories = [] } = useQuery<DropItem[]>({ queryKey: ["admin-categories"], queryFn: async () => (await api.get("/admin/categories")).data });
   const { data: priorities = [] } = useQuery<DropItem[]>({ queryKey: ["admin-priorities"], queryFn: async () => (await api.get("/admin/priorities")).data });
-
-  // Office / Section: reuse the existing Establishment/Department APIs — same
-  // cascading pattern already used elsewhere in the app. Both are optional
-  // filters on the recipient list below, never required to pick a recipient.
-  const { data: offices = [] } = useQuery<Establishment[]>({
-    queryKey: ["establishments"],
-    queryFn: async () => (await api.get("/admin/establishments")).data,
-  });
-  const { data: sections = [] } = useQuery<DeptItem[]>({
-    queryKey: ["departments", officeId],
-    queryFn: async () => (await api.get(`/admin/departments?establishment_id=${officeId}`)).data,
-    enabled: !!officeId,
-  });
-
-  // Recipient list — /admin/users extended with optional establishment_id/
-  // department_id filters; omitting both (the default) returns every active
-  // user exactly as before, so this is backward compatible with every other
-  // consumer of this endpoint.
-  const { data: allUsers = [], isFetching: loadingUsers } = useQuery<SystemUser[]>({
-    queryKey: ["admin-users", officeId, sectionId],
-    queryFn: async () => {
-      const params = new URLSearchParams();
-      if (officeId) params.set("establishment_id", officeId);
-      if (sectionId) params.set("department_id", sectionId);
-      return (await api.get(`/admin/users?${params.toString()}`)).data;
-    },
-  });
 
   const activeCategories = categories.filter((c) => c.is_active !== false);
   const activePriorities = priorities.filter((p) => p.is_active !== false);
@@ -235,7 +209,7 @@ export function NewFileForm({ onSuccess }: NewFileFormProps) {
             <SearchableSelect
               options={offices.map((o) => ({ value: o.id, label: o.name }))}
               value={officeId}
-              onChange={(v) => { setOfficeId(v); setSectionId(""); }}
+              onChange={setOfficeId}
               placeholder="All offices…"
               searchPlaceholder="Search offices…"
             />

@@ -2,13 +2,16 @@
 import uuid as _uuid
 import smtplib
 import urllib.parse
+import io
+import zipfile
+from html import escape as _escape_html
 from email.mime.text import MIMEText
 from uuid import UUID
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 import os, aiofiles
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, or_, func, func
 from sqlalchemy.orm import selectinload
@@ -59,6 +62,10 @@ DRAFT_EDIT_WINDOW = timedelta(minutes=30)
 # An uploaded attachment may only be deleted by its uploader within this long
 # of the upload — reuses the same "created_at + window" pattern as DRAFT_EDIT_WINDOW.
 ATTACHMENT_DELETE_WINDOW = timedelta(minutes=5)
+
+# Reused wherever a real .docx (native or converted-from-.doc) is served/stored,
+# so the exact MIME string only lives in one place.
+DOCX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
 
 def _draft_edit_expired(f: EfmsFile) -> bool:
@@ -561,6 +568,54 @@ async def save_notesheet(
     return _visible_file(await _load_file(file_id, db), user)
 
 
+@router.get("/{file_id}/notesheet/download")
+async def download_notesheet(
+    file_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_verified_user),
+):
+    """Download the complete notesheet as a PDF. The notesheet's stored
+    content already IS HTML (Tiptap output rendered read-only elsewhere via
+    NOTESHEET_PROSE_CLASS) — this builds the same standalone HTML document
+    as before, then converts it to PDF via convert_html_to_pdf() (the same
+    LibreOffice-headless mechanism convert_doc_to_docx() already uses for
+    .doc preview/signing — one conversion mechanism, not a second one).
+    notesheet.content itself is only ever read here, never modified. Uses
+    the same file-access rule as get_file/track_file."""
+    f = await _load_file(file_id, db)
+    await _assert_file_access(f, user, db)
+    if not f.notesheet:
+        raise HTTPException(status_code=404, detail="This file has no notesheet yet.")
+
+    html = f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>{_escape_html(f.subject)} — Notesheet</title>
+<style>
+body {{ font-family: Georgia, 'Times New Roman', serif; max-width: 800px; margin: 40px auto; padding: 0 24px; color: #1a1a1a; line-height: 1.6; }}
+h1 {{ font-size: 20px; }} h2 {{ font-size: 17px; }} h3 {{ font-size: 15px; }}
+.meta {{ color: #666; font-size: 13px; margin-bottom: 24px; border-bottom: 1px solid #ddd; padding-bottom: 12px; }}
+</style></head>
+<body>
+<div class="meta"><strong>{_escape_html(f.ref_number)}</strong><br>{_escape_html(f.subject)}</div>
+{f.notesheet.content}
+</body></html>"""
+
+    from app.utils.doc_convert import convert_html_to_pdf, DocConversionUnavailable, DocConversionFailed
+    try:
+        pdf_bytes = convert_html_to_pdf(html.encode("utf-8"))
+    except DocConversionUnavailable:
+        raise HTTPException(status_code=503, detail="PDF generation is not available on this server.")
+    except DocConversionFailed:
+        raise HTTPException(status_code=422, detail="The notesheet could not be converted to PDF.")
+
+    file_name = f"{f.ref_number.replace('/', '-')}-notesheet.pdf"
+    encoded_name = urllib.parse.quote(file_name, safe="")
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{encoded_name}"},
+    )
+
+
 # ── Routing ───────────────────────────────────────────────────────────────────
 
 @router.post("/{file_id}/route", response_model=FileOut)
@@ -767,6 +822,80 @@ async def download_attachment(
     )
 
 
+@router.get("/{file_id}/attachments/zip")
+async def download_all_attachments(
+    file_id: UUID,
+    db: AsyncSession = Depends(get_db),
+):
+    """Download every attachment on this file as one .zip. Reuses the exact
+    same disk-path resolution as download_attachment for each entry (no
+    second file-lookup implementation) and preserves each attachment's
+    original filename inside the archive. Same (deliberately) unauthenticated
+    posture as view_attachment/download_attachment above."""
+    f = await db.get(EfmsFile, file_id)
+    if not f:
+        raise HTTPException(status_code=404, detail="File not found.")
+    result = await db.execute(select(FileAttachment).where(FileAttachment.file_id == file_id))
+    attachments = result.scalars().all()
+    if not attachments:
+        raise HTTPException(status_code=404, detail="This file has no attachments.")
+
+    upload_dir = os.path.abspath(settings.UPLOAD_DIR)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for att in attachments:
+            path = os.path.join(upload_dir, att.stored_name)
+            if os.path.exists(path):
+                zf.write(path, arcname=att.original_name)
+    buf.seek(0)
+
+    zip_name = f"{f.ref_number.replace('/', '-')}-attachments.zip"
+    encoded_name = urllib.parse.quote(zip_name, safe="")
+    return Response(
+        content=buf.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{encoded_name}"},
+    )
+
+
+@router.get("/{file_id}/attachments/{att_id}/preview-docx")
+async def preview_doc_as_docx(
+    file_id: UUID,
+    att_id: UUID,
+    db: AsyncSession = Depends(get_db),
+):
+    """Convert a legacy .doc attachment to .docx on the fly, purely as a
+    preview artifact — the stored .doc file on disk is never modified or
+    replaced (see convert_doc_to_docx). Lets the frontend reuse the exact
+    same docx-preview renderer already used for native .docx attachments
+    and by the eSign feature, instead of a second .doc-specific viewer.
+    Same unauthenticated posture as view_attachment/download_attachment."""
+    att = await db.get(FileAttachment, att_id)
+    if not att or att.file_id != file_id:
+        raise HTTPException(status_code=404, detail="Attachment not found.")
+    if _get_ext(att.original_name).lower() != ".doc":
+        raise HTTPException(status_code=400, detail="This attachment is not a legacy .doc file.")
+    path = os.path.join(os.path.abspath(settings.UPLOAD_DIR), att.stored_name)
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="File not found on disk.")
+
+    async with aiofiles.open(path, "rb") as fh:
+        content = await fh.read()
+
+    from app.utils.doc_convert import convert_doc_to_docx, DocConversionUnavailable, DocConversionFailed
+    try:
+        docx_bytes = convert_doc_to_docx(content)
+    except DocConversionUnavailable:
+        raise HTTPException(status_code=503, detail="Preview conversion is not available on this server.")
+    except DocConversionFailed:
+        raise HTTPException(status_code=422, detail="This document could not be converted for preview.")
+
+    return Response(
+        content=docx_bytes,
+        media_type=DOCX_MIME_TYPE,
+    )
+
+
 # ── Digital Signature ─────────────────────────────────────────────────────────
 
 @router.post("/{file_id}/sign", response_model=dict, status_code=201)
@@ -868,9 +997,24 @@ async def verify_sign(
 async def _create_signed_copy_and_track(db: AsyncSession, file_id: UUID, sig, signer_label: str, user: User) -> None:
     """After a signature is OTP-verified: stamp a signed copy of the original
     attachment, surface it under "Files attached", and record a tracking
-    entry so it shows up in the file's Track Status history."""
+    entry so it shows up in the file's Track Status history.
+
+    Legacy .doc sources are converted to .docx first — via the same
+    convert_doc_to_docx() used by the preview-docx endpoint, no second
+    conversion implementation — since generate_signed_copy only stamps
+    .pdf/.docx. The signed copy is then always saved with a real .docx
+    extension/MIME type, never as .doc. The original .doc attachment is only
+    ever opened for reading here; it is never written to, renamed, or removed.
+
+    The signature itself (sig.status is already "verified" by the time this
+    runs, committed in verify_sign before this is called) is a separate,
+    already-completed fact and is never rolled back here. What this function
+    must not do is claim a signed copy exists when one wasn't actually
+    produced — so the tracking remark reflects success or failure honestly,
+    and no signed-copy FileAttachment is created on failure."""
     from app.models.efms_extra import FileRemark
     from app.utils.signing import generate_signed_copy
+    from app.utils.doc_convert import convert_doc_to_docx, DocConversionUnavailable, DocConversionFailed
 
     att_result = await db.execute(
         select(FileAttachment).where(FileAttachment.file_id == file_id).order_by(FileAttachment.created_at)
@@ -883,19 +1027,30 @@ async def _create_signed_copy_and_track(db: AsyncSession, file_id: UUID, sig, si
         src_path = os.path.join(upload_dir, source.stored_name)
         ext = _get_ext(source.original_name) or _get_ext(source.stored_name)
         base_name = os.path.splitext(source.original_name)[0]
-        signed_display_name = f"{base_name}_signed{ext}"
 
+        # A .doc source is always signed as a converted .docx copy, so the
+        # signed artifact's extension/MIME must reflect what it actually is
+        # — never re-use the source's own .doc extension/MIME here.
+        is_legacy_doc = ext.lower() == ".doc"
+        stamp_ext = ".docx" if is_legacy_doc else ext
+        signed_mime = DOCX_MIME_TYPE if is_legacy_doc else source.mime_type
+        signed_display_name = f"{base_name}_signed{stamp_ext}"
+
+        signed_copy_created = False
         try:
             async with aiofiles.open(src_path, "rb") as fh:
                 content = await fh.read()
 
+            if is_legacy_doc:
+                content = convert_doc_to_docx(content)  # original .doc bytes on disk are never touched
+
             signed_bytes = generate_signed_copy(
-                content, ext,
+                content, stamp_ext,
                 pos_x=sig.pos_x, pos_y=sig.pos_y, page_number=sig.page_number,
                 signer_name=signer_label, timestamp=sig.verified_at,
             )
 
-            new_stored_name = f"{_uuid.uuid4()}{ext}"
+            new_stored_name = f"{_uuid.uuid4()}{stamp_ext}"
             dest = os.path.join(upload_dir, new_stored_name)
             async with aiofiles.open(dest, "wb") as out:
                 await out.write(signed_bytes)
@@ -910,23 +1065,40 @@ async def _create_signed_copy_and_track(db: AsyncSession, file_id: UUID, sig, si
                         pass
                 existing_signed.stored_name = new_stored_name
                 existing_signed.file_size = len(signed_bytes)
+                existing_signed.mime_type = signed_mime
             else:
                 db.add(FileAttachment(
                     file_id=file_id,
                     original_name=signed_display_name,
                     stored_name=new_stored_name,
                     file_size=len(signed_bytes),
-                    mime_type=source.mime_type,
+                    mime_type=signed_mime,
                     uploaded_by=user.id,
                 ))
-        except (OSError, ValueError):
-            pass  # Original missing or unsupported file type — skip generating a stamped copy
+            signed_copy_created = True
+        except (OSError, ValueError, DocConversionUnavailable, DocConversionFailed):
+            # Original missing, unsupported file type, or (for .doc) the
+            # conversion tool being unavailable/failing — no signed-copy
+            # attachment is created; the original source is left untouched
+            # either way, since nothing above wrote to src_path.
+            signed_copy_created = False
 
-        db.add(FileRemark(
-            file_id=file_id,
-            user_id=user.id,
-            remark=f"{source.original_name} signed by {signer_label}",
-        ))
+        if signed_copy_created:
+            db.add(FileRemark(
+                file_id=file_id,
+                user_id=user.id,
+                remark=f"{source.original_name} signed by {signer_label}",
+            ))
+        else:
+            # Never claim a signed copy exists when it doesn't — the
+            # signature itself is still verified, but that fact must be
+            # visible in the remark instead of being indistinguishable from
+            # a real signed-copy success.
+            db.add(FileRemark(
+                file_id=file_id,
+                user_id=user.id,
+                remark=f"{source.original_name}: signature verified by {signer_label}, but a signed copy could not be generated.",
+            ))
         await db.commit()
 
 

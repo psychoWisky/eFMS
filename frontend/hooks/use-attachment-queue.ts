@@ -36,14 +36,21 @@ async function uploadOne(fileId: string, file: File, tag: string, displayName?: 
 export function useAttachmentQueue(maxFiles = 10) {
   const [items, setItems] = useState<QueuedAttachment[]>([]);
 
-  function addFiles(fileList: FileList | null) {
+  /** `existingCount` (default 0, matching New File creation where a fresh
+   * file always starts with zero attachments) should be the number of
+   * attachments already on the file — e.g. file.attachments.length — so the
+   * default "doc-N" tag continues after them instead of restarting at
+   * doc-1 and colliding with an attachment already tagged that way. This is
+   * only the default: setTag/setCustomTag below let the user override it
+   * for any queued item before it's actually uploaded. */
+  function addFiles(fileList: FileList | null, existingCount = 0) {
     if (!fileList) return;
     const files = Array.from(fileList);
     const accepted: QueuedAttachment[] = [];
     let rejected = 0;
     files.forEach((f, i) => {
       if (!isAllowedAttachmentFile(f.name)) { rejected++; return; }
-      const idx = items.length + accepted.length + i + 1;
+      const idx = existingCount + items.length + accepted.length + i + 1;
       accepted.push({ file: f, name: f.name, tag: `doc-${idx}` });
     });
     if (rejected > 0) {
@@ -90,8 +97,14 @@ export function useAttachmentQueue(maxFiles = 10) {
    * panel: an in-progress holder's uploads must survive closing the page
    * without forwarding, so they can't be held only in local UI state).
    * Reuses the same validated upload path as addFiles/uploadAll. Returns
-   * the number of files actually uploaded. */
-  async function uploadNow(fileId: string, fileList: FileList | null): Promise<number> {
+   * the number of files actually uploaded.
+   *
+   * `existingCount` must be the number of attachments already on the file
+   * (e.g. file.attachments.length) so the auto-generated "doc-N" tag
+   * continues after them instead of restarting at doc-1 and colliding with
+   * an attachment already tagged that way — this call only ever sees the
+   * files picked in its own invocation, not the file's full history. */
+  async function uploadNow(fileId: string, fileList: FileList | null, existingCount = 0): Promise<number> {
     if (!fileList) return 0;
     const files = Array.from(fileList);
     let uploaded = 0, rejected = 0;
@@ -99,7 +112,7 @@ export function useAttachmentQueue(maxFiles = 10) {
       const f = files[i];
       if (!isAllowedAttachmentFile(f.name)) { rejected++; continue; }
       try {
-        await uploadOne(fileId, f, `doc-${i + 1}`);
+        await uploadOne(fileId, f, `doc-${existingCount + i + 1}`);
         uploaded++;
       } catch {
         rejected++;

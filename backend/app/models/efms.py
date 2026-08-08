@@ -61,7 +61,7 @@ class EfmsFile(Base, UUIDMixin, TimestampMixin):
     department    = relationship("Department")
     notesheet     = relationship("Notesheet", back_populates="file", uselist=False, cascade="all, delete-orphan")
     route_entries = relationship("RouteEntry", back_populates="file", cascade="all, delete-orphan", order_by="RouteEntry.created_at")
-    attachments   = relationship("FileAttachment", back_populates="file", cascade="all, delete-orphan")
+    attachments   = relationship("FileAttachment", back_populates="file", cascade="all, delete-orphan", order_by="FileAttachment.created_at")
     dispatch      = relationship("DispatchRecord", back_populates="file", uselist=False)
 
     __table_args__ = (
