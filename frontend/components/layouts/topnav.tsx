@@ -41,6 +41,36 @@ export function EFMSTopNav({ sidebarWidth }: { sidebarWidth: number }) {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["notifications"] }),
   });
 
+  const { mutateAsync: markOneRead } = useMutation({
+    mutationFn: (nid: string) => api.patch(`/admin/notifications/${nid}/read`, {}),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["notifications"] }),
+  });
+
+  // Reading a notification and being allowed to open the file it refers to
+  // are separate concerns — the notification always gets marked read, but
+  // the file itself only opens if the backend's current-holder-only check
+  // (GET /efms/files/{id}) still allows it. A user who has since forwarded
+  // the file onward gets a clear toast instead of a stale, unauthorized open.
+  async function handleNotificationClick(n: Notification) {
+    setNotifOpen(false);
+    if (!n.is_read) {
+      try { await markOneRead(n.id); } catch { /* non-fatal — still try to open the file */ }
+    }
+    if (!n.file_id) return;
+    try {
+      await api.get(`/efms/files/${n.file_id}`);
+      router.push(`/files/${n.file_id}`);
+    } catch (err) {
+      const status = (err as { response?: { status?: number } })?.response?.status;
+      if (status === 403) {
+        toast.error("You don't have access to view this file. You are no longer the current holder.");
+      } else {
+        const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+        toast.error(msg ?? "Could not open this file.");
+      }
+    }
+  }
+
   const handleLogout = async () => {
     try { await api.post("/auth/logout", { refresh_token: refreshToken }); } catch { }
     clearAuth();
@@ -92,10 +122,9 @@ export function EFMSTopNav({ sidebarWidth }: { sidebarWidth: number }) {
                     <div className="py-10 text-center text-gray-400 text-sm">No notifications</div>
                   ) : notifications.map((n) => (
                     <div key={n.id}
-                      onClick={() => { if (n.file_id) { router.push(`/files/${n.file_id}`); setNotifOpen(false); } }}
-                      className={cn("flex items-start gap-3 px-4 py-3 border-b border-gray-50 transition-colors",
-                        !n.is_read ? "bg-[#F0F7F7]" : "hover:bg-gray-50",
-                        n.file_id && "cursor-pointer")}>
+                      onClick={() => handleNotificationClick(n)}
+                      className={cn("flex items-start gap-3 px-4 py-3 border-b border-gray-50 transition-colors cursor-pointer",
+                        !n.is_read ? "bg-[#F0F7F7]" : "hover:bg-gray-50")}>
                       <div className={cn("w-8 h-8 rounded-full flex items-center justify-center shrink-0 mt-0.5",
                         !n.is_read ? "bg-[#0D6E6E]" : "bg-gray-100")}>
                         <FileText size={14} className={!n.is_read ? "text-white" : "text-gray-400"} />

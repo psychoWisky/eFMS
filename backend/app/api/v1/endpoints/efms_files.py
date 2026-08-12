@@ -166,13 +166,54 @@ async def _load_file(file_id: UUID, db: AsyncSession) -> EfmsFile:
     return f
 
 
-async def _assert_file_access(f: EfmsFile, user: User, db: AsyncSession) -> None:
-    """Canonical file-access check — raises 403 unless the user is an admin,
-    the creator, the current holder, a past participant in the routing chain,
-    or a department member of a file released to their department.
+async def _assert_full_file_access(f: EfmsFile, user: User, db: AsyncSession) -> None:
+    """Strict/full file-access check — raises 403 unless the user is an
+    admin, the CURRENT holder (file.current_holder_id == user.id, and
+    nothing else), or a department member viewing a file released to their
+    department. This is the boundary for actually opening/using a file:
+    GET /efms/files/{id}, notesheet download, and (transitively, since they
+    all route through GET /efms/files/{id}) notification click-through,
+    direct file URLs, and Search -> View.
 
-    This is the single source of truth for "can this user access this file";
-    shared by get_file and track_file so the two never drift apart."""
+    Deliberately narrower than _assert_tracking_access below: being the
+    creator or a past routing participant (someone the file passed through
+    on its way to its current holder) does NOT grant full access once the
+    file has moved on — only the live current_holder_id counts, per the
+    project's current-holder-based access model. A file's creator is also
+    its current_holder_id while it's still a Draft (set that way at
+    creation and never reassigned until the first forward), so this still
+    covers the "creator viewing their own still-held draft" case for free —
+    it only stops covering them once they've actually forwarded it."""
+    if user.active_role in _ADMIN_ROLES:
+        return
+    if f.current_holder_id == user.id:
+        return
+    if user.department_id:
+        from app.models.efms_extra import Docket
+        rel = await db.execute(
+            select(Docket).where(
+                Docket.file_id == f.id,
+                Docket.is_released == True,
+                Docket.department_id == user.department_id,
+            )
+        )
+        if rel.scalar_one_or_none():
+            return
+    raise HTTPException(status_code=403, detail="You don't have access to view this file.")
+
+
+async def _assert_tracking_access(f: EfmsFile, user: User, db: AsyncSession) -> None:
+    """Broader, historical/audit access check — raises 403 unless the user is
+    an admin, the current holder, a past participant in the routing chain
+    (the file passed through their hands at some point), or a department
+    member of a file released to their department.
+
+    This is intentionally broader than _assert_full_file_access: a user who
+    forwarded a file onward and is no longer its current holder should still
+    be able to see it in Tracking History (their own remark, and the
+    movement/audit trail), even though they can no longer fully open the
+    file. Used by track_file and get_remarks — never by anything that
+    returns the initial notesheet or attachments."""
     if user.active_role in _ADMIN_ROLES:
         return
     if f.created_by == user.id or f.current_holder_id == user.id:
@@ -204,8 +245,10 @@ def _has_full_remark_visibility(f: EfmsFile, viewer: User) -> bool:
 
     This is the single source of truth for the remarks/forwarding-attachment
     visibility rule — reused by _visible_file (for get_file/create_file/
-    update_file/save_notesheet/route_file), by get_remarks, and by track_file's
-    per-entry remark redaction, so the rule can never drift between them.
+    update_file/save_notesheet/route_file) and by get_remarks, so the rule
+    can never drift between them. Tracking History (track_file and
+    /{file_id}/track/notesheet) uses the broader _has_full_tracking_visibility
+    below instead, which wraps this function rather than duplicating it.
 
     Because it keys off f.current_holder_id (already updated on every forward,
     including a return-forward back to a past holder), a future Reopen feature
@@ -213,6 +256,20 @@ def _has_full_remark_visibility(f: EfmsFile, viewer: User) -> bool:
     free — no change to this function would be needed.
     """
     return viewer.active_role in _ADMIN_ROLES or f.current_holder_id == viewer.id
+
+
+def _has_full_tracking_visibility(f: EfmsFile, viewer: User) -> bool:
+    """Full-visibility rule specifically for Tracking History (track_file and
+    /{file_id}/track/notesheet) — deliberately broader than
+    _has_full_remark_visibility: on top of admins and the current holder, the
+    file's creator also gets full visibility once the file has been
+    released. A file can only ever be released by its own creator
+    (docket.release_file), and f.is_released is the same overlay attribute
+    _load_file already computes from the Docket table — no new release
+    mechanism, no new query, no duplicated release logic."""
+    if _has_full_remark_visibility(f, viewer):
+        return True
+    return bool(getattr(f, "is_released", False)) and f.created_by == viewer.id
 
 
 def _first_forward_time(route_entries) -> Optional[datetime]:
@@ -226,11 +283,22 @@ def _first_forward_time(route_entries) -> Optional[datetime]:
     return min(times) if times else None
 
 
-def _visible_file(f: EfmsFile, viewer: User) -> FileOut:
-    """Viewer-scoped serialization of a file. The original notesheet and the
-    full routing-chain skeleton (who/whom/when/action) are always intact —
-    only forwarding attachments and remark text are filtered, per
-    _has_full_remark_visibility.
+def _visible_file(f: EfmsFile, viewer: User, *, full_access: bool = True) -> FileOut:
+    """Viewer-scoped serialization of a file. The routing-chain skeleton
+    (who/whom/when/action) is always intact — forwarding attachments and
+    remark text are filtered per _has_full_remark_visibility, exactly as
+    before.
+
+    `full_access` defaults to True because every current caller
+    (create_file/update_file/save_notesheet/route_file, and get_file which
+    passes it explicitly) has already independently verified the viewer may
+    fully open this file (via _assert_full_file_access or an equivalent
+    current-holder-only check) before ever reaching this function. When a
+    caller passes full_access=False — a viewer who only cleared
+    _assert_tracking_access, not the strict check — the initial notesheet
+    content is nulled out as well: it must never reach a past participant
+    who is no longer the current holder, even inside a FileOut payload
+    otherwise built for another purpose.
 
     IMPORTANT: this filters a *detached Pydantic copy*, never the live ORM
     object. EfmsFile.attachments and .route_entries are both mapped with
@@ -240,6 +308,8 @@ def _visible_file(f: EfmsFile, viewer: User) -> FileOut:
     independent copy that is safe to filter/mutate freely.
     """
     payload = FileOut.model_validate(f)
+    if not full_access:
+        payload.notesheet = None
     if _has_full_remark_visibility(f, viewer):
         return payload
     first_fwd = _first_forward_time(f.route_entries)
@@ -313,7 +383,13 @@ async def search_files(
     )
     is_admin = user.active_role in _ADMIN_ROLES
     if not is_admin:
-        query = query.where(or_(EfmsFile.created_by == user.id, EfmsFile.current_holder_id == user.id))
+        # Current-holder only — matches _assert_full_file_access, the same
+        # boundary GET /{file_id} enforces. Search must never surface a file
+        # a non-admin user can no longer fully open (e.g. because they were
+        # only its creator and have since forwarded it onward); historical/
+        # audit access for that case belongs to File Tracking History, a
+        # separate, dedicated screen, not a Search -> View bypass.
+        query = query.where(EfmsFile.current_holder_id == user.id)
     if q:
         query = query.where(or_(EfmsFile.subject.ilike(f"%{q}%"), EfmsFile.ref_number.ilike(f"%{q}%")))
     if status:
@@ -339,11 +415,16 @@ async def track_file(file_id: UUID, db: AsyncSession = Depends(get_db), user: Us
     Routing events themselves (who forwarded to whom, when, current holder) are
     never hidden — every authorized viewer sees the complete chain. Only the
     remark text attached to each event is filtered: full visibility for the
-    current holder (or admin), own-remark-only for everyone else. The entry
-    stays in the list either way; only its "remarks" field is blanked."""
+    current holder, the creator once the file is released, or an admin
+    (_has_full_tracking_visibility) — own-remark-only for everyone else. The
+    entry stays in the list either way; only its "remarks" field is blanked.
+
+    Reachable by tracking-eligible viewers (_assert_tracking_access), not
+    just the current holder — a past participant who forwarded the file
+    onward must still be able to see its movement/audit history."""
     f = await _load_file(file_id, db)
-    await _assert_file_access(f, user, db)
-    full_visibility = _has_full_remark_visibility(f, user)
+    await _assert_tracking_access(f, user, db)
+    full_visibility = _has_full_tracking_visibility(f, user)
 
     from app.models.efms import RouteEntry
     from app.models.efms_extra import FileRemark
@@ -384,6 +465,12 @@ async def track_file(file_id: UUID, db: AsyncSession = Depends(get_db), user: Us
             "from_user_info": from_info.model_dump() if from_info else None,
             "to_user_info":   to_info.model_dump()   if to_info   else None,
             "remarks":        visible_remark,
+            # A remark existed on this movement but was redacted from
+            # "remarks" above (as opposed to no remark ever having been
+            # written) — lets the frontend show "you don't have access to
+            # read this" only where something is actually being withheld,
+            # never as a boolean leak of the remark's own content.
+            "has_remark":     e.remarks is not None,
             "is_current":     e.is_current,
             "created_at":     e.created_at.isoformat() if e.created_at else None,
         })
@@ -401,6 +488,7 @@ async def track_file(file_id: UUID, db: AsyncSession = Depends(get_db), user: Us
             "from_user_info": r_info.model_dump() if r_info else None,
             "to_user_info":   None,
             "remarks":        r.remark,
+            "has_remark":     r.remark is not None,
             "is_current":     False,
             "created_at":     r.created_at.isoformat() if r.created_at else None,
         })
@@ -409,15 +497,47 @@ async def track_file(file_id: UUID, db: AsyncSession = Depends(get_db), user: Us
     return out
 
 
+@router.get("/{file_id}/track/notesheet")
+async def track_initial_notesheet(file_id: UUID, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_verified_user)):
+    """The initial notesheet's content, scoped for Tracking History — reachable
+    by any tracking-eligible viewer (_assert_tracking_access, same boundary
+    as track_file), but the actual content is only included when
+    _has_full_tracking_visibility says so (current holder, the creator once
+    released, or an admin). A past participant who is neither can still call
+    this — they just get accessible=False and no content, so the frontend
+    can render "you don't have access to read this" instead of nothing.
+
+    GET /efms/files/{id} (get_file) already carries the notesheet for a
+    current holder, but that endpoint requires _assert_full_file_access and
+    is unreachable for a past participant — this is the tracking-scoped
+    equivalent for just the one field Tracking History needs, not a
+    duplicate of get_file."""
+    f = await _load_file(file_id, db)
+    await _assert_tracking_access(f, user, db)
+    accessible = _has_full_tracking_visibility(f, user)
+    has_notesheet = bool(f.notesheet and f.notesheet.content)
+    return {
+        "content": f.notesheet.content if (accessible and has_notesheet) else None,
+        "has_notesheet": has_notesheet,
+        "accessible": accessible,
+    }
+
+
 @router.get("/{file_id}", response_model=FileOut)
 async def get_file(
     file_id: UUID,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_verified_user),
 ):
+    """Full file open — the current holder (or admin, or a department
+    member viewing a file released to their department) only. A past
+    participant who has forwarded the file onward is rejected here (see
+    _assert_full_file_access); they can still reach the movement/audit
+    trail via GET /{file_id}/track, which uses the broader
+    _assert_tracking_access instead."""
     f = await _load_file(file_id, db)
-    await _assert_file_access(f, user, db)
-    return _visible_file(f, user)
+    await _assert_full_file_access(f, user, db)
+    return _visible_file(f, user, full_access=True)
 
 
 @router.post("", response_model=FileOut, status_code=201)
@@ -581,9 +701,11 @@ async def download_notesheet(
     LibreOffice-headless mechanism convert_doc_to_docx() already uses for
     .doc preview/signing — one conversion mechanism, not a second one).
     notesheet.content itself is only ever read here, never modified. Uses
-    the same file-access rule as get_file/track_file."""
+    the same strict, current-holder-only access rule as get_file — a past
+    participant who has forwarded the file onward must not be able to
+    download its notesheet."""
     f = await _load_file(file_id, db)
-    await _assert_file_access(f, user, db)
+    await _assert_full_file_access(f, user, db)
     if not f.notesheet:
         raise HTTPException(status_code=404, detail="This file has no notesheet yet.")
 

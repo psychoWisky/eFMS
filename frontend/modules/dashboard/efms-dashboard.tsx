@@ -1,6 +1,6 @@
 "use client";
 // Dashboard: 3 sections — Docket, Files, New File Creation
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useRouter } from "next/navigation";
 import { api } from "@/services/api";
@@ -48,7 +48,19 @@ export function EFMSDashboard() {
   const role = useActiveRole();
   const qc = useQueryClient();
   const [section, setSection] = useState<Section>("docket");
+  // "NEW" badge read-state: persisted in localStorage (not a backend field —
+  // there's no product requirement for cross-device sync here) and keyed
+  // per-user so one account's read state on this browser never bleeds into
+  // another account's dashboard. Deliberately separate from
+  // Notification.is_read, which is a different, backend-persisted concept.
   const [readFiles, setReadFiles] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    if (!user?.id) return;
+    try {
+      const raw = localStorage.getItem(`efms-read-files-${user.id}`);
+      if (raw) setReadFiles(new Set(JSON.parse(raw)));
+    } catch { /* ignore corrupt/inaccessible storage */ }
+  }, [user?.id]);
   const [newFileMode, setNewFileMode] = useState<"choice" | "create" | "reopen">("choice");
   const [docketSearch, setDocketSearch] = useState("");
   const [myFilesSearch, setMyFilesSearch] = useState("");
@@ -98,7 +110,16 @@ export function EFMSDashboard() {
     { id: "new",    label: "New File", icon: FilePlus2 },
   ];
 
-  function markRead(id: string) { setReadFiles((s) => new Set([...s, id])); }
+  function markRead(id: string) {
+    setReadFiles((s) => {
+      if (s.has(id)) return s;
+      const next = new Set(s).add(id);
+      if (user?.id) {
+        try { localStorage.setItem(`efms-read-files-${user.id}`, JSON.stringify([...next])); } catch { /* ignore quota/storage errors */ }
+      }
+      return next;
+    });
+  }
 
   return (
     <div className="min-h-screen bg-[#F5F7FA]">
@@ -199,7 +220,7 @@ export function EFMSDashboard() {
                                   <Unlock size={14} /> Release
                                 </button>
                               )}
-                              <button onClick={() => router.push(`/files/${f.file_id}`)}
+                              <button onClick={() => { markRead(f.file_id); router.push(`/files/${f.file_id}`); }}
                                 title="Track status"
                                 className="flex items-center gap-1 px-2 py-1.5 text-gray-600 border border-gray-200 rounded-lg text-sm hover:bg-gray-50">
                                 <Clock size={14} /> Track

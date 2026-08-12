@@ -59,16 +59,20 @@ async def tracking_history(
     files = result.scalars().all()
 
     file_ids = [f.id for f in files]
-    released_ids: set = set()
+    docket_by_file: dict = {}
     if file_ids:
         rel_result = await db.execute(
-            select(Docket.file_id).where(Docket.file_id.in_(file_ids), Docket.is_released == True)
+            select(Docket).where(Docket.file_id.in_(file_ids), Docket.is_released == True)
         )
-        released_ids = set(rel_result.scalars().all())
+        docket_by_file = {d.file_id: d for d in rel_result.scalars().all()}
 
-    # Batch every person referenced across every file's latest route entry
-    # and current holder in one call — two queries total regardless of how
-    # many files/people are involved.
+    # Batch every person referenced across every file's latest route entry,
+    # current holder, creator, and (if released) releaser in one call — two
+    # queries total regardless of how many files/people are involved. The
+    # creator/release info is included so File Tracking History's timeline
+    # (TimelineModal) can render its "Created"/"Released" events without a
+    # separate GET /efms/files/{id} call — that endpoint now requires full
+    # (current-holder-only) access, which a past participant here may not have.
     latest_entry_by_file = {}
     person_ids = set()
     for f in files:
@@ -78,18 +82,25 @@ async def tracking_history(
         latest_entry_by_file[f.id] = latest
         if f.current_holder_id:
             person_ids.add(f.current_holder_id)
+        person_ids.add(f.created_by)
         if latest:
             person_ids.add(latest.from_user_id)
             person_ids.add(latest.to_user_id)
+        docket = docket_by_file.get(f.id)
+        if docket and docket.released_by:
+            person_ids.add(docket.released_by)
     people = await person_info_map(person_ids, db)
 
     out = []
     for f in files:
         latest = latest_entry_by_file[f.id]
-        is_released = f.id in released_ids
+        docket = docket_by_file.get(f.id)
+        is_released = docket is not None
         from_info = people.get(latest.from_user_id) if latest and latest.from_user_id else None
         to_info = people.get(latest.to_user_id) if latest and latest.to_user_id else None
         holder_info = people.get(f.current_holder_id) if f.current_holder_id else None
+        creator_info = people.get(f.created_by)
+        released_by_info = people.get(docket.released_by) if docket and docket.released_by else None
         out.append({
             "file_id": str(f.id),
             "ref_number": f.ref_number,
@@ -97,9 +108,13 @@ async def tracking_history(
             "status": "released" if is_released else (f.status.value if hasattr(f.status, "value") else str(f.status)),
             "priority": f.priority.value if hasattr(f.priority, "value") else str(f.priority),
             "current_holder_info": holder_info.model_dump() if holder_info else None,
+            "creator_info": creator_info.model_dump() if creator_info else None,
             "from_user_info": from_info.model_dump() if from_info else None,
             "to_user_info": to_info.model_dump() if to_info else None,
             "forwarded_at": latest.created_at.isoformat() if latest else None,
+            "is_released": is_released,
+            "released_at": docket.released_at.isoformat() if docket and docket.released_at else None,
+            "released_by_info": released_by_info.model_dump() if released_by_info else None,
             "updated_at": f.updated_at.isoformat() if f.updated_at else None,
             "created_at": f.created_at.isoformat() if f.created_at else None,
         })

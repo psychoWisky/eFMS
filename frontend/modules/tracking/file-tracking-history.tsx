@@ -14,9 +14,13 @@ import { TimelineModal } from "./timeline-modal";
 interface TrackingItem {
   file_id: string; ref_number: string; subject: string; status: string; priority: string;
   current_holder_info: PersonInfo | null;
+  creator_info: PersonInfo | null;
   from_user_info: PersonInfo | null;
   to_user_info: PersonInfo | null;
   forwarded_at: string | null;
+  is_released: boolean;
+  released_at: string | null;
+  released_by_info: PersonInfo | null;
   updated_at: string;
   created_at: string;
 }
@@ -34,7 +38,7 @@ export function FileTrackingHistoryPage() {
   const [customFrom, setCustomFrom] = useState("");
   const [customTo, setCustomTo] = useState("");
   const [search, setSearch] = useState("");
-  const [timelineFileId, setTimelineFileId] = useState<string | null>(null);
+  const [timelineItem, setTimelineItem] = useState<TrackingItem | null>(null);
 
   const bounds = rangeId === "all" ? { from: "", to: "" }
     : rangeId === "custom" ? { from: customFrom, to: customTo }
@@ -127,7 +131,7 @@ export function FileTrackingHistoryPage() {
                     <td className="px-4 py-3 text-xs text-gray-500 whitespace-nowrap">{f.forwarded_at ? formatDate(f.forwarded_at, "datetime") : "—"}</td>
                     <td className="px-4 py-3 text-xs text-gray-500 whitespace-nowrap">{formatDate(f.updated_at, "datetime")}</td>
                     <td className="px-4 py-3">
-                      <button onClick={() => setTimelineFileId(f.file_id)}
+                      <button onClick={() => setTimelineItem(f)}
                         className="flex items-center gap-1 px-3 py-1.5 bg-[#0D6E6E] text-white rounded-lg text-xs font-medium hover:bg-[#178F8F] whitespace-nowrap">
                         <Eye size={13} /> View Timeline
                       </button>
@@ -140,8 +144,8 @@ export function FileTrackingHistoryPage() {
         )}
       </div>
 
-      {timelineFileId && (
-        <TimelineModal fileId={timelineFileId} onClose={() => setTimelineFileId(null)} />
+      {timelineItem && (
+        <TimelineModal item={timelineItem} onClose={() => setTimelineItem(null)} />
       )}
     </div>
   );

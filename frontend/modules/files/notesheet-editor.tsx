@@ -26,31 +26,10 @@ import { OfficeSectionFilter } from "@/components/shared/office-section-filter";
 import { useAttachmentQueue } from "@/hooks/use-attachment-queue";
 import { ATTACHMENT_TAGS, CUSTOM_TAG_VALUE, ALLOWED_ATTACHMENT_ACCEPT, getFileExtension } from "@/lib/attachment-constants";
 import { AttachmentPreviewModal } from "@/components/shared/attachment-preview-modal";
+import { toSafeNotesheetHtml, NOTESHEET_PROSE_CLASS } from "@/lib/notesheet-html";
 
 const DRAFT_EDIT_WINDOW_MS = 30 * 60 * 1000;
 const ATTACHMENT_DELETE_WINDOW_MS = 5 * 60 * 1000;
-
-// Compact prose styling for rendering stored notesheet HTML inside a
-// Notesheet History card (smaller than the main Initial Notesheet document,
-// since these sit inside a timeline entry rather than being the page's
-// primary content).
-const NOTESHEET_PROSE_CLASS = "prose prose-sm max-w-none leading-relaxed " +
-  "[&_h1]:text-lg [&_h1]:font-bold [&_h1]:mt-2 [&_h1]:mb-1 " +
-  "[&_h2]:text-base [&_h2]:font-bold [&_h2]:mt-2 [&_h2]:mb-1 " +
-  "[&_h3]:text-sm [&_h3]:font-semibold [&_h3]:mt-1.5 [&_h3]:mb-1 " +
-  "[&_p]:mb-2 [&_ol]:pl-5 [&_ul]:pl-5 [&_li]:mb-0.5 [&_strong]:font-bold";
-
-// RouteEntry.remarks holds two eras of data in the same plain-text column:
-// HTML from the Rich Text Editor (current) and legacy plain text from the
-// pre-editor <textarea> (historical). Detect which one a given value is and
-// normalize both to safe HTML for a single dangerouslySetInnerHTML render
-// path — no duplicate rendering component, no backend/data change.
-const HTML_TAG_PATTERN = /<([a-z][a-z0-9]*)\b[^>]*>/i;
-
-function toSafeNotesheetHtml(raw: string): string {
-  if (HTML_TAG_PATTERN.test(raw)) return raw; // Rich Text Editor output — already safe HTML, render as-is.
-  return escapeHtml(raw).replace(/\r\n|\r|\n/g, "<br />"); // Legacy plain text — escape, then preserve line breaks.
-}
 
 interface RouteEntry { id: string; from_user_id: string | null; to_user_id: string | null; action: string; remarks: string | null; is_current: boolean; created_at: string; from_user_info?: PersonInfo | null; to_user_info?: PersonInfo | null; }
 interface TrackEntry { id: string; type?: "route" | "sign"; from_user_id: string | null; to_user_id: string | null; from_user_name: string | null; to_user_name: string | null; from_user_info?: PersonInfo | null; to_user_info?: PersonInfo | null; action: string; remarks: string | null; is_current: boolean; created_at: string; }
@@ -726,6 +705,29 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                     <h2 className="text-lg font-bold text-gray-800">Initial Notesheet</h2>
                     <span className="text-sm text-gray-400 flex items-center gap-1"><Lock size={13} /> Read-only</span>
                   </div>
+                  {/* Creator/first-recipient context, same PersonBadge + layout
+                      language as Notesheet History below. The actual first
+                      forward (route_entries is ordered by created_at) is the
+                      real "Forwarded to" answer once one exists; before that,
+                      fall back to the informational recipient stored at
+                      Draft creation, and omit this line entirely if neither
+                      is available — never invent a movement that didn't happen. */}
+                  {(file.creator_info || file.route_entries[0]?.to_user_info || file.recipient_info) && (
+                    <div className="px-6 pt-5 flex flex-wrap items-start gap-x-8 gap-y-3">
+                      {file.creator_info && (
+                        <div className="flex items-start gap-1.5">
+                          <span className="text-xs font-semibold text-gray-400 uppercase mt-0.5">Created by</span>
+                          <PersonBadge person={file.creator_info} compact />
+                        </div>
+                      )}
+                      {(file.route_entries[0]?.to_user_info ?? file.recipient_info) && (
+                        <div className="flex items-start gap-1.5">
+                          <span className="text-xs font-semibold text-gray-400 uppercase mt-0.5">Forwarded to</span>
+                          <PersonBadge person={file.route_entries[0]?.to_user_info ?? file.recipient_info} compact />
+                        </div>
+                      )}
+                    </div>
+                  )}
                   {file.notesheet?.content ? (
                     <div className="px-6 py-5 prose max-w-none text-base leading-relaxed
                       [&_h1]:text-2xl [&_h1]:font-bold [&_h1]:mt-4 [&_h1]:mb-2
@@ -1092,24 +1094,21 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                                 <span className="text-xs text-gray-400 shrink-0">{formatDate(entry.created_at, "datetime")}</span>
                               )}
                             </div>
+                            {/* Track Status is movement/status only — no remark/notesheet
+                                content here (that belongs to Notesheet History /
+                                GET /docket/remarks, a separate feature/data source). */}
                             {entry.type === "sign" ? (
-                              <>
-                                <PersonBadge person={entry.from_user_info} fallback="System" className="mt-1" />
-                                {entry.remarks && <p className="text-sm text-gray-600 mt-1">{entry.remarks}</p>}
-                              </>
+                              <PersonBadge person={entry.from_user_info} fallback="System" className="mt-1" />
                             ) : (
-                              <>
-                                <div className="flex flex-col gap-1.5 mt-2 text-sm">
-                                  <PersonBadge person={entry.from_user_info} fallback="System" />
-                                  {entry.to_user_info && (
-                                    <>
-                                      <ArrowRight size={13} className="text-gray-400 rotate-90 shrink-0" />
-                                      <PersonBadge person={entry.to_user_info} />
-                                    </>
-                                  )}
-                                </div>
-                                {entry.remarks && <p className="text-sm text-gray-500 mt-2 italic">&ldquo;{entry.remarks}&rdquo;</p>}
-                              </>
+                              <div className="flex flex-col gap-1.5 mt-2 text-sm">
+                                <PersonBadge person={entry.from_user_info} fallback="System" />
+                                {entry.to_user_info && (
+                                  <>
+                                    <ArrowRight size={13} className="text-gray-400 rotate-90 shrink-0" />
+                                    <PersonBadge person={entry.to_user_info} />
+                                  </>
+                                )}
+                              </div>
                             )}
                           </div>
                         </div>

@@ -12,7 +12,7 @@ from app.core.dependencies import get_current_verified_user
 from app.models.user import User
 from app.models.efms import EfmsFile, FileStatus
 from app.models.efms_extra import Docket, FileRemark
-from app.api.v1.endpoints.efms_files import _load_file, _assert_file_access, _has_full_remark_visibility
+from app.api.v1.endpoints.efms_files import _load_file, _assert_tracking_access, _has_full_remark_visibility
 from app.utils.person_info import person_info_map
 
 router = APIRouter(prefix="/docket", tags=["Docket"])
@@ -214,7 +214,7 @@ async def get_remarks(file_id: UUID, db: AsyncSession = Depends(get_db), user: U
     file's current_holder_id, no extra state needed.
     """
     f = await _load_file(file_id, db)
-    await _assert_file_access(f, user, db)
+    await _assert_tracking_access(f, user, db)
     full_visibility = _has_full_remark_visibility(f, user)
 
     from app.models.efms import RouteEntry
