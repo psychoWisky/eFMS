@@ -8,9 +8,10 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/services/api";
 import { toast } from "sonner";
 import { confirmAction, showSuccess } from "@/lib/alert";
+import { useActiveRole } from "@/stores/auth.store";
 import {
   Plus, Loader2, X, Copy, RefreshCw, Eye, EyeOff, Pencil,
-  Power, PowerOff, ShieldAlert,
+  Power, PowerOff, ShieldAlert, Trash2, Upload, Download, CheckCircle2, XCircle,
 } from "lucide-react";
 
 interface Establishment { id: string; name: string; code: string | null; is_active: boolean; }
@@ -344,9 +345,151 @@ function EditUserModal({ user, onClose, establishments, departments }: {
   );
 }
 
+interface BulkRowResult {
+  row: number; email: string | null; status: "created" | "failed";
+  error: string | null; temp_password: string | null;
+}
+interface BulkUploadResult { total: number; created: number; failed: number; results: BulkRowResult[]; }
+
+// Super-Admin-only bulk import. Downloads the same sample the backend
+// generates (GET /auth/admin/users/bulk/sample) via the shared `api` client
+// — not a plain <a href> — since that endpoint requires a Bearer token, same
+// reasoning as the Notesheet PDF download fix elsewhere in this app.
+function BulkUploadModal({ onClose }: { onClose: () => void }) {
+  const qc = useQueryClient();
+  const [file, setFile] = useState<File | null>(null);
+  const [downloading, setDownloading] = useState(false);
+  const [result, setResult] = useState<BulkUploadResult | null>(null);
+
+  async function handleDownloadSample() {
+    setDownloading(true);
+    try {
+      const res = await api.get("/auth/admin/users/bulk/sample", { responseType: "blob" });
+      const blobUrl = URL.createObjectURL(res.data as Blob);
+      const link = document.createElement("a");
+      link.href = blobUrl;
+      link.download = "bulk_user_upload_sample.csv";
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(blobUrl);
+    } catch {
+      toast.error("Could not download the sample CSV.");
+    } finally {
+      setDownloading(false);
+    }
+  }
+
+  const upload = useMutation({
+    mutationFn: async () => {
+      const form = new FormData();
+      form.append("file", file as File);
+      const res = await api.post("/auth/admin/users/bulk", form, {
+        headers: { "Content-Type": "multipart/form-data" },
+      });
+      return res.data as BulkUploadResult;
+    },
+    onSuccess: (data) => {
+      setResult(data);
+      qc.invalidateQueries({ queryKey: ["user-management-users"] });
+      if (data.failed === 0) showSuccess(`${data.created} user${data.created === 1 ? "" : "s"} created.`);
+      else toast.warning(`${data.created} created, ${data.failed} failed — see details below.`);
+    },
+    onError: (err: unknown) => {
+      const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      toast.error(typeof msg === "string" ? msg : "Could not process the file.");
+    },
+  });
+
+  return (
+    <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-6" onClick={onClose}>
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[90vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+        <div className="px-6 py-5 border-b border-gray-200 flex items-center justify-between shrink-0">
+          <h3 className="text-xl font-bold text-gray-900">Bulk Upload Users</h3>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600"><X size={20} /></button>
+        </div>
+
+        <div className="overflow-y-auto px-6 py-5 flex-1 space-y-5">
+          <div className="bg-blue-50 border border-blue-200 rounded-xl px-4 py-3 text-sm text-blue-800">
+            <p>Upload a CSV file to create multiple users at once. Start from the sample template so the columns match exactly.</p>
+            <button type="button" onClick={handleDownloadSample} disabled={downloading}
+              className="mt-2 flex items-center gap-1.5 px-3 py-2 bg-white border border-blue-300 rounded-lg text-sm font-semibold text-blue-800 hover:bg-blue-100 disabled:opacity-50">
+              {downloading ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />} Download Sample CSV
+            </button>
+          </div>
+
+          <div>
+            <label className={LABEL}>CSV File</label>
+            <input type="file" accept=".csv" onChange={(e) => { setFile(e.target.files?.[0] ?? null); setResult(null); }}
+              className="block w-full text-sm text-gray-600 file:mr-3 file:py-2 file:px-3 file:rounded-lg file:border-0 file:bg-gray-100 file:text-gray-700 file:font-semibold hover:file:bg-gray-200" />
+            <p className="text-xs text-gray-400 mt-1.5">
+              Required columns: first_name, last_name, email, mobile, designation, role.
+              Leave temp_password blank to auto-generate a strong password per user.
+            </p>
+          </div>
+
+          {result && (
+            <div>
+              <div className="flex items-center gap-3 mb-2 text-sm">
+                <span className="font-semibold text-gray-700">{result.total} row{result.total === 1 ? "" : "s"} processed</span>
+                <span className="flex items-center gap-1 text-green-700"><CheckCircle2 size={14} /> {result.created} created</span>
+                {result.failed > 0 && <span className="flex items-center gap-1 text-red-600"><XCircle size={14} /> {result.failed} failed</span>}
+              </div>
+              <div className="border border-gray-200 rounded-xl overflow-hidden max-h-64 overflow-y-auto">
+                <table className="w-full text-xs">
+                  <thead className="bg-gray-50 border-b sticky top-0">
+                    <tr>{["Row", "Email", "Status", "Details"].map((h) => (
+                      <th key={h} className="text-left px-3 py-2 font-semibold text-gray-600">{h}</th>
+                    ))}</tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-50">
+                    {result.results.map((r) => (
+                      <tr key={r.row}>
+                        <td className="px-3 py-2 text-gray-500">{r.row}</td>
+                        <td className="px-3 py-2 text-gray-700">{r.email ?? "—"}</td>
+                        <td className="px-3 py-2">
+                          {r.status === "created"
+                            ? <span className="px-1.5 py-0.5 bg-green-100 text-green-700 rounded text-xs font-semibold">Created</span>
+                            : <span className="px-1.5 py-0.5 bg-red-100 text-red-700 rounded text-xs font-semibold">Failed</span>}
+                        </td>
+                        <td className="px-3 py-2 text-gray-500">
+                          {r.status === "created" && r.temp_password ? (
+                            <span className="flex items-center gap-1.5">
+                              <code className="font-mono text-[11px] bg-gray-100 px-1.5 py-0.5 rounded">{r.temp_password}</code>
+                              <button type="button" onClick={() => copyToClipboard(r.temp_password!)} className="text-gray-400 hover:text-gray-600"><Copy size={12} /></button>
+                            </span>
+                          ) : (r.error ?? "—")}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div className="px-6 py-4 border-t border-gray-200 flex justify-end gap-3 shrink-0">
+          <button onClick={onClose} className="px-4 py-2.5 rounded-lg text-sm font-semibold text-gray-600 hover:bg-gray-100">Close</button>
+          <button onClick={() => upload.mutate()} disabled={!file || upload.isPending}
+            className="flex items-center gap-1.5 px-5 py-2.5 bg-[#0D6E6E] text-white rounded-lg text-sm font-semibold hover:bg-[#178F8F] disabled:opacity-50">
+            {upload.isPending ? <Loader2 size={15} className="animate-spin" /> : <Upload size={15} />} Upload
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function UserManagementSection() {
   const qc = useQueryClient();
+  const activeRole = useActiveRole();
+  // Bulk import and Delete are Super-Admin-only in the UI, matching the
+  // backend's _super_admin_only gate — hiding them here is a UX nicety, not
+  // the security boundary; the API rejects a plain Admin regardless.
+  const isSuperAdmin = activeRole === "super_admin";
   const [showCreate, setShowCreate] = useState(false);
+  const [showBulkUpload, setShowBulkUpload] = useState(false);
   const [editingUser, setEditingUser] = useState<AdminUser | null>(null);
 
   const { data: users = [], isLoading } = useQuery<AdminUser[]>({
@@ -370,14 +513,34 @@ export function UserManagementSection() {
     onError: () => toast.error("Could not update user status."),
   });
 
+  const deleteUser = useMutation({
+    mutationFn: (id: string) => api.delete(`/auth/admin/users/${id}`),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["user-management-users"] });
+      showSuccess("User deleted.");
+    },
+    onError: (err: unknown) => {
+      const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      toast.error(typeof msg === "string" ? msg : "Could not delete user.");
+    },
+  });
+
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <h2 className="text-lg font-bold text-gray-800">Users ({users.length})</h2>
-        <button onClick={() => setShowCreate(true)}
-          className="flex items-center gap-1.5 px-4 py-2.5 bg-[#0D6E6E] text-white rounded-lg text-sm font-semibold hover:bg-[#178F8F]">
-          <Plus size={15} /> Create User
-        </button>
+        <div className="flex items-center gap-2">
+          {isSuperAdmin && (
+            <button onClick={() => setShowBulkUpload(true)}
+              className="flex items-center gap-1.5 px-4 py-2.5 border border-gray-300 text-gray-700 rounded-lg text-sm font-semibold hover:bg-gray-50">
+              <Upload size={15} /> Bulk Upload
+            </button>
+          )}
+          <button onClick={() => setShowCreate(true)}
+            className="flex items-center gap-1.5 px-4 py-2.5 bg-[#0D6E6E] text-white rounded-lg text-sm font-semibold hover:bg-[#178F8F]">
+            <Plus size={15} /> Create User
+          </button>
+        </div>
       </div>
 
       {isLoading ? (
@@ -429,6 +592,24 @@ export function UserManagementSection() {
                       >
                         {u.is_active ? <PowerOff size={15} /> : <Power size={15} />}
                       </button>
+                      {isSuperAdmin && (
+                        <button
+                          onClick={async () => {
+                            const confirmed = await confirmAction({
+                              title: "Delete this user?",
+                              text: `${u.full_name} will be permanently removed. This cannot be undone.`,
+                              confirmText: "Delete",
+                              danger: true,
+                            });
+                            if (confirmed) deleteUser.mutate(u.id);
+                          }}
+                          disabled={deleteUser.isPending}
+                          title="Delete"
+                          className="p-2 rounded-lg hover:bg-red-50 text-gray-400 hover:text-red-600 disabled:opacity-50"
+                        >
+                          <Trash2 size={15} />
+                        </button>
+                      )}
                     </div>
                   </td>
                 </tr>
@@ -443,6 +624,9 @@ export function UserManagementSection() {
       )}
       {editingUser && (
         <EditUserModal user={editingUser} onClose={() => setEditingUser(null)} establishments={establishments} departments={departments} />
+      )}
+      {isSuperAdmin && showBulkUpload && (
+        <BulkUploadModal onClose={() => setShowBulkUpload(false)} />
       )}
     </div>
   );

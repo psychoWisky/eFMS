@@ -1,15 +1,18 @@
 """Authentication: admin-created users (temporary password + forced first-login
 change), two-step login (password then email OTP), admin user management."""
 import hashlib, smtplib
+import csv, io
 from email.mime.text import MIMEText
 from datetime import datetime, timezone, timedelta, date
 from typing import Optional, List
 from uuid import UUID
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File
+from fastapi.responses import Response
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
-from pydantic import BaseModel, EmailStr
+from sqlalchemy.exc import IntegrityError
+from pydantic import BaseModel, EmailStr, ValidationError
 
 from app.db.base import get_db
 from app.core.security import (
@@ -25,6 +28,11 @@ from app.schemas.auth import LoginRequest, TokenResponse, RefreshRequest, UserBr
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 _super = require_roles(SystemRole.SUPER_ADMIN, SystemRole.ADMIN)
+# Bulk import and delete are explicitly Super-Admin-only (stricter than the
+# existing _super, which also admits plain Admin) — reuses the same
+# require_roles() mechanism, just with a narrower role set, rather than a
+# new authorization system.
+_super_admin_only = require_roles(SystemRole.SUPER_ADMIN)
 
 
 # ── OTP helpers (login 2FA only — self-registration removed) ─────────────────
@@ -362,12 +370,15 @@ class CreateUserRequest(BaseModel):
     temp_password: str
 
 
-@router.post("/admin/users", status_code=201, response_model=AdminUserOut)
-async def create_user(
-    body: CreateUserRequest,
-    db: AsyncSession = Depends(get_db),
-    _: User = Depends(_super),
-):
+async def _create_user_record(db: AsyncSession, body: CreateUserRequest) -> User:
+    """Core "create one user" logic — role/password-policy/email-uniqueness
+    validation, then the actual User + UserRole rows. Shared by the single-
+    user endpoint below and the bulk CSV importer, so the two can never drift
+    on what counts as a valid new user. Raises HTTPException on any
+    validation failure. Flushes (so the caller can read user.id) but does
+    NOT commit — callers decide their own commit/rollback boundary (the
+    single-user endpoint commits once; the bulk importer commits per row so
+    one bad row can't roll back rows that already succeeded)."""
     role_map = {r.value: r for r in SystemRole}
     role = role_map.get(body.role)
     if not role:
@@ -401,8 +412,152 @@ async def create_user(
     db.add(user)
     await db.flush()
     db.add(UserRole(user_id=user.id, role=role))
+    return user
+
+
+@router.post("/admin/users", status_code=201, response_model=AdminUserOut)
+async def create_user(
+    body: CreateUserRequest,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(_super),
+):
+    user = await _create_user_record(db, body)
     await db.commit()
     return AdminUserOut.from_user(await _load_user(db, user.id))
+
+
+# ── Bulk user import (Super Admin only) ────────────────────────────────────────
+
+_BULK_CSV_COLUMNS = [
+    "first_name", "last_name", "email", "mobile", "employee_code",
+    "date_of_birth", "designation", "establishment_id", "department_id",
+    "role", "is_active", "temp_password",
+]
+_BULK_REQUIRED_COLUMNS = {"first_name", "last_name", "email", "mobile", "designation", "role"}
+
+
+@router.get("/admin/users/bulk/sample")
+async def download_bulk_user_sample(_: User = Depends(_super_admin_only)):
+    """A ready-to-fill CSV template for bulk user creation — same columns
+    CreateUserRequest accepts (see _BULK_CSV_COLUMNS), so what validates here
+    is exactly what validates on single-user creation. temp_password may be
+    left blank; a strong one is auto-generated per row (see bulk_create_users)."""
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(_BULK_CSV_COLUMNS)
+    writer.writerow([
+        "John", "Doe", "john.doe@example.com", "9876543210", "EMP001",
+        "1990-01-15", "Assistant Registrar", "", "", "efms_officer", "true", "",
+    ])
+    # UTF-8 BOM so Excel opens the file with the correct encoding by default.
+    csv_bytes = buf.getvalue().encode("utf-8-sig")
+    return Response(
+        content=csv_bytes,
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=\"bulk_user_upload_sample.csv\""},
+    )
+
+
+class BulkUserRowResult(BaseModel):
+    row: int
+    email: Optional[str] = None
+    status: str  # "created" | "failed"
+    error: Optional[str] = None
+    temp_password: Optional[str] = None
+
+
+class BulkUserUploadResult(BaseModel):
+    total: int
+    created: int
+    failed: int
+    results: List[BulkUserRowResult]
+
+
+def _parse_bulk_bool(value: str, default: bool) -> bool:
+    v = value.strip().lower()
+    if not v:
+        return default
+    if v in ("true", "1", "yes", "y", "active"):
+        return True
+    if v in ("false", "0", "no", "n", "inactive"):
+        return False
+    return default
+
+
+@router.post("/admin/users/bulk", response_model=BulkUserUploadResult)
+async def bulk_create_users(
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(_super_admin_only),
+):
+    """Create many users from an uploaded CSV — reuses _create_user_record for
+    every row, so a bulk import can never accept something single-user
+    creation would reject (or vice versa). Rows are validated and committed
+    one at a time: a failing row is reported and skipped, it never rolls
+    back rows that already succeeded. Excel files should be saved as CSV
+    before uploading (Excel's own "Save As -> CSV" export) — no .xlsx binary
+    parser is included here, to avoid a new dependency for this alone."""
+    filename = (file.filename or "").lower()
+    if not filename.endswith(".csv"):
+        raise HTTPException(400, "Please upload a .csv file. If you have an Excel file, use \"Save As\" > CSV first.")
+
+    raw = await file.read()
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        raise HTTPException(400, "Could not read the file — please upload a UTF-8 encoded CSV.")
+
+    reader = csv.DictReader(io.StringIO(text))
+    header = {(c or "").strip() for c in (reader.fieldnames or [])}
+    missing = _BULK_REQUIRED_COLUMNS - header
+    if missing:
+        raise HTTPException(400, f"CSV is missing required column(s): {', '.join(sorted(missing))}.")
+
+    results: List[BulkUserRowResult] = []
+    created_count = 0
+
+    for idx, raw_row in enumerate(reader, start=2):  # row 1 is the header
+        row = {(k or "").strip(): (v or "").strip() for k, v in raw_row.items() if k}
+        email = row.get("email", "").lower()
+        temp_password = row.get("temp_password") or generate_temp_password()
+
+        try:
+            body = CreateUserRequest(
+                first_name=row.get("first_name", ""),
+                last_name=row.get("last_name", ""),
+                email=email,
+                mobile=row.get("mobile", ""),
+                employee_code=row.get("employee_code") or None,
+                date_of_birth=row.get("date_of_birth") or None,
+                designation=row.get("designation", ""),
+                establishment_id=row.get("establishment_id") or None,
+                department_id=row.get("department_id") or None,
+                role=row.get("role", ""),
+                is_active=_parse_bulk_bool(row.get("is_active", ""), default=True),
+                temp_password=temp_password,
+            )
+        except ValidationError as exc:
+            first_error = exc.errors()[0]
+            field = ".".join(str(p) for p in first_error["loc"])
+            results.append(BulkUserRowResult(row=idx, email=email or None, status="failed", error=f"{field}: {first_error['msg']}"))
+            continue
+
+        try:
+            user = await _create_user_record(db, body)
+            await db.commit()
+        except HTTPException as exc:
+            await db.rollback()
+            results.append(BulkUserRowResult(row=idx, email=email, status="failed", error=str(exc.detail)))
+            continue
+        except IntegrityError:
+            await db.rollback()
+            results.append(BulkUserRowResult(row=idx, email=email, status="failed", error="Could not create this user (data conflict)."))
+            continue
+
+        created_count += 1
+        results.append(BulkUserRowResult(row=idx, email=email, status="created", temp_password=temp_password))
+
+    return BulkUserUploadResult(total=len(results), created=created_count, failed=len(results) - created_count, results=results)
 
 
 class EditUserRequest(BaseModel):
@@ -499,3 +654,38 @@ async def reset_user_password(
     user.must_change_password = True
     await db.commit()
     return {"temp_password": temp_password}
+
+
+@router.delete("/admin/users/{uid}", status_code=204)
+async def delete_user(
+    uid: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(_super_admin_only),
+):
+    """Permanently remove a user — Super Admin only (stricter than every
+    other endpoint in this section, which also admits plain Admin). This is
+    a real hard delete, not a soft-delete: the app has no
+    deleted_at/is_deleted pattern anywhere, and is_active already covers
+    "disable without deleting" (see set_user_status above), so a separate
+    "Delete" action is expected to actually remove the row.
+
+    Most non-trivial User FKs across the schema (EfmsFile.created_by,
+    RouteEntry.from_user_id/to_user_id, FileAttachment.uploaded_by, etc.)
+    have no ON DELETE clause, so the database itself refuses to delete a
+    user with real eFMS history — that IntegrityError is caught and turned
+    into a clear, actionable message rather than a raw 500. Only a user
+    with no such history (e.g. a freshly created account) can actually be
+    deleted; everyone else must be deactivated instead."""
+    if uid == current_user.id:
+        raise HTTPException(400, "You cannot delete your own account.")
+    user = await _load_user(db, uid)
+    try:
+        await db.delete(user)
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(
+            409,
+            "This user cannot be deleted because they have existing activity in the system "
+            "(files, attachments, signatures, or other records). Deactivate the user instead.",
+        )
