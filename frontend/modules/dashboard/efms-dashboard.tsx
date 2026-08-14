@@ -180,7 +180,11 @@ export function EFMSDashboard() {
               </div>
             ) : (
               <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
-                <table className="w-full">
+                {/* The horizontal scrollbar (if any) belongs to this inner
+                    wrapper only — min-w keeps columns from over-compressing
+                    on narrow screens instead of the page itself overflowing. */}
+                <div className="w-full overflow-x-auto">
+                <table className="w-full min-w-[900px]">
                   <thead className="bg-gray-50 border-b border-gray-200">
                     <tr>
                       {["Ref Number", "Subject", "From", "Priority", "Received", "Action"].map((h) => (
@@ -232,6 +236,7 @@ export function EFMSDashboard() {
                     })}
                   </tbody>
                 </table>
+                </div>
               </div>
             )}
           </div>
@@ -266,7 +271,8 @@ export function EFMSDashboard() {
               </div>
             ) : (
               <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
-                <table className="w-full">
+                <div className="w-full overflow-x-auto">
+                <table className="w-full min-w-[960px]">
                   <thead className="bg-gray-50 border-b border-gray-200">
                     <tr>
                       {["Note ID", "Subject", "File Category", "File / Doc Number", "Created At", "Status", "Action"].map((h) => (
@@ -310,6 +316,7 @@ export function EFMSDashboard() {
                     })}
                   </tbody>
                 </table>
+                </div>
               </div>
             )}
 
@@ -323,7 +330,8 @@ export function EFMSDashboard() {
                   <div className="flex items-center justify-center py-10 gap-3 text-gray-400 mt-3"><Loader2 size={22} className="animate-spin" /> Loading…</div>
                 ) : (
                   <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden mt-3">
-                    <table className="w-full">
+                    <div className="w-full overflow-x-auto">
+                    <table className="w-full min-w-[800px]">
                       <thead className="bg-gray-50 border-b border-gray-200">
                         <tr>
                           {["Ref Number", "Subject", "Category", "Released", "Status", "Action"].map((h) => (
@@ -354,6 +362,7 @@ export function EFMSDashboard() {
                         ))}
                       </tbody>
                     </table>
+                    </div>
                   </div>
                 )}
               </div>
