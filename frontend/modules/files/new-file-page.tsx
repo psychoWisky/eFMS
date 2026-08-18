@@ -5,13 +5,14 @@ import { api } from "@/services/api";
 import { toast } from "sonner";
 import { showSuccess } from "@/lib/alert";
 import { EditorContent } from "@tiptap/react";
-import { Loader2, Upload, X, FileText, Send, AlertTriangle, CheckCircle2 } from "lucide-react";
+import { Loader2, Upload, X, FileText, Send, AlertTriangle, CheckCircle2, Save } from "lucide-react";
 import { PersonBadge } from "@/components/shared/person-badge";
 import { SearchableSelect } from "@/components/shared/searchable-select";
 import { useRichTextEditor, RichTextToolbar } from "@/components/shared/rich-text-editor";
 import { useFavoriteRecipients } from "@/hooks/use-favorite-recipients";
 import { useRecipientFilter } from "@/hooks/use-recipient-filter";
 import { useAttachmentQueue, resolveAttachmentTag } from "@/hooks/use-attachment-queue";
+import { useUnsavedChangesGuard } from "@/hooks/use-unsaved-changes-guard";
 import {
   ATTACHMENT_TAGS, CUSTOM_TAG_VALUE, ALLOWED_ATTACHMENT_ACCEPT, ALLOWED_ATTACHMENT_HELP_TEXT, validateCustomTag,
 } from "@/lib/attachment-constants";
@@ -23,6 +24,7 @@ interface NewFileFormProps { onSuccess?: () => void; }
 export function NewFilePage() { return <NewFileForm />; }
 
 const DRAFT_KEY = "efms-new-file-draft";
+const DEFAULT_NOTESHEET_HTML = "<p>Write your official notesheet here…</p>";
 
 export function NewFileForm({ onSuccess }: NewFileFormProps) {
   const qc = useQueryClient();
@@ -63,8 +65,19 @@ export function NewFileForm({ onSuccess }: NewFileFormProps) {
     }
   }, [allUsers, loadingUsers, recipientId]);
 
+  // Tracks whether the notesheet body differs from its default placeholder —
+  // driven by the editor's onChange rather than reading getHTML() at render
+  // time, since Tiptap doesn't re-render its parent on every keystroke on
+  // its own. Also flips true when a draft is restored from localStorage:
+  // that autosave is not a real save, so restored content must still count
+  // as unsaved until the user explicitly saves it.
+  const [notesheetDirty, setNotesheetDirty] = useState(false);
+
   // Tiptap WYSIWYG editor (shared config — see components/shared/rich-text-editor.tsx)
-  const editor = useRichTextEditor({ content: "<p>Write your official notesheet here…</p>" });
+  const editor = useRichTextEditor({
+    content: DEFAULT_NOTESHEET_HTML,
+    onChange: (html) => setNotesheetDirty(html !== DEFAULT_NOTESHEET_HTML),
+  });
 
   // Restore draft on mount
   useEffect(() => {
@@ -72,7 +85,7 @@ export function NewFileForm({ onSuccess }: NewFileFormProps) {
     if (saved && editor) {
       try {
         const { content, subject: s, category: c, priority: p } = JSON.parse(saved);
-        if (content) { editor.commands.setContent(content); setDraftRestored(true); }
+        if (content) { editor.commands.setContent(content); setDraftRestored(true); setNotesheetDirty(content !== DEFAULT_NOTESHEET_HTML); }
         if (s) setSubject(s);
         if (c) setCategory(c);
         if (p) setPriority(p);
@@ -106,7 +119,17 @@ export function NewFileForm({ onSuccess }: NewFileFormProps) {
         initial_content: noteContent,
       });
       const fileId = res.data.id;
-      await attachmentQueue.uploadAll(fileId);
+      // Reporting variant: the file already exists at this point and isn't
+      // safely re-creatable, so an attachment failure here must not block
+      // navigation the way a genuinely-retryable save would — it's reported
+      // to the user instead of silently swallowed (unlike the ordinary
+      // uploadAll used nowhere else in this flow anymore).
+      const { failed } = await attachmentQueue.uploadAllReporting(fileId);
+      if (failed.length > 0) {
+        toast.error(
+          `File saved, but ${failed.length} attachment${failed.length > 1 ? "s" : ""} failed to upload: ${failed.map((f) => f.name).join(", ")}. You can add them again from the file page.`
+        );
+      }
       return res.data;
     },
     onSuccess: () => {
@@ -117,7 +140,8 @@ export function NewFileForm({ onSuccess }: NewFileFormProps) {
       // Reset form
       setSubject(""); setCategory(""); setPriority(""); setRecipientId(""); attachmentQueue.clear(); setDraftRestored(false);
       localStorage.removeItem(DRAFT_KEY);
-      editor?.commands.clearContent();
+      editor?.commands.setContent(DEFAULT_NOTESHEET_HTML);
+      setNotesheetDirty(false);
       setConfirm(false);
     },
     onError: (err: unknown) => {
@@ -134,15 +158,61 @@ export function NewFileForm({ onSuccess }: NewFileFormProps) {
     attachmentQueue.addFiles(e.dataTransfer.files);
   }
 
+  function validateForm(): string | null {
+    if (!subject.trim()) return "Subject is required.";
+    if (subject.trim().length < 5) return "Subject must be at least 5 characters.";
+    if (!category) return "Category is required.";
+    if (!priority) return "Priority is required.";
+    if (attachmentQueue.hasInvalidCustomTags()) return "Please enter a valid custom tag for every attachment marked \"Other\".";
+    return null;
+  }
+
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (!subject.trim()) { toast.error("Subject is required."); return; }
-    if (subject.trim().length < 5) { toast.error("Subject must be at least 5 characters."); return; }
-    if (!category) { toast.error("Category is required."); return; }
-    if (!priority) { toast.error("Priority is required."); return; }
-    if (attachmentQueue.hasInvalidCustomTags()) { toast.error("Please enter a valid custom tag for every attachment marked \"Other\"."); return; }
+    const err = validateForm();
+    if (err) { toast.error(err); return; }
     setConfirm(true);
   }
+
+  // Real unsaved-changes tracking — never hardcoded true on mount. Covers
+  // every field the task requires (Subject/Category/Priority/Recipient/
+  // Notesheet/queued attachments); localStorage's own autosave is not a
+  // substitute since it never actually persists the file to the backend.
+  const isDirty =
+    subject.trim() !== "" || category !== "" || priority !== "" || recipientId !== "" ||
+    annexures.length > 0 || notesheetDirty;
+
+  function handleDiscardNewFile() {
+    setSubject(""); setCategory(""); setPriority(""); setRecipientId("");
+    attachmentQueue.clear();
+    setDraftRestored(false);
+    setNotesheetDirty(false);
+    localStorage.removeItem(DRAFT_KEY);
+    editor?.commands.setContent(DEFAULT_NOTESHEET_HTML);
+  }
+
+  // The explicit "Save Changes" button's own handler — validates, then saves
+  // via the same create/save-draft mutation "Review & Submit" -> "Save
+  // Draft" already uses, just without the confirmation-review step. Errors
+  // are already surfaced by createFile's own onError toast; nothing here
+  // triggers navigation — Save Changes only ever persists, never leaves.
+  async function handleSaveChanges() {
+    const err = validateForm();
+    if (err) { toast.error(err); return; }
+    try {
+      await createFile.mutateAsync();
+    } catch {
+      // createFile's own onError already surfaced a toast.
+    }
+  }
+
+  // The navigation guard's ONLY job is "if dirty, ask Leave/Stay" — it never
+  // saves. Persisting only ever happens via the explicit Save Changes button
+  // (or the existing Review & Submit -> Save Draft flow) above.
+  useUnsavedChangesGuard({
+    isDirty,
+    onDiscard: handleDiscardNewFile,
+  });
 
   const selectedRecipient = allUsers.find((u) => u.id === recipientId);
 
@@ -151,7 +221,7 @@ export function NewFileForm({ onSuccess }: NewFileFormProps) {
       {draftRestored && (
         <div className="flex items-center justify-between px-4 py-3 bg-amber-50 border border-amber-200 rounded-xl text-amber-800 text-sm">
           <span>Draft restored from your last session.</span>
-          <button type="button" onClick={() => { localStorage.removeItem(DRAFT_KEY); editor?.commands.clearContent(); setSubject(""); setCategory(""); setPriority(""); setDraftRestored(false); }}
+          <button type="button" onClick={() => { localStorage.removeItem(DRAFT_KEY); editor?.commands.setContent(DEFAULT_NOTESHEET_HTML); setNotesheetDirty(false); setSubject(""); setCategory(""); setPriority(""); setDraftRestored(false); }}
             className="ml-4 text-xs font-semibold underline hover:no-underline">Clear draft</button>
         </div>
       )}
@@ -324,6 +394,11 @@ export function NewFileForm({ onSuccess }: NewFileFormProps) {
 
       {/* Submit */}
       <div className="flex justify-end gap-3 pb-4">
+        <button type="button" onClick={handleSaveChanges} disabled={createFile.isPending || !isDirty}
+          className="flex items-center gap-2 px-6 py-3.5 border-2 border-[#0D6E6E] text-[#0D6E6E] text-base font-bold rounded-xl hover:bg-[#E6F4F4] disabled:opacity-50 disabled:cursor-not-allowed">
+          {createFile.isPending ? <Loader2 size={18} className="animate-spin" /> : <Save size={18} />}
+          {createFile.isPending ? "Saving…" : "Save Changes"}
+        </button>
         <button type="submit" className="flex items-center gap-2 px-8 py-3.5 bg-[#0D6E6E] text-white text-base font-bold rounded-xl hover:bg-[#178F8F]">
           <Send size={18} /> Review & Submit
         </button>

@@ -91,6 +91,34 @@ export function useAttachmentQueue(maxFiles = 10) {
     }
   }
 
+  /** Like uploadAll, but never swallows per-item failures — resolves with
+   * which items succeeded/failed instead, so callers (the new unsaved-
+   * changes Save flow) can decide whether to block navigation and can report
+   * exactly which attachment failed, per the requirement not to silently
+   * report success when an upload actually failed. Also removes only the
+   * successfully-uploaded items from the local queue, leaving failed ones
+   * queued so a blocked Save can be retried without the user having to
+   * re-browse and re-select the file from disk. uploadAll itself is left
+   * untouched since existing callers rely on its swallow-and-continue
+   * behavior. */
+  async function uploadAllReporting(fileId: string): Promise<{ succeeded: number; failed: { name: string; error: string }[] }> {
+    const failed: { name: string; error: string }[] = [];
+    const failedRefs = new Set<QueuedAttachment>();
+    let succeeded = 0;
+    for (const item of items) {
+      try {
+        await uploadOne(fileId, item.file, resolveAttachmentTag(item), item.name);
+        succeeded++;
+      } catch (err) {
+        const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+        failed.push({ name: item.name || item.file.name, error: typeof msg === "string" ? msg : "Upload failed." });
+        failedRefs.add(item);
+      }
+    }
+    setItems((prev) => prev.filter((it) => failedRefs.has(it)));
+    return { succeeded, failed };
+  }
+
   /** Upload files immediately, bypassing the local queue entirely — for
    * screens where the target file already exists and attachments must
    * persist to the server as soon as they're selected (e.g. the Forward
@@ -126,6 +154,6 @@ export function useAttachmentQueue(maxFiles = 10) {
 
   return {
     items, addFiles, removeItem, renameItem, setTag, setCustomTag, clear,
-    hasInvalidCustomTags, uploadAll, uploadNow,
+    hasInvalidCustomTags, uploadAll, uploadNow, uploadAllReporting,
   };
 }

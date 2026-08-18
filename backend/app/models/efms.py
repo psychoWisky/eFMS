@@ -2,7 +2,7 @@
 import enum
 from sqlalchemy import (
     Column, String, Integer, Boolean, ForeignKey, Text,
-    Enum as PgEnum, Index, DateTime,
+    Enum as PgEnum, Index, DateTime, UniqueConstraint,
 )
 from sqlalchemy.orm import relationship
 from sqlalchemy.dialects.postgresql import JSONB, UUID
@@ -60,6 +60,7 @@ class EfmsFile(Base, UUIDMixin, TimestampMixin):
     recipient     = relationship("User", foreign_keys=[recipient_id])
     department    = relationship("Department")
     notesheet     = relationship("Notesheet", back_populates="file", uselist=False, cascade="all, delete-orphan")
+    holder_notes  = relationship("HolderNote", back_populates="file", cascade="all, delete-orphan", order_by="HolderNote.created_at")
     route_entries = relationship("RouteEntry", back_populates="file", cascade="all, delete-orphan", order_by="RouteEntry.created_at")
     attachments   = relationship("FileAttachment", back_populates="file", cascade="all, delete-orphan", order_by="FileAttachment.created_at")
     dispatch      = relationship("DispatchRecord", back_populates="file", uselist=False)
@@ -101,6 +102,34 @@ class NotesheetVersion(Base, UUIDMixin, TimestampMixin):
 
     __table_args__ = (
         Index("ix_ns_version_notesheet", "notesheet_id"),
+    )
+
+
+class HolderNote(Base, UUIDMixin, TimestampMixin):
+    """A current/past holder's OWN Notesheet for a file — distinct from the
+    single, creator-owned `Notesheet` row above. Every user who has ever held
+    the file gets at most one row per (file_id, user_id); it's writable only
+    while that user is the file's current_holder_id (enforced in the API
+    layer, not here), and becomes permanently read-only the moment the file
+    is forwarded away from them — the row itself is never deleted, so it
+    stays visible as that holder's historical contribution. Deliberately NOT
+    RouteEntry.remarks (a routing-audit annotation attached to a forward
+    action) and NOT Notesheet.content (the creator's original, immutable
+    once non-draft) — this is the third, independent concept the per-user
+    Notesheet business rule requires."""
+    __tablename__ = "holder_notes"
+
+    file_id       = Column(UUID(as_uuid=True), ForeignKey("efms_files.id"), nullable=False)
+    user_id       = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    content       = Column(Text, default="")
+
+    file          = relationship("EfmsFile", back_populates="holder_notes")
+    user          = relationship("User")
+
+    __table_args__ = (
+        UniqueConstraint("file_id", "user_id", name="uq_holder_note_file_user"),
+        Index("ix_holder_note_file", "file_id"),
+        Index("ix_holder_note_user", "user_id"),
     )
 
 

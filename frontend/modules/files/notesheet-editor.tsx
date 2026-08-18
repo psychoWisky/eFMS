@@ -1,5 +1,5 @@
 "use client";
-// File detail view: left panel = PDF attachments, main = forwarding remarks thread + notesheet + track status
+// File detail view: left panel = PDF attachments, main = Notesheet (creator's + each holder's own) + forwarding + track status
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
@@ -24,6 +24,7 @@ import { useFavoriteRecipients } from "@/hooks/use-favorite-recipients";
 import { useRecipientFilter } from "@/hooks/use-recipient-filter";
 import { OfficeSectionFilter } from "@/components/shared/office-section-filter";
 import { useAttachmentQueue } from "@/hooks/use-attachment-queue";
+import { useUnsavedChangesGuard } from "@/hooks/use-unsaved-changes-guard";
 import { ATTACHMENT_TAGS, CUSTOM_TAG_VALUE, ALLOWED_ATTACHMENT_ACCEPT, getFileExtension } from "@/lib/attachment-constants";
 import { AttachmentPreviewModal } from "@/components/shared/attachment-preview-modal";
 import { toSafeNotesheetHtml, NOTESHEET_PROSE_CLASS } from "@/lib/notesheet-html";
@@ -48,7 +49,13 @@ interface EfmsFile {
   notesheet: Notesheet | null; route_entries: RouteEntry[]; attachments: Attachment[];
   signatures: Signature[];
 }
-interface ForwardingRemark { id: string; remark: string; user_name: string; user_id: string; created_at: string; user_info?: PersonInfo | null; to_user_info?: PersonInfo | null; }
+// A holder's OWN Notesheet for this file — distinct from `Notesheet` above
+// (the creator's single, shared document). This is the ONE user-facing note
+// editor for the current holder; RouteEntry.remarks is an internal/audit
+// field, never a second editor. One row per (file, user); writable only
+// while that user is current_holder_id, permanently read-only afterward but
+// still visible here as their historical contribution.
+interface HolderNotesheet { id: string; file_id: string; user_id: string; content: string; created_at: string; updated_at: string; user_info?: PersonInfo | null; }
 interface DropItem { id: string; name: string; label?: string; is_active?: boolean; }
 interface DeptItem { id: string; name: string; }
 
@@ -67,12 +74,15 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
   const role = useActiveRole();
   const qc = useQueryClient();
   const [activeTab, setActiveTab] = useState<"notesheet" | "track" | "sign">("notesheet");
-  // First-forward (Draft -> Active): confirmation-only, no recipient/notesheet re-entry.
-  // Subsequent forwards: inline recipient + notesheet-entry panel (no modal).
+  // First-forward (Draft -> Active): confirmation-only, no recipient re-entry.
+  // Subsequent forwards: inline recipient + attachments panel (no modal).
+  // There is deliberately no separate remarks/notesheet text field here — the
+  // current holder's Notesheet (My Notesheet, HolderNote-backed) IS their
+  // remark; see handleSubmitAction below for how it's carried into the
+  // RouteEntry created on Forward.
   const [toUserId, setToUserId] = useState("");
-  const [remarks, setRemarks] = useState("");
   const forwardAttachments = useAttachmentQueue();
-  // True while forwardAttachments.uploadAll() is in flight — same manual
+  // True while saveForwardAttachments() is in flight — same manual
   // loading flag New File creation doesn't need (its upload only ever
   // happens once, at final submit) but this panel's Upload button does,
   // since it can be clicked repeatedly as more files are queued.
@@ -86,6 +96,19 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
   const [draftPriority, setDraftPriority] = useState("");
   const [draftRecipientId, setDraftRecipientId] = useState("");
   const [draftNotesheet, setDraftNotesheet] = useState("");
+  // Snapshot of the Edit Draft fields as they were when editing began —
+  // dirty state compares live values against this, never a hardcoded true.
+  const [draftBaseline, setDraftBaseline] = useState<{
+    subject: string; departmentId: string; category: string; priority: string; recipientId: string; notesheet: string;
+  } | null>(null);
+  // The current holder's OWN Notesheet (HolderNote.content) — server-
+  // persisted, independent of the creator's Notesheet.content and of
+  // RouteEntry.remarks (an internal/audit field only — never a second
+  // user-facing editor; see handleSubmitAction for how this content is
+  // carried into it on Forward). Baseline = last value returned/saved by
+  // the backend; typing changes myNoteContent only, so dirty = content !== baseline.
+  const [myNoteContent, setMyNoteContent] = useState("");
+  const [myNoteBaseline, setMyNoteBaseline] = useState("");
   // Ticks every 30s so edit/delete windows expire live without a manual refresh.
   const [, setTick] = useState(0);
   useEffect(() => {
@@ -112,9 +135,26 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
     refetchOnWindowFocus: true,
   });
 
-  const { data: forwardingRemarks = [] } = useQuery<ForwardingRemark[]>({
-    queryKey: ["file-remarks", fileId],
-    queryFn: async () => (await api.get(`/docket/remarks/${fileId}`)).data,
+  // Every holder's OWN Notesheet for this file, oldest first — the correct,
+  // HolderNote-backed replacement for what used to be shown here as
+  // RouteEntry.remarks under a "Notesheet" label. Visible to anyone who can
+  // open the file at all (same access boundary the file query itself uses).
+  const { data: holderNotesheets = [] } = useQuery<HolderNotesheet[]>({
+    queryKey: ["holder-notesheets", fileId],
+    queryFn: async () => (await api.get(`/efms/files/${fileId}/holder-notesheets`)).data,
+    enabled: !!file,
+  });
+
+  // The AUTHENTICATED user's own HolderNote — only ever fetched while they
+  // are the file's current holder on an Active file (canEditHolderNotesheet,
+  // derived below from the same file/user data). `null` means they haven't
+  // saved one yet; the editor starts empty in that case, never pre-filled
+  // from the creator's Notesheet or anyone else's HolderNote.
+  const canEditHolderNotesheet = !!file && file.current_holder_id === user?.id && file.status === "active";
+  const { data: myHolderNote, isSuccess: myHolderNoteLoaded } = useQuery<HolderNotesheet | null>({
+    queryKey: ["holder-notesheet", fileId, user?.id],
+    queryFn: async () => (await api.get(`/efms/files/${fileId}/holder-notesheet`)).data,
+    enabled: canEditHolderNotesheet,
   });
 
   const { data: trackEntries = [] } = useQuery<TrackEntry[]>({
@@ -170,9 +210,11 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
   // recipient selection normally lives) disappears. Routing must still work,
   // so a recipient-only picker takes over here — pre-filled with the existing
   // recipient if any, changeable, with no document/notesheet editing exposed.
-  // This is deliberately NOT the same "Forward This File" panel used below for
-  // subsequent forwards: that panel also exposes a remarks/notesheet editor,
-  // which would violate "document editing must remain locked."
+  // This is deliberately NOT the same "Forward This File" panel used below
+  // for subsequent forwards: My Notesheet only ever appears for an Active
+  // file (canEditHolderNotesheet), never during Draft, so no document
+  // editing is exposed here regardless — this comment documents why the two
+  // panels are kept structurally separate rather than merged.
   const needsRecipientPicker = isHolder && isDraft && draftEditExpired;
   // Subsequent forwards only (never for a still-draft file) — recipient +
   // notesheet-entry + attachments, unrelated to the draft-edit window.
@@ -199,8 +241,7 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
 
   async function afterForwardSuccess() {
     showSuccess("File forwarded.");
-    setRemarks(""); setToUserId("");
-    if (forwardDraftKey) localStorage.removeItem(forwardDraftKey);
+    setToUserId("");
     qc.invalidateQueries({ queryKey: ["efms-file", fileId] });
     qc.invalidateQueries({ queryKey: ["efms-files"] });
     qc.invalidateQueries({ queryKey: ["efms-files-outbox"] });
@@ -229,12 +270,14 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
     }
   }
 
-  // Subsequent forwards: recipient + notesheet entry chosen inline in the
-  // panel. Attachments are no longer submitted here — the Forward panel's own
-  // "Upload N files" button (forwardAttachments.uploadAll, below) already
-  // persisted them, with whatever filename/tag the user chose, before this runs.
-  // Confirmed via the shared confirmAction() (lib/alert.ts) before the API
-  // call actually runs — same pattern as every other forward/delete action.
+  // Subsequent forwards: recipient chosen inline in the panel; the current
+  // holder's own Notesheet (My Notesheet) IS their remark for this forward —
+  // there is no separate remarks field to fill in. Attachments are no longer
+  // submitted here — the Forward panel's own "Upload N files" button
+  // (saveForwardAttachments, below) already persisted them, with whatever
+  // filename/tag the user chose, before this runs. Confirmed via the shared
+  // confirmAction() (lib/alert.ts) before the API call actually runs — same
+  // pattern as every other forward/delete action.
   async function handleSubmitAction() {
     if (!toUserId) { toast.warning("Please select a person to forward to."); return; }
     const selected = users.find((u) => u.id === toUserId);
@@ -244,8 +287,19 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
       confirmText: "Forward",
     });
     if (!confirmed) return;
+    // The Notesheet must never be silently lost on Forward: if it's dirty,
+    // save it first (the PATCH also becomes this holder's permanent
+    // historical record) and only proceed if that save actually succeeds.
+    // If it's already clean, use the last-saved content directly — no
+    // redundant save call.
+    let noteContent = myNoteBaseline;
+    if (myNoteDirty) {
+      const saved = await saveMyNotesheet();
+      if (saved === null) return; // save failed — stay on the page, error already shown, still dirty
+      noteContent = saved;
+    }
     try {
-      await submitAction.mutateAsync({ action: actionType, remarks, to_user_id: toUserId || null });
+      await submitAction.mutateAsync({ action: actionType, remarks: noteContent, to_user_id: toUserId || null });
       await afterForwardSuccess();
     } catch (err) {
       const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
@@ -260,6 +314,15 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
   });
   const updateNotesheetMutation = useMutation({
     mutationFn: (content: string) => api.patch(`/efms/files/${fileId}/notesheet`, { content }),
+  });
+
+  // The current holder's own Notesheet — a dedicated (file, user) row, never
+  // the shared Notesheet.content above. Backend enforces current_holder_id
+  // == caller on every write, so this rejects on its own the moment the
+  // file is forwarded away from them — no client-side check is load-bearing.
+  const saveHolderNotesheetMutation = useMutation({
+    mutationFn: (content: string) =>
+      api.patch<HolderNotesheet>(`/efms/files/${fileId}/holder-notesheet`, { content }),
   });
 
   // Permanent whole-file delete — reuses DELETE /efms/files/{id}. Backend is
@@ -327,7 +390,11 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
     }
   }
 
-  async function handleSaveDraft() {
+  // Returns whether the save fully succeeded — callers (the plain Save
+  // button, and the unsaved-changes guard) must never treat a partial
+  // failure (metadata saved but notesheet failed) as success or navigate/
+  // close on it.
+  async function handleSaveDraft(): Promise<boolean> {
     try {
       await updateFileMutation.mutateAsync({
         subject: draftSubject,
@@ -340,21 +407,108 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
       showSuccess("Draft updated.");
       setEditingDraft(false);
       qc.invalidateQueries({ queryKey: ["efms-file", fileId] });
+      return true;
     } catch (err) {
       const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
       toast.error(msg ?? "Could not save draft changes.");
+      return false;
     }
   }
 
   function openEditDraft() {
     if (!file) return;
-    setDraftSubject(file.subject);
-    setDraftDepartmentId(file.department_id ?? "");
-    setDraftCategory(file.category);
-    setDraftPriority(file.priority);
-    setDraftRecipientId(file.recipient_id ?? "");
-    setDraftNotesheet(file.notesheet?.content ?? "");
+    const baseline = {
+      subject: file.subject,
+      departmentId: file.department_id ?? "",
+      category: file.category,
+      priority: file.priority,
+      recipientId: file.recipient_id ?? "",
+      notesheet: file.notesheet?.content ?? "",
+    };
+    setDraftSubject(baseline.subject);
+    setDraftDepartmentId(baseline.departmentId);
+    setDraftCategory(baseline.category);
+    setDraftPriority(baseline.priority);
+    setDraftRecipientId(baseline.recipientId);
+    setDraftNotesheet(baseline.notesheet);
+    setDraftBaseline(baseline);
     setEditingDraft(true);
+  }
+
+  // Discard = restore to the last-persisted version captured in
+  // draftBaseline, never send the unsaved notesheet changes, and close the
+  // panel — distinct from Cancel, which leaves the panel open with changes
+  // intact (handled by the guard dialog itself, not this function).
+  function discardEditDraft() {
+    if (draftBaseline) {
+      setDraftSubject(draftBaseline.subject);
+      setDraftDepartmentId(draftBaseline.departmentId);
+      setDraftCategory(draftBaseline.category);
+      setDraftPriority(draftBaseline.priority);
+      setDraftRecipientId(draftBaseline.recipientId);
+      setDraftNotesheet(draftBaseline.notesheet);
+    }
+    setEditingDraft(false);
+  }
+
+  // Explicit "Save Changes" for the current holder's OWN Notesheet — the
+  // real, server-persisted persistence boundary this feature needed, and
+  // the ONLY user-facing note editor on this page. PATCHes HolderNote only:
+  // never forwards, never creates a RouteEntry, never touches
+  // current_holder_id/status, never touches the creator's Notesheet.content
+  // or any other holder's HolderNote. Returns the saved content on success
+  // (so handleSubmitAction can carry the authoritative just-saved value into
+  // the Forward call without relying on a stale state closure) or null on
+  // failure, so callers never treat a failure as success.
+  async function saveMyNotesheet(): Promise<string | null> {
+    try {
+      const res = await saveHolderNotesheetMutation.mutateAsync(myNoteContent);
+      setMyNoteBaseline(res.data.content);
+      showSuccess("Changes saved.");
+      qc.invalidateQueries({ queryKey: ["holder-notesheets", fileId] });
+      return res.data.content;
+    } catch (err) {
+      const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      toast.error(msg ?? "Could not save your Notesheet.");
+      return null;
+    }
+  }
+
+  // Discard = restore both React state and the visible editor to the last
+  // value the BACKEND returned — never localStorage, never another user's
+  // content. myNoteEditor's `content` option is a stable constant (bound to
+  // myNoteBaseline, which only changes on load/save, not on every
+  // keystroke), so the visible document only changes via an explicit commands.setContent()
+  // call; this is that call for the Leave path.
+  function discardMyNotesheet() {
+    myNoteEditor?.commands.setContent(myNoteBaseline);
+    setMyNoteContent(myNoteBaseline);
+  }
+
+  // Unsaved locally-queued forward attachments only — already-uploaded ones
+  // are not "unsaved" (the existing explicit Upload action already
+  // persisted them). Deliberately excludes `remarks`/forwarding text: saving
+  // changes here must never itself create a RouteEntry (that stays a
+  // separate, explicit Forward action) per the product rule that "Save
+  // Changes" must never imply "Forward the file."
+  async function saveForwardAttachments(): Promise<boolean> {
+    if (forwardAttachments.hasInvalidCustomTags()) {
+      toast.error("Please enter a valid custom tag for every attachment marked \"Other\".");
+      return false;
+    }
+    const total = forwardAttachments.items.length;
+    const { succeeded, failed } = await forwardAttachments.uploadAllReporting(fileId);
+    if (succeeded > 0) qc.invalidateQueries({ queryKey: ["efms-file", fileId] });
+    if (failed.length > 0) {
+      toast.error(`${failed.length} of ${total} attachment${total > 1 ? "s" : ""} failed to upload: ${failed.map((f) => f.name).join(", ")}. They remain queued — try again.`);
+      return false;
+    }
+    toast.success(`${succeeded} file${succeeded > 1 ? "s" : ""} uploaded.`);
+    return true;
+  }
+
+  function discardForwardAttachments() {
+    forwardAttachments.clear();
   }
 
   // Attachment deletion — reuses the existing DELETE endpoint; the backend
@@ -381,6 +535,28 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editingDraft]);
 
+  // `content` is bound to myNoteBaseline (changes only on load/save), NEVER
+  // to myNoteContent (which changes on every keystroke) — that reactive
+  // two-way binding is exactly what broke dirty tracking in an earlier
+  // iteration of this feature: Tiptap v3's useEditor re-diffs `content`
+  // against its stored options on every render, so a value that changes on
+  // every keystroke churns in lockstep with typing instead of letting
+  // onChange propagate cleanly. The imperative commands.setContent() below
+  // is the only thing that ever pushes content into the editor after
+  // creation — once when the backend GET resolves, and once on Discard.
+  const myNoteEditor = useRichTextEditor({ content: myNoteBaseline, onChange: setMyNoteContent, editable: true });
+  useEffect(() => {
+    if (!myHolderNoteLoaded || !myNoteEditor) return;
+    const content = myHolderNote?.content ?? "";
+    setMyNoteContent(content);
+    setMyNoteBaseline(content);
+    if (myNoteEditor.getHTML() !== content) {
+      myNoteEditor.commands.setContent(content);
+    }
+    // Only re-sync when a fresh GET resolves — not on every keystroke.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [myHolderNoteLoaded, myHolderNote]);
+
   // Pre-fill the recipient-only picker (needsRecipientPicker) with whatever
   // recipient is already on the draft, if any — the user can still change it.
   useEffect(() => {
@@ -405,42 +581,52 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
     }
   }, [users, loadingUsers, toUserId]);
 
-  // Forward panel's notesheet entry — same shared editor as Initial Notesheet
-  // and Edit Draft, just a second independent instance (its own empty
-  // starting content, cleared after each successful forward).
-  const forwardEditor = useRichTextEditor({ content: "", onChange: setRemarks, editable: true });
-
-  // In-progress forward notesheet entry survives closing the page before
-  // actually forwarding — same localStorage autosave pattern already used
-  // by New File creation (DRAFT_KEY), just scoped per file + holder instead
-  // of a single global key. Attachments don't need this: they now upload
-  // immediately (see the Forward panel's file input) instead of being queued
-  // client-side, so they're already persisted server-side as soon as chosen.
-  const forwardDraftKey = user?.id ? `efms-forward-draft-${fileId}-${user.id}` : null;
-
-  useEffect(() => {
-    if (!canForwardAfter || !forwardDraftKey || !forwardEditor) return;
-    const saved = localStorage.getItem(forwardDraftKey);
-    if (!saved) return;
-    try {
-      const { content } = JSON.parse(saved);
-      if (content) { forwardEditor.commands.setContent(content); setRemarks(content); }
-    } catch { /* ignore */ }
-    // Restore once, when the forward panel first becomes available for this file.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [canForwardAfter, forwardDraftKey]);
-
-  useEffect(() => {
-    if (!canForwardAfter || !forwardDraftKey) return;
-    const id = setInterval(() => {
-      localStorage.setItem(forwardDraftKey, JSON.stringify({ content: remarks }));
-    }, 30_000);
-    return () => clearInterval(id);
-  }, [canForwardAfter, forwardDraftKey, remarks]);
-
   useEffect(() => {
     if (file?.attachments.length && !selectedPdf) setSelectedPdf(file.attachments[0]);
   }, [file]);
+
+  // Real, actual-change-based dirty tracking for every independently-dirty
+  // part of this page — never a hardcoded true. Edit Draft (creator, draft
+  // file) and the current holder's own Notesheet (active file) are mutually
+  // exclusive by file status, but the holder's Notesheet and queued Forward
+  // attachments can both be dirty at once for the same active file, so both
+  // are combined into one guard registration rather than two separate ones
+  // (the store only ever holds a single active registration). The Initial
+  // Notesheet and every other holder's Notesheet/history are never part of
+  // this — they're immutable and read-only, with no editable state to track.
+  const editDraftDirty = editingDraft && !!draftBaseline && (
+    draftSubject !== draftBaseline.subject ||
+    draftDepartmentId !== draftBaseline.departmentId ||
+    draftCategory !== draftBaseline.category ||
+    draftPriority !== draftBaseline.priority ||
+    draftRecipientId !== draftBaseline.recipientId ||
+    draftNotesheet !== draftBaseline.notesheet
+  );
+  const myNoteDirty = canEditHolderNotesheet && myNoteContent !== myNoteBaseline;
+  // Already-uploaded attachments are never "unsaved" — only locally-queued,
+  // not-yet-uploaded ones count, matching the existing immediate-upload
+  // architecture (nothing here silently changes when attachments persist).
+  const forwardAttachmentsDirty = canForwardAfter && forwardAttachments.items.length > 0;
+  const pageIsDirty = editDraftDirty || myNoteDirty || forwardAttachmentsDirty;
+
+  // The navigation guard's ONLY job is "if dirty, ask Leave/Stay" — it never
+  // saves. Persisting each part only ever happens via that part's own
+  // explicit "Save Changes" button (handleSaveDraft / saveMyNotesheet) or
+  // the Forward panel's existing explicit "Upload N files" button
+  // (saveForwardAttachments below remains available for that button, not for
+  // the guard). Leave discards whichever local unsaved parts are dirty —
+  // never touches already-persisted backend data, the creator's Notesheet,
+  // or any other holder's HolderNote/history.
+  function handleGuardDiscard() {
+    if (editDraftDirty) discardEditDraft();
+    if (myNoteDirty) discardMyNotesheet();
+    if (forwardAttachmentsDirty) discardForwardAttachments();
+  }
+
+  const { guardNavigation } = useUnsavedChangesGuard({
+    isDirty: pageIsDirty,
+    onDiscard: handleGuardDiscard,
+  });
 
   if (isLoading) return <div className="flex items-center justify-center py-24 gap-3 text-gray-400"><Loader2 size={24} className="animate-spin" /> Loading file…</div>;
   if (isError || !file) return (
@@ -459,7 +645,7 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
       {/* Left panel: PDF attachments */}
       <div className="w-72 shrink-0 bg-white border-r border-gray-200 flex flex-col">
         <div className="px-4 py-4 border-b border-gray-200">
-          <button onClick={() => router.back()} className="flex items-center gap-1 text-sm text-[#0D6E6E] hover:underline mb-3">
+          <button onClick={() => guardNavigation(() => router.back())} className="flex items-center gap-1 text-sm text-[#0D6E6E] hover:underline mb-3">
             <ChevronLeft size={14} /> Back
           </button>
           <div className="flex items-center justify-between gap-2">
@@ -703,6 +889,12 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                 <div className="bg-white rounded-2xl border border-gray-200 shadow-sm">
                   <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
                     <h2 className="text-lg font-bold text-gray-800">Initial Notesheet</h2>
+                    {/* Immutable once created — the creator's initial notesheet
+                        is permanent record, never editable by whoever
+                        currently holds the file. The current holder's own
+                        contribution has its own dedicated, editable "My
+                        Notesheet" card further down this column (HolderNote-
+                        backed) — never a PATCH to this one. */}
                     <span className="text-sm text-gray-400 flex items-center gap-1"><Lock size={13} /> Read-only</span>
                   </div>
                   {/* Creator/first-recipient context, same PersonBadge + layout
@@ -742,77 +934,106 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                   )}
                 </div>
 
-                {/* Notesheet History — one entry per completed forward (RouteEntry.remarks),
-                    same data GET /docket/remarks/{fileId} already returns; only completed
-                    forwards ever produce a RouteEntry, so the current user's in-progress
-                    entry never appears here until they actually forward. */}
+                {/* Notesheet History — each PAST holder's OWN Notesheet
+                    (HolderNote.content), oldest first. Deliberately backed
+                    by GET /{fileId}/holder-notesheets, NOT RouteEntry.remarks
+                    — this is the actual Notesheet content each holder wrote,
+                    not their one-shot forwarding note. The viewer's own
+                    still-editable row (if any) is shown separately in "My
+                    Notesheet" below, not duplicated here. Every row here is
+                    permanently read-only: no write path on this page ever
+                    targets another user's HolderNote. */}
                 <div className="bg-white rounded-2xl border border-gray-200 shadow-sm">
-                  <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
-                    <div>
-                      <h2 className="text-lg font-bold text-gray-800">Notesheet History</h2>
-                      <p className="text-sm text-gray-500 mt-0.5">Every notesheet entry recorded as the file moved, oldest first</p>
-                    </div>
-                    {forwardingRemarks.filter((r) => r.remark).length > 0 && (
-                      <span className="text-xs font-semibold bg-gray-100 text-gray-600 px-2.5 py-1 rounded-full">
-                        {forwardingRemarks.filter((r) => r.remark).length} entr{forwardingRemarks.filter((r) => r.remark).length === 1 ? "y" : "ies"}
-                      </span>
-                    )}
-                  </div>
-                  {forwardingRemarks.filter((r) => r.remark).length === 0 ? (
-                    <div className="px-6 py-10 text-center text-gray-400">
-                      <p className="text-base">No notesheet entries recorded yet.</p>
-                    </div>
-                  ) : (
-                    <div className="px-6 py-5">
-                      {forwardingRemarks.filter((r) => r.remark).map((r, idx, arr) => (
-                        <div key={r.id} className="flex items-start gap-4">
-                          {/* Numbered marker + connecting line — same timeline
-                              language as the Track Status tab's icon + line. */}
-                          <div className="flex flex-col items-center">
-                            <div className="w-9 h-9 rounded-full flex items-center justify-center shrink-0 border-2 bg-[#0D6E6E] border-[#0D6E6E]">
-                              <span className="text-xs font-bold text-white">{arr.length - idx}</span>
-                            </div>
-                            {idx < arr.length - 1 && <div className="w-0.5 flex-1 min-h-[24px] mt-1 bg-gray-200" />}
+                  {(() => {
+                    const historyNotes = holderNotesheets.filter((n) => !(canEditHolderNotesheet && n.user_id === user?.id));
+                    return (
+                      <>
+                        <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
+                          <div>
+                            <h2 className="text-lg font-bold text-gray-800">Notesheet History</h2>
+                            <p className="text-sm text-gray-500 mt-0.5">Each holder's own Notesheet, oldest first — read-only</p>
                           </div>
-                          <div className="flex-1 min-w-0 pb-6">
-                            <div className="flex items-center justify-end mb-2">
-                              <span className="flex items-center gap-1.5 text-xs font-medium text-gray-500">
-                                <Clock size={12} className="text-gray-400" />{formatDate(r.created_at, "datetime")}
-                              </span>
-                            </div>
-                            {/* Sender -> Forwarded To -> Recipient, one horizontal row */}
-                            <div className="flex items-center gap-3 mb-3">
-                              <div className="flex-1 min-w-0">
-                                <PersonBadge person={r.user_info} fallback="Unknown" compact />
-                                {r.user_id === user?.id && (
-                                  <p className="text-xs text-[#0D6E6E] font-medium leading-tight">You</p>
-                                )}
-                              </div>
-                              {r.to_user_info && (
-                                <>
-                                  <div className="flex flex-col items-center gap-0.5 shrink-0 text-gray-300">
-                                    <ArrowRight size={13} />
-                                    <span className="text-[10px] font-bold text-gray-400 tracking-wide whitespace-nowrap">FORWARDED TO</span>
-                                    <ArrowRight size={13} />
-                                  </div>
-                                  <div className="flex-1 min-w-0 text-right">
-                                    <PersonBadge person={r.to_user_info} compact />
-                                  </div>
-                                </>
-                              )}
-                            </div>
-                            {/* Notesheet content — same prose rendering as the Initial Notesheet card */}
-                            <div>
-                              <p className="text-xs font-semibold text-gray-400 uppercase mb-1">Notesheet</p>
-                              <div className={cn("bg-gray-50 border border-gray-200 rounded-xl px-4 py-3", NOTESHEET_PROSE_CLASS)}
-                                dangerouslySetInnerHTML={{ __html: toSafeNotesheetHtml(r.remark) }} />
-                            </div>
-                          </div>
+                          {historyNotes.length > 0 && (
+                            <span className="text-xs font-semibold bg-gray-100 text-gray-600 px-2.5 py-1 rounded-full">
+                              {historyNotes.length} entr{historyNotes.length === 1 ? "y" : "ies"}
+                            </span>
+                          )}
                         </div>
-                      ))}
-                    </div>
-                  )}
+                        {historyNotes.length === 0 ? (
+                          <div className="px-6 py-10 text-center text-gray-400">
+                            <p className="text-base">No previous holder Notesheets recorded yet.</p>
+                          </div>
+                        ) : (
+                          <div className="px-6 py-5">
+                            {historyNotes.map((n, idx, arr) => (
+                              <div key={n.id} className="flex items-start gap-4">
+                                {/* Numbered marker + connecting line — same timeline
+                                    language as the Track Status tab's icon + line. */}
+                                <div className="flex flex-col items-center">
+                                  <div className="w-9 h-9 rounded-full flex items-center justify-center shrink-0 border-2 bg-[#0D6E6E] border-[#0D6E6E]">
+                                    <span className="text-xs font-bold text-white">{idx + 1}</span>
+                                  </div>
+                                  {idx < arr.length - 1 && <div className="w-0.5 flex-1 min-h-[24px] mt-1 bg-gray-200" />}
+                                </div>
+                                <div className="flex-1 min-w-0 pb-6">
+                                  <div className="flex items-center justify-between mb-2">
+                                    <div className="flex items-center gap-1.5">
+                                      <PersonBadge person={n.user_info} fallback="Unknown" compact />
+                                      {n.user_id === user?.id && (
+                                        <span className="text-xs text-[#0D6E6E] font-medium">(You)</span>
+                                      )}
+                                    </div>
+                                    <span className="flex items-center gap-1.5 text-xs font-medium text-gray-500">
+                                      <Clock size={12} className="text-gray-400" />{formatDate(n.updated_at, "datetime")}
+                                    </span>
+                                  </div>
+                                  {/* Notesheet content — same prose rendering as the Initial Notesheet card */}
+                                  <div className={cn("bg-gray-50 border border-gray-200 rounded-xl px-4 py-3", NOTESHEET_PROSE_CLASS)}
+                                    dangerouslySetInnerHTML={{ __html: toSafeNotesheetHtml(n.content) }} />
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </>
+                    );
+                  })()}
                 </div>
+
+                {/* My Notesheet — the current holder's OWN, server-persisted
+                    Notesheet (HolderNote), only ever shown/editable while
+                    they are the file's current holder on an Active file.
+                    Never the creator's shared Notesheet.content, never any
+                    other holder's HolderNote. This is the ONLY user-facing
+                    note editor on this page — there is no separate
+                    "Forwarding Remarks" field. RouteEntry.remarks remains an
+                    internal/audit field on Forward, populated automatically
+                    from this content (see handleSubmitAction) rather than
+                    asked for separately. Saving here never forwards the file. */}
+                {canEditHolderNotesheet && (
+                  <div className="bg-white rounded-2xl border border-gray-200 shadow-sm">
+                    <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+                      <div>
+                        <h2 className="text-lg font-bold text-gray-800">My Notesheet</h2>
+                        <p className="text-sm text-gray-500 mt-0.5">Your own Notesheet while you hold this file.</p>
+                      </div>
+                      <span className="flex items-center gap-1.5 text-sm text-[#0D6E6E] font-semibold"><Pencil size={13} /> Editable</span>
+                    </div>
+                    <div className="px-6 py-5 space-y-3">
+                      <div className="border border-gray-200 rounded-xl overflow-hidden">
+                        <RichTextToolbar editor={myNoteEditor} />
+                        <EditorContent editor={myNoteEditor} className="min-h-[200px] text-sm" />
+                      </div>
+                      <div className="flex justify-end">
+                        <button type="button" onClick={saveMyNotesheet} disabled={saveHolderNotesheetMutation.isPending || !myNoteDirty}
+                          className="flex items-center gap-1.5 px-4 py-2.5 text-sm font-bold rounded-xl bg-[#0D6E6E] text-white hover:bg-[#178F8F] disabled:opacity-50 disabled:cursor-not-allowed">
+                          {saveHolderNotesheetMutation.isPending ? <Loader2 size={15} className="animate-spin" /> : <Save size={15} />}
+                          {saveHolderNotesheetMutation.isPending ? "Saving…" : "Save Changes"}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
 
               {/* RIGHT: Edit Draft (creator, within window) / recipient-only picker
@@ -882,12 +1103,12 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                       </div>
                     </div>
                     <div className="flex gap-2 pt-1">
-                      <button onClick={() => setEditingDraft(false)}
+                      <button onClick={() => guardNavigation(() => setEditingDraft(false))}
                         className="flex-1 py-2.5 text-sm border border-gray-200 rounded-xl hover:bg-gray-50 font-medium">Cancel</button>
-                      <button onClick={handleSaveDraft} disabled={updateFileMutation.isPending || updateNotesheetMutation.isPending}
+                      <button onClick={handleSaveDraft} disabled={updateFileMutation.isPending || updateNotesheetMutation.isPending || !editDraftDirty}
                         className="flex-1 py-2.5 text-sm rounded-xl font-bold flex items-center justify-center gap-2 bg-[#0D6E6E] text-white hover:bg-[#178F8F] disabled:opacity-50">
                         {(updateFileMutation.isPending || updateNotesheetMutation.isPending) ? <Loader2 size={15} className="animate-spin" /> : <Save size={15} />}
-                        Save
+                        {(updateFileMutation.isPending || updateNotesheetMutation.isPending) ? "Saving…" : "Save Changes"}
                       </button>
                     </div>
                   </div>
@@ -973,13 +1194,12 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                         />
                       )}
                     </div>
-                    <div>
-                      <label className="block text-sm font-semibold text-gray-700 mb-1.5">Notesheet</label>
-                      <div className="border border-gray-200 rounded-xl overflow-hidden">
-                        <RichTextToolbar editor={forwardEditor} />
-                        <EditorContent editor={forwardEditor} className="min-h-[160px] text-sm" />
-                      </div>
-                    </div>
+                    {/* No separate remarks/notesheet text field here on
+                        purpose — the current holder's own Notesheet ("My
+                        Notesheet" card, left column) IS their remark for
+                        this forward. handleSubmitAction saves it first (if
+                        dirty) and carries that exact content into the
+                        RouteEntry created by Forward below. */}
                     <div>
                       <label className="block text-sm font-semibold text-gray-700 mb-1.5">Attachments</label>
                       <label className="flex items-center gap-2 cursor-pointer w-full border-2 border-dashed border-gray-200 hover:border-[#0D6E6E] rounded-xl px-3 py-2.5 text-sm text-gray-500 hover:text-[#0D6E6E] transition-colors">
@@ -1027,17 +1247,9 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                             </div>
                           ))}
                           <button type="button" disabled={uploadingQueue} onClick={async () => {
-                            if (forwardAttachments.hasInvalidCustomTags()) {
-                              toast.error("Please enter a valid custom tag for every attachment marked \"Other\".");
-                              return;
-                            }
                             setUploadingQueue(true);
-                            const count = forwardAttachments.items.length;
                             try {
-                              await forwardAttachments.uploadAll(fileId);
-                              forwardAttachments.clear();
-                              toast.success(`${count} file${count > 1 ? "s" : ""} uploaded.`);
-                              qc.invalidateQueries({ queryKey: ["efms-file", fileId] });
+                              await saveForwardAttachments();
                             } finally {
                               setUploadingQueue(false);
                             }
@@ -1053,10 +1265,10 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                           second, parallel one here. */}
                       <p className="text-xs text-gray-400 mt-1.5">Uploaded files appear in Attached Files on the left.</p>
                     </div>
-                    <button onClick={handleSubmitAction} disabled={submitAction.isPending}
+                    <button onClick={handleSubmitAction} disabled={submitAction.isPending || saveHolderNotesheetMutation.isPending}
                       className="w-full py-2.5 text-sm rounded-xl font-bold flex items-center justify-center gap-2 bg-[#0D6E6E] text-white hover:bg-[#178F8F] disabled:opacity-50">
-                      {submitAction.isPending ? <Loader2 size={15} className="animate-spin" /> : <ArrowRight size={15} />}
-                      Forward
+                      {(submitAction.isPending || saveHolderNotesheetMutation.isPending) ? <Loader2 size={15} className="animate-spin" /> : <ArrowRight size={15} />}
+                      {saveHolderNotesheetMutation.isPending ? "Saving Notesheet…" : "Forward"}
                     </button>
                   </div>
                 ) : null}

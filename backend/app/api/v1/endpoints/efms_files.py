@@ -38,7 +38,7 @@ from app.db.base import get_db
 from app.core.dependencies import get_current_verified_user, require_roles
 from app.models.user import User, SystemRole
 from app.models.efms import (
-    EfmsFile, Notesheet, NotesheetVersion,
+    EfmsFile, Notesheet, NotesheetVersion, HolderNote,
     RouteEntry, FileAttachment, DispatchRecord,
     FileStatus, RouteAction, DispatchMode, FilePriority,
 )
@@ -48,6 +48,7 @@ from app.schemas.efms import (
     NotesheetSave, RouteAction_ as RouteActionIn,
     DispatchCreate, DispatchOut,
     SignInitiate, SignVerify, SignatureOut,
+    HolderNotesheetOut, HolderNotesheetUpdate,
 )
 from app.utils.otp import create_otp, verify_otp, send_email as _send_otp_email
 from app.utils.person_info import PersonInfo, person_info_map
@@ -664,10 +665,24 @@ async def save_notesheet(
     f = await _load_file(file_id, db)
     if f.notesheet and f.notesheet.is_locked:
         raise HTTPException(status_code=400, detail="Notesheet is locked and cannot be edited.")
+    # Notesheet.content is immutable once the file leaves Draft — a previous
+    # revision briefly let the current holder of an Active file PATCH it too,
+    # but that violated the business rule that the creator's initial
+    # notesheet and every saved version are permanent record. Editing is
+    # restricted to the file's own creator, only while it's still a Draft.
+    # The current holder's own contribution lives in HolderNote (see
+    # GET/PATCH /{file_id}/holder-notesheet below) — a separate, per-user
+    # row, never a PATCH that overwrites this shared one.
     if f.status == FileStatus.draft:
+        # Same ownership rule as update_file's metadata edit — the creator,
+        # not merely the current holder (which is the same person for an
+        # untouched Draft, but this must not be mistaken for holder-based
+        # authorization).
+        if f.created_by != user.id and user.active_role not in _ADMIN_ROLES:
+            raise HTTPException(status_code=403, detail="Only the file creator can edit this notesheet.")
         if _draft_edit_expired(f):
             raise HTTPException(status_code=400, detail="Draft editing window (30 minutes) has expired.")
-    elif f.status != FileStatus.active:
+    else:
         raise HTTPException(status_code=400, detail="Notesheet cannot be edited at this file stage.")
     if not f.notesheet:
         ns = Notesheet(file_id=file_id, content=body.content, last_saved_by=user.id)
@@ -686,6 +701,103 @@ async def save_notesheet(
         f.notesheet.last_saved_by = user.id
     await db.commit()
     return _visible_file(await _load_file(file_id, db), user)
+
+
+# ── Holder Notes (per-user Notesheet) ──────────────────────────────────────────
+# Distinct from Notesheet above (the creator's single, shared, immutable-once-
+# non-draft document) and from RouteEntry.remarks (a per-forward routing
+# annotation). Every user who has ever held the file gets at most one
+# HolderNote row per file, enforced by the (file_id, user_id) unique
+# constraint. It is writable only while that user is the file's current
+# holder; once forwarded away, the row is frozen (no write path ever matches
+# them again) but stays visible as their historical contribution.
+
+@router.get("/{file_id}/holder-notesheet", response_model=Optional[HolderNotesheetOut])
+async def get_my_holder_notesheet(
+    file_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_verified_user),
+):
+    """The AUTHENTICATED caller's own HolderNote for this file — never
+    another user's. `user_id` is always derived from the auth token, never
+    accepted as a parameter, so there is no way to request someone else's
+    row through this endpoint. Returns null if the caller has never saved
+    one yet (the frontend starts with empty content in that case — no row is
+    created until the first Save Changes)."""
+    f = await _load_file(file_id, db)
+    await _assert_full_file_access(f, user, db)
+    result = await db.execute(
+        select(HolderNote).where(HolderNote.file_id == file_id, HolderNote.user_id == user.id)
+    )
+    note = result.scalar_one_or_none()
+    if not note:
+        return None
+    people = await person_info_map({note.user_id}, db)
+    note.user_info = people.get(note.user_id)  # type: ignore[attr-defined]
+    return note
+
+
+@router.get("/{file_id}/holder-notesheets", response_model=list[HolderNotesheetOut])
+async def list_holder_notesheets(
+    file_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_verified_user),
+):
+    """Every holder's Notesheet for this file, oldest first — read-only
+    history for the UI (alongside the creator's Notesheet above and the
+    Track Status routing trail). Same access boundary as opening the file at
+    all: whoever can view the file (current holder, admin, or a department
+    member viewing a released file) sees every past and current holder's
+    contribution; nothing here is ever editable through this endpoint."""
+    f = await _load_file(file_id, db)
+    await _assert_full_file_access(f, user, db)
+    result = await db.execute(
+        select(HolderNote).where(HolderNote.file_id == file_id).order_by(HolderNote.created_at)
+    )
+    notes = result.scalars().all()
+    if not notes:
+        return []
+    people = await person_info_map({n.user_id for n in notes}, db)
+    for n in notes:
+        n.user_info = people.get(n.user_id)  # type: ignore[attr-defined]
+    return notes
+
+
+@router.patch("/{file_id}/holder-notesheet", response_model=HolderNotesheetOut)
+async def save_my_holder_notesheet(
+    file_id: UUID,
+    body: HolderNotesheetUpdate,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_verified_user),
+):
+    """Upsert the AUTHENTICATED caller's own HolderNote — the persistence
+    boundary for the current holder's "Save Changes" action. Deliberately
+    does NOT forward the file, create a RouteEntry, change current_holder_id
+    or status, or touch the shared Notesheet/any other user's HolderNote.
+
+    Authorization is current-holder-only (or admin) — the same rule
+    route_file already enforces for acting on a file at all. This is what
+    makes a past holder's row permanently read-only the moment the file
+    moves on: once current_holder_id no longer equals them, this check
+    rejects every subsequent write attempt, including on their own
+    previously-created row."""
+    f = await _load_file(file_id, db)
+    if f.current_holder_id != user.id and user.active_role not in _ADMIN_ROLES:
+        raise HTTPException(status_code=403, detail="Only the current holder can save this Notesheet.")
+    result = await db.execute(
+        select(HolderNote).where(HolderNote.file_id == file_id, HolderNote.user_id == user.id)
+    )
+    note = result.scalar_one_or_none()
+    if not note:
+        note = HolderNote(file_id=file_id, user_id=user.id, content=body.content)
+        db.add(note)
+    else:
+        note.content = body.content
+    await db.commit()
+    await db.refresh(note)
+    people = await person_info_map({user.id}, db)
+    note.user_info = people.get(user.id)  # type: ignore[attr-defined]
+    return note
 
 
 @router.get("/{file_id}/notesheet/download")

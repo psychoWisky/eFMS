@@ -1,8 +1,9 @@
 "use client";
 import { motion, AnimatePresence } from "framer-motion";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { LayoutDashboard, ShieldCheck, ChevronLeft, ChevronRight, Search, History } from "lucide-react";
 import { useActiveRole, type EfmsRole } from "@/stores/auth.store";
+import { guardedNavigate } from "@/hooks/use-unsaved-changes-guard";
 import { cn } from "@/lib/utils";
 
 interface NavItem { label: string; icon: React.ElementType; href: string; roles: EfmsRole[]; }
@@ -18,6 +19,7 @@ interface SidebarProps { collapsed: boolean; onToggle: () => void; }
 
 export function EFMSSidebar({ collapsed, onToggle }: SidebarProps) {
   const pathname = usePathname();
+  const router = useRouter();
   const role = useActiveRole();
   const visible = NAV_ITEMS.filter((item) => !role || item.roles.includes(role));
 
@@ -47,6 +49,10 @@ export function EFMSSidebar({ collapsed, onToggle }: SidebarProps) {
           const active = pathname.startsWith(item.href);
           return (
             <a key={item.href} href={item.href} title={collapsed ? item.label : undefined}
+              onClick={(e) => {
+                e.preventDefault();
+                guardedNavigate(() => router.push(item.href));
+              }}
               className={cn("group flex items-center gap-3 px-3 py-3 rounded-xl mb-0.5 transition-all relative",
                 active ? "bg-[#E6F4F4] text-[#0D6E6E] font-semibold" : "text-gray-500 hover:bg-gray-50 hover:text-[#0D6E6E]")}>
               {active && <motion.div layoutId="active-pill" className="absolute left-0 top-1 bottom-1 w-1 rounded-full bg-[#0D6E6E]" />}

@@ -52,6 +52,28 @@ export async function confirmAction(opts: ConfirmOptions): Promise<boolean> {
   return result.isConfirmed;
 }
 
+/** Show the generic "Unsaved Changes" leave-confirmation used by the
+ * app-wide navigation guard (useUnsavedChangesGuard) whenever the user tries
+ * to leave a dirty editing context through app-controlled navigation.
+ * Deliberately has no "Save" option — saving only ever happens through the
+ * explicit "Save Changes" button on the page itself, never as a side effect
+ * of navigating away. Resolves true if the user chose to leave. */
+export async function confirmLeaveUnsaved(): Promise<boolean> {
+  const result = await Swal.fire({
+    title: "Unsaved Changes",
+    text: "You have unsaved changes. If you leave this page now, your changes will be lost.",
+    icon: "warning",
+    showCancelButton: true,
+    confirmButtonText: "Leave",
+    cancelButtonText: "Stay",
+    confirmButtonColor: DANGER_COLOR,
+    cancelButtonColor: BRAND_COLOR,
+    reverseButtons: true,
+    focusCancel: true,
+  });
+  return result.isConfirmed;
+}
+
 /** Show a brief, non-blocking-feeling success confirmation (auto-dismisses). */
 export function showSuccess(title: string, text?: string): void {
   Swal.fire({

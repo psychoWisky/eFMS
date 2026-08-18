@@ -126,6 +126,30 @@ class NotesheetSave(BaseModel):
     content: str
 
 
+class HolderNotesheetOut(BaseModel):
+    """A single holder's OWN Notesheet for a file — distinct from
+    NotesheetOut (the creator's single, shared document). One row exists per
+    (file, user); `user_info` identifies whose contribution this is, for the
+    read-only history list. `user_id` is never accepted from a client on the
+    write side (see HolderNotesheetUpdate) — it only ever appears here, on
+    reads, derived server-side."""
+    id: UUID
+    file_id: UUID
+    user_id: UUID
+    content: str
+    created_at: datetime
+    updated_at: datetime
+    user_info: Optional[PersonInfo] = None
+    model_config = {"from_attributes": True}
+
+
+class HolderNotesheetUpdate(BaseModel):
+    """Deliberately content-only — file_id comes from the URL path and
+    user_id is always the authenticated caller; neither can be supplied by
+    the client, so there is no way to target another user's row."""
+    content: str
+
+
 class RouteAction_(BaseModel):
     action: RouteAction
     to_user_id: Optional[UUID] = None
