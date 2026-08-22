@@ -774,12 +774,41 @@ async def save_notesheet(
 
 # ── Holder Notes (per-user Notesheet) ──────────────────────────────────────────
 # Distinct from Notesheet above (the creator's single, shared, immutable-once-
-# non-draft document) and from RouteEntry.remarks (a per-forward routing
-# annotation). Every user who has ever held the file gets at most one
-# HolderNote row per file, enforced by the (file_id, user_id) unique
-# constraint. It is writable only while that user is the file's current
-# holder; once forwarded away, the row is frozen (no write path ever matches
-# them again) but stays visible as their historical contribution.
+# non-draft document, always conceptually numbered 1) and from
+# RouteEntry.remarks (a per-forward routing annotation). Every distinct
+# HOLDING PERIOD gets its own HolderNote row (see the model docstring) — a
+# user who holds a file more than once gets a separate row each time. Only
+# the row with is_current=True is writable, and only by the file's live
+# current_holder_id; every other row is permanently historical/read-only.
+# Lifecycle (creating the next holding-period row / finalizing the outgoing
+# one) happens in route_file (forward) and docket.py's release_file/
+# reopen_file — see _finalize_current_holder_note/_start_holding_period.
+
+async def _finalize_current_holder_note(db: AsyncSession, file_id: UUID, user_id: UUID) -> None:
+    """Mark user_id's current (editable) holding-period row for this file,
+    if one exists, as historical/read-only. A no-op if that holder never
+    saved anything during this holding period — nothing to finalize."""
+    result = await db.execute(
+        select(HolderNote).where(HolderNote.file_id == file_id, HolderNote.user_id == user_id, HolderNote.is_current == True)
+    )
+    note = result.scalar_one_or_none()
+    if note:
+        note.is_current = False
+
+
+async def _start_holding_period(db: AsyncSession, file_id: UUID, user_id: UUID) -> HolderNote:
+    """Create the next holding-period HolderNote row for user_id — a NEW
+    row every time, even if this same user has held this file before, so an
+    earlier historical row is never touched. `sequence` is the next integer
+    after the highest existing sequence for this file (starting at 2; 1 is
+    reserved for the creator's initial Notesheet, which has no HolderNote
+    row). Content starts empty; the holder fills it in via
+    save_my_holder_notesheet while they hold the file."""
+    max_seq = await db.scalar(select(func.max(HolderNote.sequence)).where(HolderNote.file_id == file_id))
+    note = HolderNote(file_id=file_id, user_id=user_id, content="", sequence=(max_seq or 1) + 1, is_current=True)
+    db.add(note)
+    return note
+
 
 @router.get("/{file_id}/holder-notesheet", response_model=Optional[HolderNotesheetOut])
 async def get_my_holder_notesheet(
@@ -787,16 +816,20 @@ async def get_my_holder_notesheet(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_verified_user),
 ):
-    """The AUTHENTICATED caller's own HolderNote for this file — never
-    another user's. `user_id` is always derived from the auth token, never
-    accepted as a parameter, so there is no way to request someone else's
-    row through this endpoint. Returns null if the caller has never saved
-    one yet (the frontend starts with empty content in that case — no row is
-    created until the first Save Changes)."""
+    """The AUTHENTICATED caller's own CURRENT (editable) holding-period
+    HolderNote for this file — never another user's, and never one of the
+    caller's own past holding periods (those are read-only history, only
+    reachable via list_holder_notesheets). `user_id` is always derived from
+    the auth token, never accepted as a parameter. Returns null if the
+    caller doesn't currently have an open holding-period row (e.g. they
+    haven't saved anything yet during this holding period — the frontend
+    starts with empty content in that case; a row is only created on first
+    Save Changes, or already exists from the forward that made them the
+    current holder)."""
     f = await _load_file(file_id, db)
     await _assert_full_file_access(f, user, db)
     result = await db.execute(
-        select(HolderNote).where(HolderNote.file_id == file_id, HolderNote.user_id == user.id)
+        select(HolderNote).where(HolderNote.file_id == file_id, HolderNote.user_id == user.id, HolderNote.is_current == True)
     )
     note = result.scalar_one_or_none()
     if not note:
@@ -812,9 +845,12 @@ async def list_holder_notesheets(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_verified_user),
 ):
-    """Every holder's Notesheet for this file THAT THIS VIEWER IS AUTHORIZED
-    TO READ, oldest first — read-only history for the UI (alongside the
-    creator's Notesheet above and the Track Status routing trail).
+    """Every holding-period Notesheet for this file THAT THIS VIEWER IS
+    AUTHORIZED TO READ, oldest holding-period first (by `sequence`) —
+    read-only history for the UI (alongside the creator's Notesheet above
+    and the Track Status routing trail). A repeat holder's earlier and later
+    holding periods both appear here, as separate rows with separate
+    sequence numbers — never merged or overwritten.
 
     Having "full file access" (current holder, admin, or a department member
     viewing a released file) is the boundary for reaching this endpoint at
@@ -824,14 +860,14 @@ async def list_holder_notesheets(
     established rule _visible_file already uses to decide who sees every
     forwarding remark/attachment vs. just their own). Everyone else who can
     still open the file — most notably a department-released viewer — sees
-    only their own row here, never another user's HolderNote. Nothing here
-    is ever editable through this endpoint regardless."""
+    only their own row(s) here, never another user's HolderNote. Nothing
+    here is ever editable through this endpoint regardless."""
     f = await _load_file(file_id, db)
     await _assert_full_file_access(f, user, db)
     query = select(HolderNote).where(HolderNote.file_id == file_id)
     if not _has_full_remark_visibility(f, user):
         query = query.where(HolderNote.user_id == user.id)
-    result = await db.execute(query.order_by(HolderNote.created_at))
+    result = await db.execute(query.order_by(HolderNote.sequence))
     notes = result.scalars().all()
     if not notes:
         return []
@@ -848,27 +884,55 @@ async def save_my_holder_notesheet(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_verified_user),
 ):
-    """Upsert the AUTHENTICATED caller's own HolderNote — the persistence
-    boundary for the current holder's "Save Changes" action. Deliberately
-    does NOT forward the file, create a RouteEntry, change current_holder_id
-    or status, or touch the shared Notesheet/any other user's HolderNote.
+    """Updates the AUTHENTICATED caller's own CURRENT holding-period
+    HolderNote — the persistence boundary for the current holder's "Save
+    Changes" action. Deliberately does NOT forward the file, create a
+    RouteEntry, change current_holder_id or status, or touch the shared
+    Notesheet/any other user's HolderNote/any of the caller's own past
+    holding-period rows.
 
     Authorization is current-holder-only (or admin) — the same rule
     route_file already enforces for acting on a file at all. This is what
-    makes a past holder's row permanently read-only the moment the file
-    moves on: once current_holder_id no longer equals them, this check
-    rejects every subsequent write attempt, including on their own
-    previously-created row."""
+    makes a past holding period's row permanently read-only the moment the
+    file moves on: once current_holder_id no longer equals them, this check
+    rejects every subsequent write attempt against it.
+
+    The current holding-period row normally already exists (route_file's
+    forward branch / docket.py's reopen_file create it when this user
+    becomes the current holder) — this only updates it. The fallback
+    create-if-missing branch below exists for SUPER_ADMIN (who can save a
+    holder-notesheet without literally being the file's holder, and so has
+    no holding-period row created on their behalf by the routing workflow)
+    and as a safety net for any file whose current holder has no row yet
+    for another reason — it never creates a second "current" row, since the
+    partial unique index (uq_holder_note_current_per_file) enforces at most
+    one per file."""
     f = await _load_file(file_id, db)
     if f.current_holder_id != user.id and not user.is_super_admin:
         raise HTTPException(status_code=403, detail="Only the current holder can save this Notesheet.")
     result = await db.execute(
-        select(HolderNote).where(HolderNote.file_id == file_id, HolderNote.user_id == user.id)
+        select(HolderNote).where(HolderNote.file_id == file_id, HolderNote.user_id == user.id, HolderNote.is_current == True)
     )
     note = result.scalar_one_or_none()
     if not note:
-        note = HolderNote(file_id=file_id, user_id=user.id, content=body.content)
-        db.add(note)
+        # Fallback path — normally unreachable for a real current holder,
+        # since route_file/reopen_file already created this row. Only
+        # SUPER_ADMIN (bypassing the current-holder check above) or a file
+        # whose current holder never got a row for some other reason can
+        # land here. Guard against creating a second "current" row for a
+        # file someone else already holds — the partial unique index would
+        # reject it anyway, but this gives a clear error instead of a raw
+        # DB failure.
+        existing_current = await db.scalar(
+            select(HolderNote.id).where(HolderNote.file_id == file_id, HolderNote.is_current == True)
+        )
+        if existing_current:
+            raise HTTPException(
+                status_code=409,
+                detail="This file already has a current holder's Notesheet open; cannot start another.",
+            )
+        note = await _start_holding_period(db, file_id, user.id)
+        note.content = body.content
     else:
         note.content = body.content
     await db.commit()
@@ -978,6 +1042,16 @@ async def route_file(
         # A dispatched file is a separate terminal state and is left untouched.
         if f.status != FileStatus.dispatched:
             f.status = FileStatus.active
+        # Holding-period lifecycle: the outgoing holder's current
+        # HolderNote (if they ever saved one) becomes historical, and the
+        # new recipient gets a brand-new holding-period row — even if
+        # they've held this file before, so an earlier holding period of
+        # theirs is never touched or overwritten. This is the one place a
+        # forward actually transfers the file to a new holder; dispatch
+        # (below) does not change current_holder_id, so it never triggers
+        # this.
+        await _finalize_current_holder_note(db, file_id, user.id)
+        await _start_holding_period(db, file_id, body.to_user_id)
         f.current_holder_id = body.to_user_id
     elif body.action == RouteAction.dispatch:
         f.status = FileStatus.dispatched

@@ -55,7 +55,7 @@ interface EfmsFile {
 // field, never a second editor. One row per (file, user); writable only
 // while that user is current_holder_id, permanently read-only afterward but
 // still visible here as their historical contribution.
-interface HolderNotesheet { id: string; file_id: string; user_id: string; content: string; created_at: string; updated_at: string; user_info?: PersonInfo | null; }
+interface HolderNotesheet { id: string; file_id: string; user_id: string; content: string; sequence: number; is_current: boolean; created_at: string; updated_at: string; user_info?: PersonInfo | null; }
 interface DropItem { id: string; name: string; label?: string; is_active?: boolean; }
 interface DeptItem { id: string; name: string; }
 
@@ -965,122 +965,14 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
         <div className="flex-1 overflow-y-auto">
           {activeTab === "notesheet" && (
             <div className="p-6 grid grid-cols-1 lg:grid-cols-3 gap-5">
-              {/* LEFT: Initial Notesheet + Notesheet History (read-only) */}
+              {/* LEFT: My Notesheet (top, if current holder) -> Notesheet
+                  History (newest holding-period first) -> Initial Notesheet
+                  (always last, numbered 1). Numbering comes directly from
+                  the backend's `sequence` field (stable, chronological,
+                  assigned when each holding-period row is created) — never
+                  recalculated from this array's display order, which is
+                  intentionally the reverse of creation order. */}
               <div className="lg:col-span-2 space-y-5">
-                <div className="bg-white rounded-2xl border border-gray-200 shadow-sm">
-                  <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
-                    <h2 className="text-lg font-bold text-gray-800">Initial Notesheet</h2>
-                    {/* Immutable once created — the creator's initial notesheet
-                        is permanent record, never editable by whoever
-                        currently holds the file. The current holder's own
-                        contribution has its own dedicated, editable "My
-                        Notesheet" card further down this column (HolderNote-
-                        backed) — never a PATCH to this one. */}
-                    <span className="text-sm text-gray-400 flex items-center gap-1"><Lock size={13} /> Read-only</span>
-                  </div>
-                  {/* Creator/first-recipient context, same PersonBadge + layout
-                      language as Notesheet History below. The actual first
-                      forward (route_entries is ordered by created_at) is the
-                      real "Forwarded to" answer once one exists; before that,
-                      fall back to the informational recipient stored at
-                      Draft creation, and omit this line entirely if neither
-                      is available — never invent a movement that didn't happen. */}
-                  {(file.creator_info || file.route_entries[0]?.to_user_info || file.recipient_info) && (
-                    <div className="px-6 pt-5 flex flex-wrap items-start gap-x-8 gap-y-3">
-                      {file.creator_info && (
-                        <div className="flex items-start gap-1.5">
-                          <span className="text-xs font-semibold text-gray-400 uppercase mt-0.5">Created by</span>
-                          <PersonBadge person={file.creator_info} compact />
-                        </div>
-                      )}
-                      {(file.route_entries[0]?.to_user_info ?? file.recipient_info) && (
-                        <div className="flex items-start gap-1.5">
-                          <span className="text-xs font-semibold text-gray-400 uppercase mt-0.5">Forwarded to</span>
-                          <PersonBadge person={file.route_entries[0]?.to_user_info ?? file.recipient_info} compact />
-                        </div>
-                      )}
-                    </div>
-                  )}
-                  {file.notesheet?.content ? (
-                    <div className="px-6 py-5 prose max-w-none text-base leading-relaxed
-                      [&_h1]:text-2xl [&_h1]:font-bold [&_h1]:mt-4 [&_h1]:mb-2
-                      [&_h2]:text-xl [&_h2]:font-bold [&_h2]:mt-4 [&_h2]:mb-2
-                      [&_h3]:text-lg [&_h3]:font-semibold [&_h3]:mt-3 [&_h3]:mb-1
-                      [&_p]:mb-3 [&_ol]:pl-6 [&_ul]:pl-6 [&_li]:mb-1 [&_strong]:font-bold"
-                      dangerouslySetInnerHTML={{ __html: file.notesheet.content }} />
-                  ) : (
-                    <div className="px-6 py-10 text-center text-gray-400">
-                      <p className="text-base">No notesheet content provided.</p>
-                    </div>
-                  )}
-                </div>
-
-                {/* Notesheet History — each PAST holder's OWN Notesheet
-                    (HolderNote.content), oldest first. Deliberately backed
-                    by GET /{fileId}/holder-notesheets, NOT RouteEntry.remarks
-                    — this is the actual Notesheet content each holder wrote,
-                    not their one-shot forwarding note. The viewer's own
-                    still-editable row (if any) is shown separately in "My
-                    Notesheet" below, not duplicated here. Every row here is
-                    permanently read-only: no write path on this page ever
-                    targets another user's HolderNote. */}
-                <div className="bg-white rounded-2xl border border-gray-200 shadow-sm">
-                  {(() => {
-                    const historyNotes = holderNotesheets.filter((n) => !(canEditHolderNotesheet && n.user_id === user?.id));
-                    return (
-                      <>
-                        <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
-                          <div>
-                            <h2 className="text-lg font-bold text-gray-800">Notesheet History</h2>
-                            <p className="text-sm text-gray-500 mt-0.5">Each holder's own Notesheet, oldest first — read-only</p>
-                          </div>
-                          {historyNotes.length > 0 && (
-                            <span className="text-xs font-semibold bg-gray-100 text-gray-600 px-2.5 py-1 rounded-full">
-                              {historyNotes.length} entr{historyNotes.length === 1 ? "y" : "ies"}
-                            </span>
-                          )}
-                        </div>
-                        {historyNotes.length === 0 ? (
-                          <div className="px-6 py-10 text-center text-gray-400">
-                            <p className="text-base">No previous holder Notesheets recorded yet.</p>
-                          </div>
-                        ) : (
-                          <div className="px-6 py-5">
-                            {historyNotes.map((n, idx, arr) => (
-                              <div key={n.id} className="flex items-start gap-4">
-                                {/* Numbered marker + connecting line — same timeline
-                                    language as the Track Status tab's icon + line. */}
-                                <div className="flex flex-col items-center">
-                                  <div className="w-9 h-9 rounded-full flex items-center justify-center shrink-0 border-2 bg-[#0D6E6E] border-[#0D6E6E]">
-                                    <span className="text-xs font-bold text-white">{idx + 1}</span>
-                                  </div>
-                                  {idx < arr.length - 1 && <div className="w-0.5 flex-1 min-h-[24px] mt-1 bg-gray-200" />}
-                                </div>
-                                <div className="flex-1 min-w-0 pb-6">
-                                  <div className="flex items-center justify-between mb-2">
-                                    <div className="flex items-center gap-1.5">
-                                      <PersonBadge person={n.user_info} fallback="Unknown" compact />
-                                      {n.user_id === user?.id && (
-                                        <span className="text-xs text-[#0D6E6E] font-medium">(You)</span>
-                                      )}
-                                    </div>
-                                    <span className="flex items-center gap-1.5 text-xs font-medium text-gray-500">
-                                      <Clock size={12} className="text-gray-400" />{formatDate(n.updated_at, "datetime")}
-                                    </span>
-                                  </div>
-                                  {/* Notesheet content — same prose rendering as the Initial Notesheet card */}
-                                  <div className={cn("bg-gray-50 border border-gray-200 rounded-xl px-4 py-3", NOTESHEET_PROSE_CLASS)}
-                                    dangerouslySetInnerHTML={{ __html: toSafeNotesheetHtml(n.content) }} />
-                                </div>
-                              </div>
-                            ))}
-                          </div>
-                        )}
-                      </>
-                    );
-                  })()}
-                </div>
-
                 {/* My Notesheet — the current holder's OWN, server-persisted
                     Notesheet (HolderNote), only ever shown/editable while
                     they are the file's current holder on an Active file.
@@ -1115,6 +1007,135 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                     </div>
                   </div>
                 )}
+
+                {/* Notesheet History — every PAST holding-period's OWN
+                    Notesheet (HolderNote.content), newest holding-period
+                    first. Deliberately backed by GET /{fileId}/holder-
+                    notesheets, NOT RouteEntry.remarks — this is the actual
+                    Notesheet content each holder wrote during that specific
+                    holding period, not their one-shot forwarding note. A
+                    user who has held the file more than once appears here
+                    once per holding period, each with its own number and
+                    content — never merged. The viewer's own CURRENT
+                    (still-editable) row is excluded here (shown above in
+                    "My Notesheet" instead); every row here is is_current
+                    === false and permanently read-only. */}
+                <div className="bg-white rounded-2xl border border-gray-200 shadow-sm">
+                  {(() => {
+                    const historyNotes = holderNotesheets
+                      .filter((n) => !n.is_current)
+                      .slice()
+                      .sort((a, b) => b.sequence - a.sequence); // newest holding-period first
+                    return (
+                      <>
+                        <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
+                          <div>
+                            <h2 className="text-lg font-bold text-gray-800">Notesheet History</h2>
+                            <p className="text-sm text-gray-500 mt-0.5">Each holding period&apos;s own Notesheet, newest first — read-only</p>
+                          </div>
+                          {historyNotes.length > 0 && (
+                            <span className="text-xs font-semibold bg-gray-100 text-gray-600 px-2.5 py-1 rounded-full">
+                              {historyNotes.length} entr{historyNotes.length === 1 ? "y" : "ies"}
+                            </span>
+                          )}
+                        </div>
+                        {historyNotes.length === 0 ? (
+                          <div className="px-6 py-10 text-center text-gray-400">
+                            <p className="text-base">No previous holder Notesheets recorded yet.</p>
+                          </div>
+                        ) : (
+                          <div className="px-6 py-5">
+                            {historyNotes.map((n, idx, arr) => (
+                              <div key={n.id} className="flex items-start gap-4">
+                                {/* Numbered marker + connecting line — same timeline
+                                    language as the Track Status tab's icon + line.
+                                    The number itself (n.sequence) is stable and
+                                    chronological regardless of this reversed
+                                    display order. */}
+                                <div className="flex flex-col items-center">
+                                  <div className="w-9 h-9 rounded-full flex items-center justify-center shrink-0 border-2 bg-[#0D6E6E] border-[#0D6E6E]">
+                                    <span className="text-xs font-bold text-white">{n.sequence}</span>
+                                  </div>
+                                  {idx < arr.length - 1 && <div className="w-0.5 flex-1 min-h-[24px] mt-1 bg-gray-200" />}
+                                </div>
+                                <div className="flex-1 min-w-0 pb-6">
+                                  <div className="flex items-center justify-between mb-2">
+                                    <div className="flex items-center gap-1.5">
+                                      <PersonBadge person={n.user_info} fallback="Unknown" compact />
+                                      {n.user_id === user?.id && (
+                                        <span className="text-xs text-[#0D6E6E] font-medium">(You)</span>
+                                      )}
+                                    </div>
+                                    <span className="flex items-center gap-1.5 text-xs font-medium text-gray-500">
+                                      <Clock size={12} className="text-gray-400" />{formatDate(n.updated_at, "datetime")}
+                                    </span>
+                                  </div>
+                                  {/* Notesheet content — same prose rendering as the Initial Notesheet card */}
+                                  <div className={cn("bg-gray-50 border border-gray-200 rounded-xl px-4 py-3", NOTESHEET_PROSE_CLASS)}
+                                    dangerouslySetInnerHTML={{ __html: toSafeNotesheetHtml(n.content) }} />
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </>
+                    );
+                  })()}
+                </div>
+
+                {/* Initial Notesheet — the creator's original document,
+                    always conceptually numbered 1 (it precedes every
+                    HolderNote holding-period, which start numbering at 2).
+                    Immutable once created — never editable by whoever
+                    currently holds the file; the current holder's own
+                    contribution is the separate, editable "My Notesheet"
+                    card above. Always rendered last, matching the
+                    oldest-at-the-bottom display order used above. */}
+                <div className="bg-white rounded-2xl border border-gray-200 shadow-sm">
+                  <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+                    <div className="flex items-center gap-2.5">
+                      <div className="w-9 h-9 rounded-full flex items-center justify-center shrink-0 border-2 bg-gray-400 border-gray-400">
+                        <span className="text-xs font-bold text-white">1</span>
+                      </div>
+                      <h2 className="text-lg font-bold text-gray-800">Initial Notesheet</h2>
+                    </div>
+                    <span className="text-sm text-gray-400 flex items-center gap-1"><Lock size={13} /> Read-only</span>
+                  </div>
+                  {/* Creator/first-recipient context. The actual first
+                      forward (route_entries is ordered by created_at) is the
+                      real "Forwarded to" answer once one exists; before that,
+                      fall back to the informational recipient stored at
+                      Draft creation, and omit this line entirely if neither
+                      is available — never invent a movement that didn't happen. */}
+                  {(file.creator_info || file.route_entries[0]?.to_user_info || file.recipient_info) && (
+                    <div className="px-6 pt-5 flex flex-wrap items-start gap-x-8 gap-y-3">
+                      {file.creator_info && (
+                        <div className="flex items-start gap-1.5">
+                          <span className="text-xs font-semibold text-gray-400 uppercase mt-0.5">Created by</span>
+                          <PersonBadge person={file.creator_info} compact />
+                        </div>
+                      )}
+                      {(file.route_entries[0]?.to_user_info ?? file.recipient_info) && (
+                        <div className="flex items-start gap-1.5">
+                          <span className="text-xs font-semibold text-gray-400 uppercase mt-0.5">Forwarded to</span>
+                          <PersonBadge person={file.route_entries[0]?.to_user_info ?? file.recipient_info} compact />
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  {file.notesheet?.content ? (
+                    <div className="px-6 py-5 prose max-w-none text-base leading-relaxed
+                      [&_h1]:text-2xl [&_h1]:font-bold [&_h1]:mt-4 [&_h1]:mb-2
+                      [&_h2]:text-xl [&_h2]:font-bold [&_h2]:mt-4 [&_h2]:mb-2
+                      [&_h3]:text-lg [&_h3]:font-semibold [&_h3]:mt-3 [&_h3]:mb-1
+                      [&_p]:mb-3 [&_ol]:pl-6 [&_ul]:pl-6 [&_li]:mb-1 [&_strong]:font-bold"
+                      dangerouslySetInnerHTML={{ __html: file.notesheet.content }} />
+                  ) : (
+                    <div className="px-6 py-10 text-center text-gray-400">
+                      <p className="text-base">No notesheet content provided.</p>
+                    </div>
+                  )}
+                </div>
               </div>
 
               {/* RIGHT: Edit Draft (creator, within window) / recipient-only picker

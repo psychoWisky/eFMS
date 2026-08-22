@@ -127,16 +127,24 @@ class NotesheetSave(BaseModel):
 
 
 class HolderNotesheetOut(BaseModel):
-    """A single holder's OWN Notesheet for a file — distinct from
-    NotesheetOut (the creator's single, shared document). One row exists per
-    (file, user); `user_info` identifies whose contribution this is, for the
-    read-only history list. `user_id` is never accepted from a client on the
-    write side (see HolderNotesheetUpdate) — it only ever appears here, on
-    reads, derived server-side."""
+    """One holding-period's Notesheet for a file — distinct from NotesheetOut
+    (the creator's single, shared, immutable-once-non-draft document, always
+    conceptually numbered 1). A user who holds a file more than once gets a
+    separate row (and a separate `sequence` number) per holding period, not
+    one shared row — see HolderNote's model docstring. `sequence` is the
+    stable chronological holding-period number (2, 3, 4, ...) used for
+    display numbering, independent of display/sort order. `is_current`
+    marks whether this is the file's live, still-editable holding-period
+    record. `user_info` identifies whose contribution this is. `user_id` is
+    never accepted from a client on the write side (see
+    HolderNotesheetUpdate) — it only ever appears here, on reads, derived
+    server-side."""
     id: UUID
     file_id: UUID
     user_id: UUID
     content: str
+    sequence: int
+    is_current: bool
     created_at: datetime
     updated_at: datetime
     user_info: Optional[PersonInfo] = None

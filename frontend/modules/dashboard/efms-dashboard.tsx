@@ -8,7 +8,7 @@ import { useUser, useActiveRole } from "@/stores/auth.store";
 import { cn, formatDate, matchesRefSuffix, truncate } from "@/lib/utils";
 import { Inbox, FolderOpen, FilePlus2, Loader2, Unlock, Eye, EyeOff, Clock, Search, FilePlus, FolderSearch } from "lucide-react";
 import { toast } from "sonner";
-import { showSuccess } from "@/lib/alert";
+import { confirmAction, showSuccess } from "@/lib/alert";
 import { guardedNavigate } from "@/hooks/use-unsaved-changes-guard";
 import { NewFileForm } from "@/modules/files/new-file-page";
 import { ReopenFilePicker } from "@/modules/files/reopen-file-picker";
@@ -224,7 +224,15 @@ export function EFMSDashboard() {
                                 <Eye size={14} /> View
                               </button>
                               {f.can_release && (
-                                <button onClick={() => releaseMutation.mutate(f.file_id)}
+                                <button onClick={async () => {
+                                  const confirmed = await confirmAction({
+                                    title: "Release Notesheet?",
+                                    text: "Are you sure you want to release this notesheet? You will no longer be able to edit it after release.",
+                                    confirmText: "Release",
+                                    danger: true,
+                                  });
+                                  if (confirmed) releaseMutation.mutate(f.file_id);
+                                }}
                                   disabled={releaseMutation.isPending}
                                   className="flex items-center gap-1 px-3 py-1.5 border border-teal-300 text-teal-700 rounded-lg text-sm font-medium hover:bg-teal-50 disabled:opacity-50">
                                   <Unlock size={14} /> Release

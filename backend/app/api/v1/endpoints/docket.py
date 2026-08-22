@@ -12,7 +12,10 @@ from app.core.dependencies import get_current_verified_user
 from app.models.user import User
 from app.models.efms import EfmsFile, FileStatus
 from app.models.efms_extra import Docket, FileRemark
-from app.api.v1.endpoints.efms_files import _load_file, _assert_tracking_access, _has_full_remark_visibility
+from app.api.v1.endpoints.efms_files import (
+    _load_file, _assert_tracking_access, _has_full_remark_visibility,
+    _finalize_current_holder_note,
+)
 from app.utils.person_info import person_info_map
 
 router = APIRouter(prefix="/docket", tags=["Docket"])
@@ -105,6 +108,10 @@ async def release_file(file_id: UUID, db: AsyncSession = Depends(get_db), user: 
         )
         db.add(docket)
 
+    # Finalize the releaser's current holding-period Notesheet — nobody
+    # holds the file once released, so nothing should remain editable.
+    await _finalize_current_holder_note(db, file_id, user.id)
+
     # Clear current_holder so the file leaves everyone's docket
     file.current_holder_id = None
     await db.commit()
@@ -122,7 +129,16 @@ async def reopen_file(file_id: UUID, db: AsyncSession = Depends(get_db), user: U
     the creator. Everything else (notesheet, attachments, remarks, routing
     history, created_at) is left untouched. From this point the file behaves
     like any other Active file and the existing Forward flow takes over
-    unchanged."""
+    unchanged.
+
+    Deliberately does NOT proactively create a new holding-period HolderNote
+    row for the creator here — the outgoing holder's row was already
+    finalized at release() (see _finalize_current_holder_note there), so no
+    is_current row exists for this file right now. save_my_holder_notesheet
+    already creates one lazily on first save when none exists (the same
+    path used for any current holder's very first save), so the end result
+    is identical whether the row appears now or on first edit; special-
+    casing reopen here would only duplicate that logic."""
     file = await db.get(EfmsFile, file_id)
     if not file:
         raise HTTPException(404, "File not found.")
