@@ -23,26 +23,41 @@ class SystemRole(str, enum.Enum):
     DISPATCH_OFFICER = "dispatch_officer"
 
 
-# Single source of truth for "which roles may participate in eFMS administrative
-# workflows" — user creation/edit and every recipient-picker endpoint validate
-# against this set rather than each maintaining their own role list. HOD and
-# FACULTY are included deliberately: they may legitimately route files once
-# AMS/eFMS user sync exists. Student/Academic Cell/DPGS/Result Branch are
-# academic-only roles with no administrative function in eFMS and are excluded.
-# This is independent of where a user record originates (local DB today,
-# a synchronized/shared store later) — only active_role is ever consulted.
-EFMS_ASSIGNABLE_ROLES = frozenset({
-    SystemRole.SUPER_ADMIN, SystemRole.ADMIN,
-    SystemRole.EFMS_OFFICER, SystemRole.EFMS_ADMIN,
-    SystemRole.REGISTRAR, SystemRole.DISPATCH_OFFICER,
-    SystemRole.HOD, SystemRole.FACULTY,
-})
-
-
 class Gender(str, enum.Enum):
     MALE = "male"
     FEMALE = "female"
     OTHER = "other"
+
+
+class DeactivationReasonType(str, enum.Enum):
+    RETIRED = "retired"
+    TRANSFERRED = "transferred"
+    RESIGNED = "resigned"
+    LEFT_ORGANIZATION = "left_organization"
+    SUSPENDED = "suspended"
+    OTHER = "other"
+
+
+class Role(Base, UUIDMixin, TimestampMixin):
+    """Manageable role catalog (Super Admin "Roles" section). This is a
+    metadata/administration layer on top of the same role names User.
+    active_role has always used — it does NOT replace or gate authorization.
+    SUPER_ADMIN's global bypass is checked exclusively via
+    User.is_super_admin (== SystemRole.SUPER_ADMIN), never via anything on
+    this table, so creating/editing a Role row can never grant it.
+
+    is_system=True is set on exactly one row: super_admin — the only role
+    this application's privilege check is explicitly tied to (see
+    User.is_super_admin). Every other role, including the 11 other
+    development/test roles this app originally shipped with, is an
+    ordinary role: renamable and (once unassigned) deletable like any role
+    Super Admin creates through Role Management. Role names carry no
+    inherent eFMS-workflow meaning — all non-SUPER_ADMIN roles are equal."""
+    __tablename__ = "roles"
+
+    name = Column(String(50), unique=True, nullable=False, index=True)
+    description = Column(String(255), nullable=True)
+    is_system = Column(Boolean, default=False, nullable=False)
 
 
 class User(Base, UUIDMixin, TimestampMixin):
@@ -55,8 +70,21 @@ class User(Base, UUIDMixin, TimestampMixin):
     must_change_password = Column(Boolean, default=False, nullable=False)
     google_id = Column(String(255), unique=True, nullable=True)
 
+    # Deactivation metadata — is_active above remains the single field the
+    # auth layer checks; these only record why/when/by-whom for display and
+    # audit purposes, and are left untouched on reactivation (is_active=True)
+    # rather than cleared, so the last deactivation reason stays visible.
+    deactivation_reason_type = Column(
+        Enum(DeactivationReasonType, values_callable=lambda obj: [e.value for e in obj], name="deactivation_reason_type_enum", create_constraint=False),
+        nullable=True,
+    )
+    deactivation_remarks = Column(String(1000), nullable=True)
+    deactivated_at = Column(DateTime(timezone=True), nullable=True)
+    deactivated_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
+
     # Profile
     first_name = Column(String(100), nullable=True)
+    middle_name = Column(String(100), nullable=True)
     last_name = Column(String(100), nullable=True)
     date_of_birth = Column(Date, nullable=True)
     gender = Column(Enum(Gender, values_callable=lambda obj: [e.value for e in obj], name="gender_enum", create_constraint=False), nullable=True)
@@ -69,8 +97,16 @@ class User(Base, UUIDMixin, TimestampMixin):
     establishment_id = Column(UUID(as_uuid=True), ForeignKey("establishments.id"), nullable=True)
     department_id = Column(UUID(as_uuid=True), ForeignKey("departments.id"), nullable=True)
 
-    # Active role context
-    active_role = Column(Enum(SystemRole, values_callable=lambda obj: [e.value for e in obj], name="system_role", create_constraint=False), nullable=True)
+    # Active role context — plain string, validated at the application layer
+    # against the `roles` table (see Role above), not a Postgres enum
+    # constraint. Was `Enum(SystemRole, ..., name="system_role")` before the
+    # Role Management feature; widened to String so newly-created custom
+    # roles (which can't be added to a fixed Postgres enum type without a
+    # schema change per role) can be assigned like any pre-existing role.
+    # The `== SystemRole.SUPER_ADMIN` privilege comparison still works
+    # unchanged: SystemRole is a `str` subclass, so its members compare/hash
+    # equal to plain strings.
+    active_role = Column(String(50), nullable=True)
 
     # Digital signature permission
     can_sign = Column(Boolean, default=False, nullable=False)
@@ -84,15 +120,22 @@ class User(Base, UUIDMixin, TimestampMixin):
 
     @property
     def full_name(self) -> str:
-        parts = [self.first_name, self.last_name]
+        parts = [self.first_name, self.middle_name, self.last_name]
         return " ".join(p for p in parts if p)
+
+    @property
+    def is_super_admin(self) -> bool:
+        """SUPER_ADMIN is the only globally privileged role — the single
+        source of truth for the system-wide admin bypass. No other role
+        (including plain ADMIN) may satisfy this."""
+        return self.active_role == SystemRole.SUPER_ADMIN
 
 
 class UserRole(Base, UUIDMixin, TimestampMixin):
     __tablename__ = "user_roles"
 
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
-    role = Column(Enum(SystemRole, values_callable=lambda obj: [e.value for e in obj], name="system_role", create_constraint=False), nullable=False)
+    role = Column(String(50), nullable=False)
 
     user = relationship("User", back_populates="roles")
 

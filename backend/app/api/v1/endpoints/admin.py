@@ -11,12 +11,12 @@ from pydantic import BaseModel
 
 from app.db.base import get_db
 from app.core.dependencies import require_roles, get_current_user
-from app.models.user import User, SystemRole, EFMS_ASSIGNABLE_ROLES, FavoriteRecipient
+from app.models.user import User, SystemRole, FavoriteRecipient
 from app.models.admin import FileCategory, FilePriority, FileRecipient, Notification
 from app.models.organization import Establishment, Department
 
 router = APIRouter(prefix="/admin", tags=["Super Admin"])
-_super = require_roles(SystemRole.SUPER_ADMIN, SystemRole.ADMIN)
+_super = require_roles(SystemRole.SUPER_ADMIN)
 _any_role = get_current_user
 
 
@@ -59,7 +59,7 @@ class UserOut(BaseModel):
     @classmethod
     def from_user(cls, u: User):
         return cls(id=u.id, email=u.email, full_name=u.full_name,
-                   active_role=u.active_role.value if u.active_role else None,
+                   active_role=u.active_role,
                    designation=getattr(u, "designation", None),
                    department_name=u.department.name if u.department else None,
                    employee_code=getattr(u, "employee_code", None))
@@ -204,9 +204,11 @@ async def delete_recipient(rid: UUID, db: AsyncSession = Depends(get_db), _=Depe
 
 # ── Users list (recipient/forward/signature pickers) ─────────────────────────
 # Shared by every user-picker in the app (New File recipient, Forward dialog,
-# Signature Permission grant). Scoped to EFMS_ASSIGNABLE_ROLES so non-
-# administrative accounts (e.g. Student) never appear as selectable, without
-# any consumer needing its own filter.
+# Signature Permission grant). All non-SUPER_ADMIN roles are equal, ordinary
+# eFMS roles (including any role Super Admin creates through Role
+# Management) — eligibility is "active user with a role assigned", never a
+# specific role name. A user with no role at all (active_role IS NULL) is
+# excluded since they have no operational eFMS context to route a file to.
 
 @router.get("/users", response_model=List[UserOut])
 async def list_users(
@@ -218,7 +220,7 @@ async def list_users(
     q = select(User).where(
         User.is_active == True,
         User.id != current_user.id,
-        User.active_role.in_(EFMS_ASSIGNABLE_ROLES),
+        User.active_role.is_not(None),
     )
     if establishment_id:
         q = q.where(User.establishment_id == establishment_id)
@@ -440,7 +442,7 @@ class SignPermissionUserOut(BaseModel):
         return cls(
             id=u.id, email=u.email, full_name=u.full_name,
             designation=getattr(u, "designation", None),
-            active_role=u.active_role.value if u.active_role else None,
+            active_role=u.active_role,
             can_sign=bool(getattr(u, "can_sign", False)),
         )
 

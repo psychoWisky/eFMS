@@ -38,7 +38,7 @@ export function ReopenFilePicker({
     mutationFn: (fileId: string) => api.post(`/docket/${fileId}/reopen`, {}),
     onSuccess: (_res, fileId) => {
       qc.invalidateQueries({ queryKey: ["released-mine"] });
-      qc.invalidateQueries({ queryKey: ["docket-released"] });
+      qc.invalidateQueries({ queryKey: ["docket-released-mine"] });
       qc.invalidateQueries({ queryKey: ["efms-files-outbox"] });
       qc.invalidateQueries({ queryKey: ["my-docket"] });
       showSuccess("File reopened.");

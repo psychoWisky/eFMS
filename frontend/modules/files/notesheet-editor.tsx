@@ -235,7 +235,7 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
   // and the subsequent-forward panel — the endpoint and payload shape are
   // unchanged; only what populates `remarks`/`to_user_id` differs by caller.
   const submitAction = useMutation({
-    mutationFn: (data: { action: string; remarks: string; to_user_id?: string | null }) =>
+    mutationFn: (data: { action: string; remarks?: string; to_user_id?: string | null }) =>
       api.post(`/efms/files/${fileId}/route`, data),
   });
 
@@ -246,7 +246,7 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
     qc.invalidateQueries({ queryKey: ["efms-files"] });
     qc.invalidateQueries({ queryKey: ["efms-files-outbox"] });
     qc.invalidateQueries({ queryKey: ["my-docket"] });
-    qc.invalidateQueries({ queryKey: ["docket-released"] });
+    qc.invalidateQueries({ queryKey: ["docket-released-mine"] });
     qc.invalidateQueries({ queryKey: ["notifications"] });
     // After a successful forward the file leaves this user's hands — send
     // them to the Docket rather than leaving them on the (now read-only) page.
@@ -262,7 +262,10 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
     const target = recipientId ?? file?.recipient_id;
     if (!target) return;
     try {
-      await submitAction.mutateAsync({ action: actionType, remarks: "", to_user_id: target });
+      // No remarks field exists at first-forward — omitted (not "") so the
+      // backend/timeline never mistake "nothing was ever written" for
+      // "content exists but you can't see it."
+      await submitAction.mutateAsync({ action: actionType, to_user_id: target });
       await afterForwardSuccess();
     } catch (err) {
       const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
@@ -299,7 +302,9 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
       noteContent = saved;
     }
     try {
-      await submitAction.mutateAsync({ action: actionType, remarks: noteContent, to_user_id: toUserId || null });
+      // Omit (not "") when the holder never wrote anything — same reasoning
+      // as handleFirstForward above.
+      await submitAction.mutateAsync({ action: actionType, remarks: noteContent || undefined, to_user_id: toUserId || null });
       await afterForwardSuccess();
     } catch (err) {
       const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
@@ -390,6 +395,70 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
     }
   }
 
+  // Shared blob fetch for attachment view/download/zip — these endpoints now
+  // require authentication + per-attachment authorization (previously they
+  // were unauthenticated, relying only on the stored filename being an
+  // unguessable UUID), so a plain <a href> can no longer be used: the
+  // browser attaches no Authorization header to a bare navigation. Mirrors
+  // handleDownloadNotesheet's existing blob-fetch-then-synthetic-click
+  // pattern above; `errorFallback` lets each caller phrase its own default
+  // message while sharing the same axios/Blob error-body parsing.
+  async function fetchAttachmentBlob(url: string, errorFallback: string): Promise<Blob | null> {
+    try {
+      const res = await api.get(url, { responseType: "blob" });
+      return res.data as Blob;
+    } catch (err) {
+      let msg = errorFallback;
+      const errBlob = (err as { response?: { data?: unknown } })?.response?.data;
+      if (errBlob instanceof Blob) {
+        try {
+          const parsed = JSON.parse(await errBlob.text());
+          if (typeof parsed?.detail === "string") msg = parsed.detail;
+        } catch { /* not JSON — keep the generic message */ }
+      }
+      toast.error(msg);
+      return null;
+    }
+  }
+
+  async function viewAttachment(attId: string) {
+    const blob = await fetchAttachmentBlob(`/efms/files/${fileId}/attachments/${attId}/view`, "Could not open this attachment.");
+    if (!blob) return;
+    const blobUrl = URL.createObjectURL(blob);
+    // Deliberately not revoked immediately — the new tab needs the blob URL
+    // to remain valid while it renders. Left to the browser's own tab/blob
+    // lifecycle, same tradeoff the previous unauthenticated direct-link
+    // approach had no control over either.
+    window.open(blobUrl, "_blank", "noopener,noreferrer");
+  }
+
+  async function downloadAttachment(attId: string, filename: string) {
+    const blob = await fetchAttachmentBlob(`/efms/files/${fileId}/attachments/${attId}/download`, "Could not download this attachment.");
+    if (!blob) return;
+    const blobUrl = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = blobUrl;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(blobUrl);
+  }
+
+  async function downloadAllAttachmentsZip() {
+    if (!file) return;
+    const blob = await fetchAttachmentBlob(`/efms/files/${fileId}/attachments/zip`, "Could not download attachments.");
+    if (!blob) return;
+    const blobUrl = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = blobUrl;
+    link.download = `${file.ref_number.replace(/\//g, "-")}-attachments.zip`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(blobUrl);
+  }
+
   // Returns whether the save fully succeeded — callers (the plain Save
   // button, and the unsaved-changes guard) must never treat a partial
   // failure (metadata saved but notesheet failed) as success or navigate/
@@ -465,6 +534,12 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
       const res = await saveHolderNotesheetMutation.mutateAsync(myNoteContent);
       setMyNoteBaseline(res.data.content);
       showSuccess("Changes saved.");
+      // Both the singular (this holder's own note, keyed by user id) and
+      // plural (Notesheet History, everyone's notes) caches must be
+      // invalidated — the local myNoteBaseline update above already keeps
+      // this render correct, but a stale singular cache entry would
+      // otherwise linger for any other code path that reads it.
+      qc.invalidateQueries({ queryKey: ["holder-notesheet", fileId, user?.id] });
       qc.invalidateQueries({ queryKey: ["holder-notesheets", fileId] });
       return res.data.content;
     } catch (err) {
@@ -553,9 +628,15 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
     if (myNoteEditor.getHTML() !== content) {
       myNoteEditor.commands.setContent(content);
     }
-    // Only re-sync when a fresh GET resolves — not on every keystroke.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [myHolderNoteLoaded, myHolderNote]);
+    // myNoteEditor must be a dependency: on a fresh mount the HolderNote GET
+    // can resolve before Tiptap finishes creating the editor instance
+    // (immediatelyRender:false means it's briefly null), so this effect can
+    // fire once, no-op on the null-editor guard above, and — without
+    // myNoteEditor in the deps — never get a chance to re-run once the
+    // editor actually becomes available, leaving the loaded content
+    // discarded. Including it lets the effect correctly fire again the
+    // moment the editor is ready.
+  }, [myHolderNoteLoaded, myHolderNote, myNoteEditor]);
 
   // Pre-fill the recipient-only picker (needsRecipientPicker) with whatever
   // recipient is already on the draft, if any — the user can still change it.
@@ -654,13 +735,14 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
               <p className="text-xs text-gray-400 mt-0.5">PDF versions for download</p>
             </div>
             {file.attachments.length > 0 && (
-              <a
-                href={`${API_URL}/efms/files/${fileId}/attachments/zip`}
+              <button
+                type="button"
+                onClick={downloadAllAttachmentsZip}
                 title="Download all attachments as a ZIP"
                 className="flex items-center gap-1 text-xs text-gray-500 hover:text-[#0D6E6E] border border-gray-200 rounded-lg px-2 py-1.5 shrink-0"
               >
                 <Download size={12} /> All
-              </a>
+              </button>
             )}
           </div>
         </div>
@@ -690,15 +772,13 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                       const kind = getAttachmentPreviewKind(att);
                       if (kind === "native") {
                         return (
-                          <a
-                            href={`/api/attachments/${fileId}/${att.id}/view`}
-                            target="_blank"
-                            rel="noreferrer"
-                            onClick={() => setSelectedPdf(att)}
+                          <button
+                            type="button"
+                            onClick={() => { setSelectedPdf(att); viewAttachment(att.id); }}
                             className="text-xs text-[#0D6E6E] font-semibold hover:underline"
                           >
                             View
-                          </a>
+                          </button>
                         );
                       }
                       if (kind === "none") {
@@ -721,12 +801,13 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                         </button>
                       );
                     })()}
-                    <a
-                      href={`${API_URL}/efms/files/${fileId}/attachments/${att.id}/download`}
+                    <button
+                      type="button"
+                      onClick={() => downloadAttachment(att.id, att.original_name)}
                       className="text-xs text-gray-500 hover:text-gray-700 hover:underline"
                     >
                       Download
-                    </a>
+                    </button>
                     {canDelete && (
                       <button
                         type="button"
@@ -754,10 +835,10 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
         </div>
         {selectedPdf && (
           <div className="p-3 border-t border-gray-200">
-            <a href={`${API_URL}/efms/files/${fileId}/attachments/${selectedPdf.id}/download`}
+            <button type="button" onClick={() => downloadAttachment(selectedPdf.id, selectedPdf.original_name)}
               className="flex items-center justify-center gap-2 w-full py-2.5 bg-[#0D6E6E] text-white rounded-xl text-sm font-semibold hover:bg-[#178F8F]">
               <Download size={15} /> Download
-            </a>
+            </button>
           </div>
         )}
       </div>

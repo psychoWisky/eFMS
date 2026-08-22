@@ -35,8 +35,8 @@ def _send_email(to: str, subject: str, body: str) -> None:
         pass  # Don't fail the request if email fails
 
 from app.db.base import get_db
-from app.core.dependencies import get_current_verified_user, require_roles
-from app.models.user import User, SystemRole
+from app.core.dependencies import get_current_verified_user
+from app.models.user import User
 from app.models.efms import (
     EfmsFile, Notesheet, NotesheetVersion, HolderNote,
     RouteEntry, FileAttachment, DispatchRecord,
@@ -54,8 +54,9 @@ from app.utils.otp import create_otp, verify_otp, send_email as _send_otp_email
 from app.utils.person_info import PersonInfo, person_info_map
 from app.api.v1.endpoints.admin import create_notification
 
-# Roles that can see ALL files (spec §13, §14)
-_ADMIN_ROLES = {SystemRole.SUPER_ADMIN, SystemRole.ADMIN, SystemRole.EFMS_ADMIN, SystemRole.EFMS_OFFICER, SystemRole.REGISTRAR}
+# SUPER_ADMIN is the only globally privileged role — see User.is_super_admin.
+# No other role (ADMIN, EFMS_ADMIN, EFMS_OFFICER, REGISTRAR, ...) bypasses
+# normal file-level authorization; they are all normal users for this purpose.
 
 # A Draft file (metadata + notesheet) is editable for only this long after creation.
 DRAFT_EDIT_WINDOW = timedelta(minutes=30)
@@ -185,7 +186,7 @@ async def _assert_full_file_access(f: EfmsFile, user: User, db: AsyncSession) ->
     creation and never reassigned until the first forward), so this still
     covers the "creator viewing their own still-held draft" case for free —
     it only stops covering them once they've actually forwarded it."""
-    if user.active_role in _ADMIN_ROLES:
+    if user.is_super_admin:
         return
     if f.current_holder_id == user.id:
         return
@@ -215,7 +216,7 @@ async def _assert_tracking_access(f: EfmsFile, user: User, db: AsyncSession) -> 
     movement/audit trail), even though they can no longer fully open the
     file. Used by track_file and get_remarks — never by anything that
     returns the initial notesheet or attachments."""
-    if user.active_role in _ADMIN_ROLES:
+    if user.is_super_admin:
         return
     if f.created_by == user.id or f.current_holder_id == user.id:
         return
@@ -256,7 +257,7 @@ def _has_full_remark_visibility(f: EfmsFile, viewer: User) -> bool:
     that hands current_holder_id back to the creator gets full visibility for
     free — no change to this function would be needed.
     """
-    return viewer.active_role in _ADMIN_ROLES or f.current_holder_id == viewer.id
+    return viewer.is_super_admin or f.current_holder_id == viewer.id
 
 
 def _has_full_tracking_visibility(f: EfmsFile, viewer: User) -> bool:
@@ -282,6 +283,51 @@ def _first_forward_time(route_entries) -> Optional[datetime]:
     treat that as "everything is original"."""
     times = [e.created_at for e in route_entries if e.created_at is not None]
     return min(times) if times else None
+
+
+async def _has_attachment_access(f: EfmsFile, att: FileAttachment, user: User, db: AsyncSession) -> bool:
+    """Per-attachment authorization — deliberately NOT the same gate as
+    _assert_full_file_access. A previous holder (including the creator, once
+    they've forwarded the file onward) can no longer fully open the file,
+    but may still be entitled to specific attachments: exactly the same
+    subset _visible_file already computes when filtering the attachments
+    LIST for a non-full-visibility viewer (pre-first-forward "original"
+    attachments if they're the creator, or anything they personally
+    uploaded). This mirrors that existing rule at the individual-resource
+    level instead of only at the list level, since the list-level filter
+    alone does nothing to stop a direct request for the attachment's own
+    view/download URL.
+
+    Admins and the current holder always see every attachment on the file
+    (matches _has_full_remark_visibility, the established full-visibility
+    rule already used for remarks and the attachments list)."""
+    if user.is_super_admin:
+        return True
+    if f.current_holder_id == user.id:
+        return True
+    if att.uploaded_by == user.id:
+        return True
+    first_fwd = _first_forward_time(f.route_entries)
+    is_original = first_fwd is None or att.created_at < first_fwd
+    if is_original and f.created_by == user.id:
+        return True
+    if is_original and user.department_id:
+        from app.models.efms_extra import Docket
+        rel = await db.execute(
+            select(Docket).where(
+                Docket.file_id == f.id,
+                Docket.is_released == True,
+                Docket.department_id == user.department_id,
+            )
+        )
+        if rel.scalar_one_or_none():
+            return True
+    return False
+
+
+async def _assert_attachment_access(f: EfmsFile, att: FileAttachment, user: User, db: AsyncSession) -> None:
+    if not await _has_attachment_access(f, att, user, db):
+        raise HTTPException(status_code=403, detail="You don't have access to this attachment.")
 
 
 def _visible_file(f: EfmsFile, viewer: User, *, full_access: bool = True) -> FileOut:
@@ -324,6 +370,25 @@ def _visible_file(f: EfmsFile, viewer: User, *, full_access: bool = True) -> Fil
     return payload
 
 
+def _list_safe_file(f: EfmsFile) -> FileOut:
+    """Serialization for list/search endpoints (list_files, search_files) —
+    these return many files at once without running _assert_full_file_access
+    per file (a user's own outbox, for instance, deliberately includes files
+    they created but can no longer fully open once forwarded away). Full
+    per-file access-scoped filtering (_visible_file) is therefore not
+    applicable here; instead, `notesheet` and `attachments` — the two fields
+    that carry actual protected document content — are always stripped
+    outright, since no list/search UI needs them (only summary fields like
+    ref_number/subject/status/dates do). This closes an over-fetching gap
+    where the full, unfiltered content was previously present on the wire
+    for every file in the list, including ones the requesting user could not
+    open individually via GET /{file_id}."""
+    payload = FileOut.model_validate(f)
+    payload.notesheet = None
+    payload.attachments = []
+    return payload
+
+
 # ── Files CRUD ────────────────────────────────────────────────────────────────
 
 @router.get("", response_model=list[FileOut])
@@ -341,7 +406,7 @@ async def list_files(
         selectinload(EfmsFile.attachments),
     )
 
-    is_admin = user.active_role in _ADMIN_ROLES
+    is_admin = user.is_super_admin
 
     if inbox:
         # Inbox: files where user is current holder (files forwarded to them)
@@ -361,7 +426,7 @@ async def list_files(
     result = await db.execute(q.order_by(EfmsFile.updated_at.desc()))
     files = result.scalars().all()
     await _attach_is_released(files, db)
-    return files
+    return [_list_safe_file(f) for f in files]
 
 
 @router.get("/search", response_model=list[FileOut])
@@ -382,7 +447,7 @@ async def search_files(
         selectinload(EfmsFile.route_entries),
         selectinload(EfmsFile.attachments),
     )
-    is_admin = user.active_role in _ADMIN_ROLES
+    is_admin = user.is_super_admin
     if not is_admin:
         # Current-holder only — matches _assert_full_file_access, the same
         # boundary GET /{file_id} enforces. Search must never surface a file
@@ -406,7 +471,7 @@ async def search_files(
     result = await db.execute(query.order_by(EfmsFile.updated_at.desc()).limit(100))
     files = result.scalars().all()
     await _attach_is_released(files, db)
-    return files
+    return [_list_safe_file(f) for f in files]
 
 
 @router.get("/{file_id}/track")
@@ -502,9 +567,13 @@ async def track_file(file_id: UUID, db: AsyncSession = Depends(get_db), user: Us
 async def track_initial_notesheet(file_id: UUID, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_verified_user)):
     """The initial notesheet's content, scoped for Tracking History — reachable
     by any tracking-eligible viewer (_assert_tracking_access, same boundary
-    as track_file), but the actual content is only included when
-    _has_full_tracking_visibility says so (current holder, the creator once
-    released, or an admin). A past participant who is neither can still call
+    as track_file). Content is included when the viewer has general full
+    tracking visibility (current holder, the creator once released, or an
+    admin) OR — separately — when the viewer is the file's own creator: this
+    is literally their own original document, so unlike remarks-visibility
+    (which is about reading OTHER people's contributions), there is no
+    reason to withhold it from its own author just because the file hasn't
+    been released yet. A past participant who is neither can still call
     this — they just get accessible=False and no content, so the frontend
     can render "you don't have access to read this" instead of nothing.
 
@@ -515,7 +584,7 @@ async def track_initial_notesheet(file_id: UUID, db: AsyncSession = Depends(get_
     duplicate of get_file."""
     f = await _load_file(file_id, db)
     await _assert_tracking_access(f, user, db)
-    accessible = _has_full_tracking_visibility(f, user)
+    accessible = _has_full_tracking_visibility(f, user) or f.created_by == user.id
     has_notesheet = bool(f.notesheet and f.notesheet.content)
     return {
         "content": f.notesheet.content if (accessible and has_notesheet) else None,
@@ -599,7 +668,7 @@ async def update_file(
     user: User = Depends(get_current_verified_user),
 ):
     f = await _load_file(file_id, db)
-    if f.created_by != user.id and user.active_role not in _ADMIN_ROLES:
+    if f.created_by != user.id and not user.is_super_admin:
         raise HTTPException(status_code=403, detail="Only the file creator can update metadata.")
     if f.status != FileStatus.draft:
         raise HTTPException(status_code=400, detail="Metadata can only be edited while the file is a Draft.")
@@ -678,7 +747,7 @@ async def save_notesheet(
         # not merely the current holder (which is the same person for an
         # untouched Draft, but this must not be mistaken for holder-based
         # authorization).
-        if f.created_by != user.id and user.active_role not in _ADMIN_ROLES:
+        if f.created_by != user.id and not user.is_super_admin:
             raise HTTPException(status_code=403, detail="Only the file creator can edit this notesheet.")
         if _draft_edit_expired(f):
             raise HTTPException(status_code=400, detail="Draft editing window (30 minutes) has expired.")
@@ -743,17 +812,26 @@ async def list_holder_notesheets(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_verified_user),
 ):
-    """Every holder's Notesheet for this file, oldest first — read-only
-    history for the UI (alongside the creator's Notesheet above and the
-    Track Status routing trail). Same access boundary as opening the file at
-    all: whoever can view the file (current holder, admin, or a department
-    member viewing a released file) sees every past and current holder's
-    contribution; nothing here is ever editable through this endpoint."""
+    """Every holder's Notesheet for this file THAT THIS VIEWER IS AUTHORIZED
+    TO READ, oldest first — read-only history for the UI (alongside the
+    creator's Notesheet above and the Track Status routing trail).
+
+    Having "full file access" (current holder, admin, or a department member
+    viewing a released file) is the boundary for reaching this endpoint at
+    all — it is NOT the same thing as being allowed to read every other
+    holder's individual Notesheet. Only the current holder and admins get
+    that broader visibility (_has_full_remark_visibility — the same
+    established rule _visible_file already uses to decide who sees every
+    forwarding remark/attachment vs. just their own). Everyone else who can
+    still open the file — most notably a department-released viewer — sees
+    only their own row here, never another user's HolderNote. Nothing here
+    is ever editable through this endpoint regardless."""
     f = await _load_file(file_id, db)
     await _assert_full_file_access(f, user, db)
-    result = await db.execute(
-        select(HolderNote).where(HolderNote.file_id == file_id).order_by(HolderNote.created_at)
-    )
+    query = select(HolderNote).where(HolderNote.file_id == file_id)
+    if not _has_full_remark_visibility(f, user):
+        query = query.where(HolderNote.user_id == user.id)
+    result = await db.execute(query.order_by(HolderNote.created_at))
     notes = result.scalars().all()
     if not notes:
         return []
@@ -782,7 +860,7 @@ async def save_my_holder_notesheet(
     rejects every subsequent write attempt, including on their own
     previously-created row."""
     f = await _load_file(file_id, db)
-    if f.current_holder_id != user.id and user.active_role not in _ADMIN_ROLES:
+    if f.current_holder_id != user.id and not user.is_super_admin:
         raise HTTPException(status_code=403, detail="Only the current holder can save this Notesheet.")
     result = await db.execute(
         select(HolderNote).where(HolderNote.file_id == file_id, HolderNote.user_id == user.id)
@@ -883,7 +961,14 @@ async def route_file(
         from_user_id=user.id,
         to_user_id=body.to_user_id,
         action=body.action,
-        remarks=body.remarks,
+        # Normalize "" to NULL: an empty string is not the same thing as "no
+        # remark" downstream — track_file's `has_remark = e.remarks is not
+        # None` would treat a stored "" as "content exists but is hidden"
+        # for viewers who can't see it, producing a false "you don't have
+        # access to read this" for an entry that never had real content.
+        # Enforced here (not just in the frontend) so the guarantee holds
+        # regardless of caller.
+        remarks=(body.remarks or None),
         is_current=True,
     )
     db.add(new_route)
@@ -1015,13 +1100,20 @@ async def view_attachment(
     file_id: UUID,
     att_id: UUID,
     db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_verified_user),
 ):
     """Serve attachment inline so the browser opens it in a new tab.
-    No auth required — stored_name is an unguessable UUID, matching the
-    existing StaticFiles security posture."""
+    Requires authentication and per-attachment authorization
+    (_assert_attachment_access) — previously this endpoint relied solely on
+    stored_name being an unguessable UUID, which meant anyone who obtained
+    an attachment ID by any means (a stale cached response, a shared link,
+    etc.) could view it regardless of whether they still had any
+    relationship to the file."""
     att = await db.get(FileAttachment, att_id)
     if not att or att.file_id != file_id:
         raise HTTPException(status_code=404, detail="Attachment not found.")
+    f = await _load_file(file_id, db)
+    await _assert_attachment_access(f, att, user, db)
     path = os.path.join(os.path.abspath(settings.UPLOAD_DIR), att.stored_name)
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="File not found on disk.")
@@ -1038,11 +1130,16 @@ async def download_attachment(
     file_id: UUID,
     att_id: UUID,
     db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_verified_user),
 ):
-    """Force-download attachment with the original filename and UTF-8 encoding."""
+    """Force-download attachment with the original filename and UTF-8
+    encoding. Requires authentication and per-attachment authorization —
+    see view_attachment above for why this changed from unauthenticated."""
     att = await db.get(FileAttachment, att_id)
     if not att or att.file_id != file_id:
         raise HTTPException(status_code=404, detail="Attachment not found.")
+    f = await _load_file(file_id, db)
+    await _assert_attachment_access(f, att, user, db)
     path = os.path.join(os.path.abspath(settings.UPLOAD_DIR), att.stored_name)
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="File not found on disk.")
@@ -1060,19 +1157,21 @@ async def download_attachment(
 async def download_all_attachments(
     file_id: UUID,
     db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_verified_user),
 ):
-    """Download every attachment on this file as one .zip. Reuses the exact
-    same disk-path resolution as download_attachment for each entry (no
-    second file-lookup implementation) and preserves each attachment's
-    original filename inside the archive. Same (deliberately) unauthenticated
-    posture as view_attachment/download_attachment above."""
-    f = await db.get(EfmsFile, file_id)
-    if not f:
-        raise HTTPException(status_code=404, detail="File not found.")
+    """Download every attachment ON THIS FILE THAT THIS USER IS AUTHORIZED
+    TO SEE as one .zip — silently excludes any attachment
+    _has_attachment_access rejects, rather than requiring all-or-nothing
+    access to the whole file's attachment set. Reuses the exact same
+    disk-path resolution as download_attachment for each entry (no second
+    file-lookup implementation) and preserves each attachment's original
+    filename inside the archive."""
+    f = await _load_file(file_id, db)
     result = await db.execute(select(FileAttachment).where(FileAttachment.file_id == file_id))
-    attachments = result.scalars().all()
+    all_attachments = result.scalars().all()
+    attachments = [a for a in all_attachments if await _has_attachment_access(f, a, user, db)]
     if not attachments:
-        raise HTTPException(status_code=404, detail="This file has no attachments.")
+        raise HTTPException(status_code=404, detail="This file has no attachments you have access to.")
 
     upload_dir = os.path.abspath(settings.UPLOAD_DIR)
     buf = io.BytesIO()
@@ -1097,16 +1196,22 @@ async def preview_doc_as_docx(
     file_id: UUID,
     att_id: UUID,
     db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_verified_user),
 ):
     """Convert a legacy .doc attachment to .docx on the fly, purely as a
     preview artifact — the stored .doc file on disk is never modified or
     replaced (see convert_doc_to_docx). Lets the frontend reuse the exact
     same docx-preview renderer already used for native .docx attachments
     and by the eSign feature, instead of a second .doc-specific viewer.
-    Same unauthenticated posture as view_attachment/download_attachment."""
+    Requires authentication and the same per-attachment authorization as
+    view_attachment/download_attachment — this serves a converted copy of
+    the exact same protected bytes, so it must not be a weaker path to the
+    same content."""
     att = await db.get(FileAttachment, att_id)
     if not att or att.file_id != file_id:
         raise HTTPException(status_code=404, detail="Attachment not found.")
+    f = await _load_file(file_id, db)
+    await _assert_attachment_access(f, att, user, db)
     if _get_ext(att.original_name).lower() != ".doc":
         raise HTTPException(status_code=400, detail="This attachment is not a legacy .doc file.")
     path = os.path.join(os.path.abspath(settings.UPLOAD_DIR), att.stored_name)
@@ -1343,8 +1448,13 @@ dispatch_router = APIRouter(prefix="/efms/dispatch", tags=["eFMS Dispatch"])
 @dispatch_router.get("", response_model=list[DispatchOut])
 async def list_dispatches(
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(require_roles("dispatch_officer", "efms_admin", "registrar", "admin")),
+    _: User = Depends(get_current_verified_user),
 ):
+    """Dispatch is the normal file-forwarding/routing workflow, not a
+    privileged function — any authenticated eFMS user may view the
+    dispatch log, matching list_files/search_files elsewhere in this
+    module (no role restriction, since roles carry no eFMS-workflow
+    privilege beyond SUPER_ADMIN)."""
     result = await db.execute(select(DispatchRecord).order_by(DispatchRecord.dispatched_at.desc()))
     return result.scalars().all()
 
@@ -1354,11 +1464,16 @@ async def dispatch_file(
     file_id: UUID,
     body: DispatchCreate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_roles("dispatch_officer", "efms_admin", "registrar")),
+    user: User = Depends(get_current_verified_user),
 ):
     f = await db.get(EfmsFile, file_id)
     if not f:
         raise HTTPException(status_code=404, detail="File not found.")
+    # Dispatch is an action taken on a file, same category as forwarding —
+    # authorized by the same current-holder-or-SUPER_ADMIN rule route_file
+    # already uses for every other action on a file, not by role name.
+    if f.current_holder_id != user.id and not user.is_super_admin:
+        raise HTTPException(status_code=403, detail="Only the current holder can dispatch this file.")
     if f.status == FileStatus.dispatched:
         raise HTTPException(status_code=400, detail="File has already been dispatched.")
     existing = await db.scalar(select(DispatchRecord).where(DispatchRecord.file_id == file_id))

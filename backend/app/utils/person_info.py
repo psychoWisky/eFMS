@@ -21,6 +21,7 @@ class PersonInfo(BaseModel):
     full_name: str
     designation: Optional[str] = None
     department_name: Optional[str] = None
+    is_active: bool = True
     model_config = {"from_attributes": True}
 
 
@@ -48,6 +49,7 @@ async def person_info_map(
             full_name=u.full_name,
             designation=u.designation,
             department_name=dept_names.get(u.department_id) if u.department_id else None,
+            is_active=u.is_active,
         )
         for u in users
     }

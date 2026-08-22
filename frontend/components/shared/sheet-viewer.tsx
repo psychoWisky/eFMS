@@ -5,8 +5,13 @@
 // as docx-preview's client-side approach for Word documents (see DocxViewer):
 // fetch the raw file, parse/convert entirely in the browser, no backend
 // conversion step or stored-format change.
+//
+// Fetches via the shared `api` axios client (not raw `fetch`) so the
+// Authorization header is attached automatically — see docx-viewer.tsx for
+// the full rationale (attachment endpoints now require authentication).
 import { useEffect, useRef, useState } from "react";
 import { Loader2, AlertCircle } from "lucide-react";
+import { api } from "@/services/api";
 
 interface Props {
   fileUrl: string;
@@ -30,9 +35,8 @@ export default function SheetViewer({ fileUrl }: Props) {
 
     (async () => {
       try {
-        const res = await fetch(fileUrl);
-        if (!res.ok) throw new Error(`Failed to load document (${res.status})`);
-        const data = await res.arrayBuffer();
+        const res = await api.get(fileUrl, { responseType: "blob" });
+        const data = await (res.data as Blob).arrayBuffer();
         if (cancelled) return;
         const XLSX = await import("xlsx");
         const workbook = XLSX.read(data, { type: "array" });
@@ -41,7 +45,15 @@ export default function SheetViewer({ fileUrl }: Props) {
         workbookRef.current = workbook;
         setSheetNames(workbook.SheetNames);
       } catch (err) {
-        if (!cancelled) setError(err instanceof Error ? err.message : "Failed to render spreadsheet.");
+        let message = err instanceof Error ? err.message : "Failed to render spreadsheet.";
+        const errBlob = (err as { response?: { data?: unknown } })?.response?.data;
+        if (errBlob instanceof Blob) {
+          try {
+            const parsed = JSON.parse(await errBlob.text());
+            if (typeof parsed?.detail === "string") message = parsed.detail;
+          } catch { /* not JSON — keep the generic message */ }
+        }
+        if (!cancelled) setError(message);
       } finally {
         if (!cancelled) setLoading(false);
       }

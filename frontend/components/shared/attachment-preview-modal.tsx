@@ -3,14 +3,19 @@
 // viewable attachment types (docx/doc/xls/xlsx/csv), reused by the
 // attachment list (notesheet-editor.tsx) and the File Tracking History
 // timeline (timeline-modal.tsx) so there is exactly one preview
-// implementation instead of two. PDF/images/text are unaffected — those
-// keep opening directly via the existing /view endpoint in a new tab.
-// Reuses DocxViewer (shared with the eSign feature) and SheetViewer, and the
-// same modal chrome convention as TimelineModal (fixed backdrop + white
-// rounded panel).
-import { X, FileX2 } from "lucide-react";
+// implementation instead of two. Reuses DocxViewer (shared with the eSign
+// feature) and SheetViewer, and the same modal chrome convention as
+// TimelineModal (fixed backdrop + white rounded panel).
+//
+// The `native` (PDF/image) case fetches the attachment as an authenticated
+// blob itself (via the shared `api` client) and points the <iframe> at the
+// resulting blob: URL — an <iframe src> can't carry an Authorization header,
+// so it can no longer point directly at the (now-authenticated)
+// /attachments/{id}/view endpoint the way it used to.
+import { useEffect, useState } from "react";
+import { X, FileX2, Loader2, AlertCircle } from "lucide-react";
 import { getAttachmentPreviewKind } from "@/lib/utils";
-import { API_URL } from "@/services/api";
+import { api } from "@/services/api";
 import DocxViewer from "@/components/shared/docx-viewer";
 import SheetViewer from "@/components/shared/sheet-viewer";
 
@@ -30,8 +35,42 @@ export function AttachmentPreviewModal({
   onClose: () => void;
 }) {
   const kind = getAttachmentPreviewKind(attachment);
-  const viewUrl = `/api/attachments/${fileId}/${attachment.id}/view`;
-  const docxConvertUrl = `${API_URL}/efms/files/${fileId}/attachments/${attachment.id}/preview-docx`;
+  const viewUrl = `/efms/files/${fileId}/attachments/${attachment.id}/view`;
+  const docxConvertUrl = `/efms/files/${fileId}/attachments/${attachment.id}/preview-docx`;
+
+  const [nativeBlobUrl, setNativeBlobUrl] = useState<string | null>(null);
+  const [nativeError, setNativeError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (kind !== "native") return;
+    let cancelled = false;
+    let objectUrl: string | null = null;
+    setNativeBlobUrl(null);
+    setNativeError(null);
+    (async () => {
+      try {
+        const res = await api.get(viewUrl, { responseType: "blob" });
+        if (cancelled) return;
+        objectUrl = URL.createObjectURL(res.data as Blob);
+        setNativeBlobUrl(objectUrl);
+      } catch (err) {
+        let msg = "Could not load this attachment.";
+        const errBlob = (err as { response?: { data?: unknown } })?.response?.data;
+        if (errBlob instanceof Blob) {
+          try {
+            const parsed = JSON.parse(await errBlob.text());
+            if (typeof parsed?.detail === "string") msg = parsed.detail;
+          } catch { /* not JSON — keep the generic message */ }
+        }
+        if (!cancelled) setNativeError(msg);
+      }
+    })();
+    return () => {
+      cancelled = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [kind, viewUrl]);
 
   return (
     <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-6" onClick={onClose}>
@@ -49,7 +88,18 @@ export function AttachmentPreviewModal({
           {kind === "doc" && <DocxViewer fileUrl={docxConvertUrl} />}
           {kind === "sheet" && <SheetViewer fileUrl={viewUrl} />}
           {kind === "native" && (
-            <iframe src={viewUrl} className="w-full h-full" style={{ minHeight: "70vh", border: "none" }} title={attachment.original_name} />
+            nativeError ? (
+              <div className="flex flex-col items-center justify-center py-24 text-gray-400 gap-2">
+                <AlertCircle size={40} className="opacity-40 text-red-400" />
+                <p className="text-sm">{nativeError}</p>
+              </div>
+            ) : nativeBlobUrl ? (
+              <iframe src={nativeBlobUrl} className="w-full h-full" style={{ minHeight: "70vh", border: "none" }} title={attachment.original_name} />
+            ) : (
+              <div className="flex items-center justify-center py-24 text-gray-400 gap-2 text-sm">
+                <Loader2 size={20} className="animate-spin" /> Loading…
+              </div>
+            )
           )}
           {kind === "none" && (
             <div className="flex flex-col items-center justify-center py-24 text-gray-400 gap-2">

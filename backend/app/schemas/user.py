@@ -1,7 +1,7 @@
 from pydantic import BaseModel, EmailStr, field_validator
 from typing import Optional
 from datetime import date
-from app.models.user import Gender, SystemRole
+from app.models.user import Gender
 import uuid
 
 
@@ -44,7 +44,7 @@ class UserProfileResponse(BaseModel):
     establishment_id: Optional[str]
     department_id: Optional[str]
     profile_photo_url: Optional[str]
-    active_role: Optional[SystemRole]
+    active_role: Optional[str]
     kyc_completed: bool
 
     model_config = {"from_attributes": True}

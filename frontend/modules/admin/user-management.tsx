@@ -7,35 +7,63 @@ import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/services/api";
 import { toast } from "sonner";
-import { confirmAction, showSuccess } from "@/lib/alert";
+import { showSuccess } from "@/lib/alert";
 import { useActiveRole } from "@/stores/auth.store";
 import {
   Plus, Loader2, X, Copy, RefreshCw, Eye, EyeOff, Pencil,
-  Power, PowerOff, ShieldAlert, Trash2, Upload, Download, CheckCircle2, XCircle,
+  Power, PowerOff, ShieldAlert, Upload, Download, CheckCircle2, XCircle, ClipboardCopy,
 } from "lucide-react";
 
 interface Establishment { id: string; name: string; code: string | null; is_active: boolean; }
 interface Department { id: string; name: string; code: string | null; establishment_id: string | null; is_active: boolean; }
 
 interface AdminUser {
-  id: string; email: string; first_name: string | null; last_name: string | null; full_name: string;
+  id: string; email: string; first_name: string | null; middle_name: string | null; last_name: string | null; full_name: string;
   mobile: string | null; employee_code: string | null; date_of_birth: string | null; designation: string | null;
   establishment_id: string | null; establishment_name: string | null;
   department_id: string | null; department_name: string | null;
   active_role: string | null; is_active: boolean; must_change_password: boolean; can_sign: boolean;
+  deactivation_reason_type: string | null; deactivation_remarks: string | null;
+  deactivated_at: string | null; deactivated_by: string | null;
 }
 
-// Mirrors backend EFMS_ASSIGNABLE_ROLES (app/models/user.py) — keep in sync.
-const ROLE_OPTIONS = [
-  { value: "super_admin", label: "Super Admin" },
-  { value: "admin", label: "Admin" },
-  { value: "efms_officer", label: "eFMS Officer" },
-  { value: "efms_admin", label: "eFMS Admin" },
-  { value: "registrar", label: "Registrar" },
-  { value: "dispatch_officer", label: "Dispatch Officer" },
-  { value: "hod", label: "Head of Department" },
-  { value: "faculty", label: "Faculty" },
+type StatusFilter = "all" | "active" | "inactive";
+
+const DEACTIVATION_REASON_OPTIONS = [
+  { value: "retired", label: "Retired" },
+  { value: "transferred", label: "Transferred" },
+  { value: "resigned", label: "Resigned" },
+  { value: "left_organization", label: "Left Organization" },
+  { value: "suspended", label: "Suspended" },
+  { value: "other", label: "Other" },
 ];
+
+// Fixed system roles assignable to eFMS users — mirrors backend
+// EFMS_ASSIGNABLE_ROLES (app/models/user.py) — keep in sync. Any *custom*
+// (non-system) role from GET /auth/admin/roles is always assignable — see
+// buildRoleOptions below, which combines this allow-list (for system roles)
+// with every custom role Super Admin has created.
+const ASSIGNABLE_SYSTEM_ROLE_NAMES = new Set([
+  "super_admin", "admin", "efms_officer", "efms_admin",
+  "registrar", "dispatch_officer", "hod", "faculty",
+]);
+const SYSTEM_ROLE_LABELS: Record<string, string> = {
+  super_admin: "Super Admin", admin: "Admin", efms_officer: "eFMS Officer",
+  efms_admin: "eFMS Admin", registrar: "Registrar", dispatch_officer: "Dispatch Officer",
+  hod: "Head of Department", faculty: "Faculty",
+};
+
+interface RoleSummary { id: string; name: string; description: string | null; is_system: boolean; user_count: number; }
+
+function roleLabelFor(name: string): string {
+  return SYSTEM_ROLE_LABELS[name] ?? name.split("_").map((w) => w[0]?.toUpperCase() + w.slice(1)).join(" ");
+}
+
+function buildRoleOptions(roles: RoleSummary[]): { value: string; label: string }[] {
+  return roles
+    .filter((r) => (r.is_system ? ASSIGNABLE_SYSTEM_ROLE_NAMES.has(r.name) : true))
+    .map((r) => ({ value: r.name, label: roleLabelFor(r.name) }));
+}
 
 const INPUT = "w-full border border-gray-300 rounded-lg px-3 py-2.5 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]";
 const LABEL = "block text-sm font-semibold text-gray-600 mb-1";
@@ -59,42 +87,45 @@ function generatePassword(): string {
   return chars.join("");
 }
 
-async function copyToClipboard(text: string) {
+async function copyToClipboard(text: string, message = "Password copied to clipboard.") {
   try {
     await navigator.clipboard.writeText(text);
-    toast.success("Password copied to clipboard.");
+    toast.success(message);
   } catch {
     toast.error("Could not copy to clipboard.");
   }
 }
 
 interface FormState {
-  first_name: string; last_name: string; email: string; mobile: string;
+  first_name: string; middle_name: string; last_name: string; email: string; mobile: string;
   employee_code: string; date_of_birth: string; designation: string;
   establishment_id: string; department_id: string; role: string; is_active: boolean;
 }
 
 const EMPTY_FORM: FormState = {
-  first_name: "", last_name: "", email: "", mobile: "", employee_code: "",
+  first_name: "", middle_name: "", last_name: "", email: "", mobile: "", employee_code: "",
   date_of_birth: "", designation: "", establishment_id: "", department_id: "",
   role: "efms_officer", is_active: true,
 };
 
 function UserFields({
-  form, setForm, establishments, departments, disabledEmail,
+  form, setForm, establishments, departments, roleOptions, disabledEmail,
 }: {
   form: FormState;
   setForm: React.Dispatch<React.SetStateAction<FormState>>;
   establishments: Establishment[];
   departments: Department[];
+  roleOptions: { value: string; label: string }[];
   disabledEmail?: boolean;
 }) {
   const filteredDepts = departments.filter((d) => !form.establishment_id || d.establishment_id === form.establishment_id);
   return (
     <div className="space-y-4">
-      <div className="grid grid-cols-2 gap-4">
+      <div className="grid grid-cols-3 gap-4">
         <div><label className={LABEL}>First Name *</label>
           <input value={form.first_name} onChange={(e) => setForm((f) => ({ ...f, first_name: e.target.value }))} className={INPUT} /></div>
+        <div><label className={LABEL}>Middle Name</label>
+          <input value={form.middle_name} onChange={(e) => setForm((f) => ({ ...f, middle_name: e.target.value }))} className={INPUT} /></div>
         <div><label className={LABEL}>Last Name *</label>
           <input value={form.last_name} onChange={(e) => setForm((f) => ({ ...f, last_name: e.target.value }))} className={INPUT} /></div>
       </div>
@@ -128,7 +159,7 @@ function UserFields({
       <div className="grid grid-cols-2 gap-4">
         <div><label className={LABEL}>Role *</label>
           <select value={form.role} onChange={(e) => setForm((f) => ({ ...f, role: e.target.value }))} className={INPUT}>
-            {ROLE_OPTIONS.map((r) => <option key={r.value} value={r.value}>{r.label}</option>)}
+            {roleOptions.map((r) => <option key={r.value} value={r.value}>{r.label}</option>)}
           </select></div>
         <div><label className={LABEL}>Status</label>
           <select value={form.is_active ? "active" : "inactive"} onChange={(e) => setForm((f) => ({ ...f, is_active: e.target.value === "active" }))} className={INPUT}>
@@ -140,8 +171,8 @@ function UserFields({
   );
 }
 
-function CreateUserModal({ onClose, establishments, departments }: {
-  onClose: () => void; establishments: Establishment[]; departments: Department[];
+function CreateUserModal({ onClose, establishments, departments, roleOptions }: {
+  onClose: () => void; establishments: Establishment[]; departments: Department[]; roleOptions: { value: string; label: string }[];
 }) {
   const qc = useQueryClient();
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
@@ -152,7 +183,7 @@ function CreateUserModal({ onClose, establishments, departments }: {
 
   const create = useMutation({
     mutationFn: () => api.post("/auth/admin/users", {
-      first_name: form.first_name, last_name: form.last_name, email: form.email,
+      first_name: form.first_name, middle_name: form.middle_name || undefined, last_name: form.last_name, email: form.email,
       mobile: form.mobile, employee_code: form.employee_code || undefined,
       date_of_birth: form.date_of_birth || undefined, designation: form.designation,
       establishment_id: form.establishment_id || undefined, department_id: form.department_id || undefined,
@@ -188,7 +219,7 @@ function CreateUserModal({ onClose, establishments, departments }: {
     setConfirming(true);
   }
 
-  const roleLabel = ROLE_OPTIONS.find((r) => r.value === form.role)?.label ?? form.role;
+  const roleLabel = roleOptions.find((r) => r.value === form.role)?.label ?? form.role;
 
   return (
     <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-6" onClick={onClose}>
@@ -201,7 +232,7 @@ function CreateUserModal({ onClose, establishments, departments }: {
         <div className="overflow-y-auto px-6 py-5 flex-1">
           {error && <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-xl text-red-700 text-sm">{error}</div>}
 
-          <UserFields form={form} setForm={setForm} establishments={establishments} departments={departments} />
+          <UserFields form={form} setForm={setForm} establishments={establishments} departments={departments} roleOptions={roleOptions} />
 
           <div className="mt-5 pt-5 border-t border-gray-200">
             <p className="text-sm font-semibold text-gray-700 mb-2">Account Credentials</p>
@@ -250,7 +281,7 @@ function CreateUserModal({ onClose, establishments, departments }: {
             </div>
             <div className="px-6 py-5 space-y-3 max-h-[60vh] overflow-y-auto">
               <div className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
-                <div><span className="text-gray-400">Name</span><p className="font-semibold text-gray-900">{form.first_name} {form.last_name}</p></div>
+                <div><span className="text-gray-400">Name</span><p className="font-semibold text-gray-900">{[form.first_name, form.middle_name, form.last_name].filter(Boolean).join(" ")}</p></div>
                 <div><span className="text-gray-400">Email</span><p className="font-semibold text-gray-900">{form.email}</p></div>
                 <div><span className="text-gray-400">Mobile</span><p className="font-semibold text-gray-900">{form.mobile}</p></div>
                 <div><span className="text-gray-400">Designation</span><p className="font-semibold text-gray-900">{form.designation}</p></div>
@@ -291,12 +322,12 @@ function CreateUserModal({ onClose, establishments, departments }: {
   );
 }
 
-function EditUserModal({ user, onClose, establishments, departments }: {
-  user: AdminUser; onClose: () => void; establishments: Establishment[]; departments: Department[];
+function EditUserModal({ user, onClose, establishments, departments, roleOptions }: {
+  user: AdminUser; onClose: () => void; establishments: Establishment[]; departments: Department[]; roleOptions: { value: string; label: string }[];
 }) {
   const qc = useQueryClient();
   const [form, setForm] = useState<FormState>({
-    first_name: user.first_name ?? "", last_name: user.last_name ?? "", email: user.email,
+    first_name: user.first_name ?? "", middle_name: user.middle_name ?? "", last_name: user.last_name ?? "", email: user.email,
     mobile: user.mobile ?? "", employee_code: user.employee_code ?? "", date_of_birth: user.date_of_birth ?? "",
     designation: user.designation ?? "", establishment_id: user.establishment_id ?? "",
     department_id: user.department_id ?? "", role: user.active_role ?? "efms_officer", is_active: user.is_active,
@@ -305,7 +336,7 @@ function EditUserModal({ user, onClose, establishments, departments }: {
 
   const save = useMutation({
     mutationFn: () => api.patch(`/auth/admin/users/${user.id}`, {
-      first_name: form.first_name, last_name: form.last_name, email: form.email,
+      first_name: form.first_name, middle_name: form.middle_name || "", last_name: form.last_name, email: form.email,
       mobile: form.mobile, employee_code: form.employee_code || null,
       date_of_birth: form.date_of_birth || null, designation: form.designation,
       establishment_id: form.establishment_id || null, department_id: form.department_id || null,
@@ -331,7 +362,7 @@ function EditUserModal({ user, onClose, establishments, departments }: {
         </div>
         <div className="overflow-y-auto px-6 py-5 flex-1">
           {error && <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-xl text-red-700 text-sm">{error}</div>}
-          <UserFields form={form} setForm={setForm} establishments={establishments} departments={departments} />
+          <UserFields form={form} setForm={setForm} establishments={establishments} departments={departments} roleOptions={roleOptions} />
         </div>
         <div className="px-6 py-4 border-t border-gray-200 flex justify-end gap-3 shrink-0">
           <button onClick={onClose} className="px-4 py-2.5 rounded-lg text-sm font-semibold text-gray-600 hover:bg-gray-100">Cancel</button>
@@ -346,10 +377,21 @@ function EditUserModal({ user, onClose, establishments, departments }: {
 }
 
 interface BulkRowResult {
-  row: number; email: string | null; status: "created" | "failed";
-  error: string | null; temp_password: string | null;
+  row: number; email: string | null; full_name: string | null; status: "created" | "failed";
+  error: string | null; temp_password: string | null; password_generated: boolean;
 }
 interface BulkUploadResult { total: number; created: number; failed: number; results: BulkRowResult[]; }
+
+async function copyAllCredentials(results: BulkRowResult[]) {
+  const lines = results
+    .filter((r) => r.status === "created" && r.temp_password)
+    .map((r) => `${r.full_name ?? ""}\t${r.email ?? ""}\t${r.temp_password}`);
+  if (lines.length === 0) {
+    toast.error("No credentials to copy.");
+    return;
+  }
+  await copyToClipboard(["Name\tEmail\tTemporary Password", ...lines].join("\n"), "All credentials copied to clipboard.");
+}
 
 // Super-Admin-only bulk import. Downloads the same sample the backend
 // generates (GET /auth/admin/users/bulk/sample) via the shared `api` client
@@ -424,21 +466,31 @@ function BulkUploadModal({ onClose }: { onClose: () => void }) {
               className="block w-full text-sm text-gray-600 file:mr-3 file:py-2 file:px-3 file:rounded-lg file:border-0 file:bg-gray-100 file:text-gray-700 file:font-semibold hover:file:bg-gray-200" />
             <p className="text-xs text-gray-400 mt-1.5">
               Required columns: first_name, last_name, email, mobile, designation, role.
-              Leave temp_password blank to auto-generate a strong password per user.
+              middle_name is optional. Leave temp_password blank to auto-generate a strong
+              password per user — every generated password is shown here immediately after
+              upload so you can share it with the new user; it is never shown again after this.
             </p>
           </div>
 
           {result && (
             <div>
-              <div className="flex items-center gap-3 mb-2 text-sm">
-                <span className="font-semibold text-gray-700">{result.total} row{result.total === 1 ? "" : "s"} processed</span>
-                <span className="flex items-center gap-1 text-green-700"><CheckCircle2 size={14} /> {result.created} created</span>
-                {result.failed > 0 && <span className="flex items-center gap-1 text-red-600"><XCircle size={14} /> {result.failed} failed</span>}
+              <div className="flex items-center justify-between mb-2">
+                <div className="flex items-center gap-3 text-sm">
+                  <span className="font-semibold text-gray-700">{result.total} row{result.total === 1 ? "" : "s"} processed</span>
+                  <span className="flex items-center gap-1 text-green-700"><CheckCircle2 size={14} /> {result.created} created</span>
+                  {result.failed > 0 && <span className="flex items-center gap-1 text-red-600"><XCircle size={14} /> {result.failed} failed</span>}
+                </div>
+                {result.results.some((r) => r.status === "created" && r.temp_password) && (
+                  <button type="button" onClick={() => copyAllCredentials(result.results)}
+                    className="flex items-center gap-1.5 px-3 py-1.5 border border-gray-300 rounded-lg text-xs font-semibold text-gray-700 hover:bg-gray-50">
+                    <ClipboardCopy size={13} /> Copy All Credentials
+                  </button>
+                )}
               </div>
               <div className="border border-gray-200 rounded-xl overflow-hidden max-h-64 overflow-y-auto">
                 <table className="w-full text-xs">
                   <thead className="bg-gray-50 border-b sticky top-0">
-                    <tr>{["Row", "Email", "Status", "Details"].map((h) => (
+                    <tr>{["Row", "Name", "Email", "Status", "Temporary Password"].map((h) => (
                       <th key={h} className="text-left px-3 py-2 font-semibold text-gray-600">{h}</th>
                     ))}</tr>
                   </thead>
@@ -446,6 +498,7 @@ function BulkUploadModal({ onClose }: { onClose: () => void }) {
                     {result.results.map((r) => (
                       <tr key={r.row}>
                         <td className="px-3 py-2 text-gray-500">{r.row}</td>
+                        <td className="px-3 py-2 text-gray-700">{r.full_name || "—"}</td>
                         <td className="px-3 py-2 text-gray-700">{r.email ?? "—"}</td>
                         <td className="px-3 py-2">
                           {r.status === "created"
@@ -456,7 +509,10 @@ function BulkUploadModal({ onClose }: { onClose: () => void }) {
                           {r.status === "created" && r.temp_password ? (
                             <span className="flex items-center gap-1.5">
                               <code className="font-mono text-[11px] bg-gray-100 px-1.5 py-0.5 rounded">{r.temp_password}</code>
-                              <button type="button" onClick={() => copyToClipboard(r.temp_password!)} className="text-gray-400 hover:text-gray-600"><Copy size={12} /></button>
+                              <button type="button" onClick={() => copyToClipboard(r.temp_password!)} className="text-gray-400 hover:text-gray-600" title="Copy password"><Copy size={12} /></button>
+                              <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${r.password_generated ? "bg-blue-100 text-blue-700" : "bg-gray-100 text-gray-600"}`}>
+                                {r.password_generated ? "Auto-generated" : "From CSV"}
+                              </span>
                             </span>
                           ) : (r.error ?? "—")}
                         </td>
@@ -481,6 +537,60 @@ function BulkUploadModal({ onClose }: { onClose: () => void }) {
   );
 }
 
+// Collects a required reason (+ optional remarks) before deactivating a
+// user — reactivation has no such requirement and stays a plain confirm
+// (see the Power/PowerOff action below), matching how EditUserModal/
+// CreateUserModal are each dedicated to one action rather than one modal
+// branching on a mode flag.
+function DeactivateUserModal({ user, onClose, onConfirm, isPending }: {
+  user: AdminUser; onClose: () => void; onConfirm: (reasonType: string, remarks: string) => void; isPending: boolean;
+}) {
+  const [reasonType, setReasonType] = useState("retired");
+  const [remarks, setRemarks] = useState("");
+  const REMARKS_MAX = 1000;
+
+  return (
+    <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-6" onClick={onClose}>
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md" onClick={(e) => e.stopPropagation()}>
+        <div className="px-6 py-5 border-b border-gray-200">
+          <h3 className="text-xl font-bold text-gray-900">Deactivate User</h3>
+          <p className="text-sm text-gray-500 mt-1">{user.full_name} will no longer be able to sign in. Their historical records remain unchanged.</p>
+        </div>
+        <div className="px-6 py-5 space-y-4">
+          <div>
+            <label className={LABEL}>Reason *</label>
+            <select value={reasonType} onChange={(e) => setReasonType(e.target.value)} className={INPUT}>
+              {DEACTIVATION_REASON_OPTIONS.map((r) => <option key={r.value} value={r.value}>{r.label}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className={LABEL}>Additional Remarks {reasonType === "other" ? "*" : "(optional)"}</label>
+            <textarea
+              value={remarks}
+              onChange={(e) => setRemarks(e.target.value.slice(0, REMARKS_MAX))}
+              maxLength={REMARKS_MAX}
+              rows={3}
+              className={`${INPUT} resize-none`}
+              placeholder="Optional details…"
+            />
+            <p className="text-xs text-gray-400 mt-1 text-right">{remarks.length}/{REMARKS_MAX}</p>
+          </div>
+        </div>
+        <div className="px-6 py-4 border-t border-gray-200 flex justify-end gap-3">
+          <button onClick={onClose} className="px-4 py-2.5 rounded-lg text-sm font-semibold text-gray-600 hover:bg-gray-100">Cancel</button>
+          <button
+            onClick={() => onConfirm(reasonType, remarks)}
+            disabled={isPending || (reasonType === "other" && !remarks.trim())}
+            className="flex items-center gap-1 px-5 py-2.5 bg-red-600 text-white rounded-lg text-sm font-semibold hover:bg-red-700 disabled:opacity-50"
+          >
+            {isPending ? <Loader2 size={15} className="animate-spin" /> : null} Confirm Deactivation
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function UserManagementSection() {
   const qc = useQueryClient();
   const activeRole = useActiveRole();
@@ -491,10 +601,12 @@ export function UserManagementSection() {
   const [showCreate, setShowCreate] = useState(false);
   const [showBulkUpload, setShowBulkUpload] = useState(false);
   const [editingUser, setEditingUser] = useState<AdminUser | null>(null);
+  const [deactivatingUser, setDeactivatingUser] = useState<AdminUser | null>(null);
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
 
   const { data: users = [], isLoading } = useQuery<AdminUser[]>({
-    queryKey: ["user-management-users"],
-    queryFn: async () => (await api.get("/auth/admin/users")).data,
+    queryKey: ["user-management-users", statusFilter],
+    queryFn: async () => (await api.get(`/auth/admin/users?status=${statusFilter}`)).data,
   });
   const { data: establishments = [] } = useQuery<Establishment[]>({
     queryKey: ["admin-establishments-all"], queryFn: async () => (await api.get("/admin/establishments/all")).data,
@@ -502,26 +614,23 @@ export function UserManagementSection() {
   const { data: departments = [] } = useQuery<Department[]>({
     queryKey: ["admin-departments-all"], queryFn: async () => (await api.get("/admin/departments/all")).data,
   });
+  const { data: roles = [] } = useQuery<RoleSummary[]>({
+    queryKey: ["admin-roles"], queryFn: async () => (await api.get("/auth/admin/roles")).data,
+    enabled: isSuperAdmin,
+  });
+  const roleOptions = buildRoleOptions(roles);
 
   const toggleStatus = useMutation({
-    mutationFn: ({ id, is_active }: { id: string; is_active: boolean }) =>
-      api.patch(`/auth/admin/users/${id}/status`, { is_active }),
+    mutationFn: ({ id, is_active, reason_type, remarks }: { id: string; is_active: boolean; reason_type?: string; remarks?: string }) =>
+      api.patch(`/auth/admin/users/${id}/status`, { is_active, reason_type, remarks }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["user-management-users"] });
       showSuccess("User status updated.");
-    },
-    onError: () => toast.error("Could not update user status."),
-  });
-
-  const deleteUser = useMutation({
-    mutationFn: (id: string) => api.delete(`/auth/admin/users/${id}`),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["user-management-users"] });
-      showSuccess("User deleted.");
+      setDeactivatingUser(null);
     },
     onError: (err: unknown) => {
       const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
-      toast.error(typeof msg === "string" ? msg : "Could not delete user.");
+      toast.error(typeof msg === "string" ? msg : "Could not update user status.");
     },
   });
 
@@ -530,6 +639,16 @@ export function UserManagementSection() {
       <div className="flex items-center justify-between">
         <h2 className="text-lg font-bold text-gray-800">Users ({users.length})</h2>
         <div className="flex items-center gap-2">
+          <select
+            value={statusFilter}
+            onChange={(e) => setStatusFilter(e.target.value as StatusFilter)}
+            className="border border-gray-300 rounded-lg px-3 py-2.5 text-sm font-semibold text-gray-700 focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]"
+            aria-label="Filter by status"
+          >
+            <option value="all">Status: All</option>
+            <option value="active">Status: Active</option>
+            <option value="inactive">Status: Inactive</option>
+          </select>
           {isSuperAdmin && (
             <button onClick={() => setShowBulkUpload(true)}
               className="flex items-center gap-1.5 px-4 py-2.5 border border-gray-300 text-gray-700 rounded-lg text-sm font-semibold hover:bg-gray-50">
@@ -556,7 +675,7 @@ export function UserManagementSection() {
             <tbody className="divide-y divide-gray-50">
               {users.map((u) => (
                 <tr key={u.id} className="hover:bg-gray-50">
-                  <td className="px-4 py-3 font-medium text-gray-900 whitespace-nowrap">{u.first_name} {u.last_name}</td>
+                  <td className="px-4 py-3 font-medium text-gray-900 whitespace-nowrap">{u.full_name}</td>
                   <td className="px-4 py-3 text-gray-600 text-xs">{u.email}</td>
                   <td className="px-4 py-3 text-gray-500">{u.designation ?? "—"}</td>
                   <td className="px-4 py-3 text-gray-500">{u.department_name ?? "—"}</td>
@@ -568,46 +687,33 @@ export function UserManagementSection() {
                     {u.must_change_password && (
                       <span className="ml-1.5 px-2 py-0.5 bg-amber-100 text-amber-700 rounded-full text-xs font-semibold">Temp Password</span>
                     )}
+                    {!u.is_active && u.deactivation_reason_type && (
+                      <p className="text-xs text-gray-400 mt-1">
+                        {DEACTIVATION_REASON_OPTIONS.find((r) => r.value === u.deactivation_reason_type)?.label ?? u.deactivation_reason_type}
+                        {u.deactivated_at ? ` — ${new Date(u.deactivated_at).toLocaleDateString()}` : ""}
+                      </p>
+                    )}
                   </td>
                   <td className="px-4 py-3">
                     <div className="flex gap-1">
-                      <button onClick={() => setEditingUser(u)} title="Edit" className="p-2 rounded-lg hover:bg-gray-100 text-gray-400 hover:text-gray-600">
-                        <Pencil size={15} />
-                      </button>
-                      <button
-                        onClick={async () => {
-                          if (u.is_active) {
-                            const confirmed = await confirmAction({
-                              title: "Deactivate this user?",
-                              text: `${u.full_name} will no longer be able to sign in.`,
-                              confirmText: "Deactivate",
-                              danger: true,
-                            });
-                            if (!confirmed) return;
-                          }
-                          toggleStatus.mutate({ id: u.id, is_active: !u.is_active });
-                        }}
-                        title={u.is_active ? "Deactivate" : "Activate"}
-                        className={`p-2 rounded-lg hover:bg-gray-100 ${u.is_active ? "text-gray-400 hover:text-red-500" : "text-gray-400 hover:text-green-600"}`}
-                      >
-                        {u.is_active ? <PowerOff size={15} /> : <Power size={15} />}
-                      </button>
+                      {isSuperAdmin && (
+                        <button onClick={() => setEditingUser(u)} title="Edit" className="p-2 rounded-lg hover:bg-gray-100 text-gray-400 hover:text-gray-600">
+                          <Pencil size={15} />
+                        </button>
+                      )}
                       {isSuperAdmin && (
                         <button
                           onClick={async () => {
-                            const confirmed = await confirmAction({
-                              title: "Delete this user?",
-                              text: `${u.full_name} will be permanently removed. This cannot be undone.`,
-                              confirmText: "Delete",
-                              danger: true,
-                            });
-                            if (confirmed) deleteUser.mutate(u.id);
+                            if (!u.is_active) {
+                              toggleStatus.mutate({ id: u.id, is_active: true });
+                              return;
+                            }
+                            setDeactivatingUser(u);
                           }}
-                          disabled={deleteUser.isPending}
-                          title="Delete"
-                          className="p-2 rounded-lg hover:bg-red-50 text-gray-400 hover:text-red-600 disabled:opacity-50"
+                          title={u.is_active ? "Deactivate" : "Activate"}
+                          className={`p-2 rounded-lg hover:bg-gray-100 ${u.is_active ? "text-gray-400 hover:text-red-500" : "text-gray-400 hover:text-green-600"}`}
                         >
-                          <Trash2 size={15} />
+                          {u.is_active ? <PowerOff size={15} /> : <Power size={15} />}
                         </button>
                       )}
                     </div>
@@ -620,10 +726,20 @@ export function UserManagementSection() {
       )}
 
       {showCreate && (
-        <CreateUserModal onClose={() => setShowCreate(false)} establishments={establishments} departments={departments} />
+        <CreateUserModal onClose={() => setShowCreate(false)} establishments={establishments} departments={departments} roleOptions={roleOptions} />
       )}
       {editingUser && (
-        <EditUserModal user={editingUser} onClose={() => setEditingUser(null)} establishments={establishments} departments={departments} />
+        <EditUserModal user={editingUser} onClose={() => setEditingUser(null)} establishments={establishments} departments={departments} roleOptions={roleOptions} />
+      )}
+      {deactivatingUser && (
+        <DeactivateUserModal
+          user={deactivatingUser}
+          onClose={() => setDeactivatingUser(null)}
+          isPending={toggleStatus.isPending}
+          onConfirm={(reason_type, remarks) =>
+            toggleStatus.mutate({ id: deactivatingUser.id, is_active: false, reason_type, remarks })
+          }
+        />
       )}
       {isSuperAdmin && showBulkUpload && (
         <BulkUploadModal onClose={() => setShowBulkUpload(false)} />

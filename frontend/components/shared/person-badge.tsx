@@ -9,6 +9,7 @@ export interface PersonInfo {
   full_name: string;
   designation?: string | null;
   department_name?: string | null;
+  is_active?: boolean;
 }
 
 export function PersonBadge({
@@ -26,11 +27,12 @@ export function PersonBadge({
   if (!person) return <span className={cn("text-gray-400", className)}>{fallback}</span>;
 
   const meta = [person.designation, person.department_name].filter(Boolean).join(" • ");
+  const displayName = person.is_active === false ? `${person.full_name} (Inactive)` : person.full_name;
 
   if (compact) {
     return (
       <span className={cn("inline-block leading-snug", className)}>
-        <span className="font-semibold text-gray-900">{person.full_name}</span>
+        <span className="font-semibold text-gray-900">{displayName}</span>
         {meta && <span className="block text-xs text-gray-500">({meta})</span>}
       </span>
     );
@@ -38,7 +40,7 @@ export function PersonBadge({
 
   return (
     <span className={cn("inline-block leading-snug", className)}>
-      <span className="block font-semibold text-gray-900">{person.full_name}</span>
+      <span className="block font-semibold text-gray-900">{displayName}</span>
       {person.designation && <span className="block text-sm text-gray-600">{person.designation}</span>}
       {person.department_name && <span className="block text-sm text-gray-500">{person.department_name}</span>}
     </span>

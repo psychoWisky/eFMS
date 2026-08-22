@@ -6,9 +6,10 @@ import { toast } from "sonner";
 import { confirmAction, showSuccess } from "@/lib/alert";
 import {
   Plus, Trash2, Eye, EyeOff, Tag, Users, Building2, Layers,
-  Loader2, AlertTriangle, PenLine, ShieldX,
+  Loader2, AlertTriangle, PenLine, ShieldX, ShieldCheck,
 } from "lucide-react";
 import { UserManagementSection } from "./user-management";
+import { RoleManagementSection } from "./role-management";
 
 interface Item { id: string; name: string; is_active: boolean; label?: string; designation?: string; email?: string; user_id?: string; code?: string; establishment_id?: string; }
 interface Establishment { id: string; name: string; code: string | null; is_active: boolean; }
@@ -16,7 +17,7 @@ interface Department { id: string; name: string; code: string | null; establishm
 interface SignUser { id: string; email: string; full_name: string; designation: string | null; active_role: string | null; can_sign: boolean; }
 interface AdminUser { id: string; email: string; full_name: string; active_role: string | null; designation: string | null; }
 
-type Tab = "users" | "establishments" | "departments" | "categories" | "priorities" | "signatures";
+type Tab = "users" | "roles" | "establishments" | "departments" | "categories" | "priorities" | "signatures";
 
 const INPUT = "w-full border border-gray-300 rounded-lg px-3 py-2.5 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]";
 const LABEL = "block text-sm font-semibold text-gray-600 mb-1";
@@ -80,6 +81,7 @@ export function AdminPanel() {
 
   const TABS: { id: Tab; label: string; icon: React.ElementType; badge?: number }[] = [
     { id: "users",          label: "User Management", icon: Users },
+    { id: "roles",          label: "Roles",           icon: ShieldCheck },
     { id: "establishments", label: "Establishments", icon: Building2 },
     { id: "departments",    label: "Departments",    icon: Layers },
     { id: "categories",     label: "Categories",     icon: Tag },
@@ -107,6 +109,9 @@ export function AdminPanel() {
 
       {/* ── USER MANAGEMENT ── */}
       {tab === "users" && <UserManagementSection />}
+
+      {/* ── ROLE MANAGEMENT ── */}
+      {tab === "roles" && <RoleManagementSection />}
 
       {/* ── ESTABLISHMENTS ── */}
       {tab === "establishments" && (

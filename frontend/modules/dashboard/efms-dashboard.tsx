@@ -28,7 +28,7 @@ interface DocketItem {
 }
 interface ReleasedItem {
   docket_id: string; file_id: string; ref_number: string; subject: string;
-  category: string; status: string; released_at: string | null; created_by: string;
+  category: string; released_at: string | null;
 }
 
 type Section = "docket" | "files" | "new";
@@ -81,17 +81,22 @@ export function EFMSDashboard() {
     queryFn: async () => (await api.get("/efms/files?outbox=true")).data,
   });
 
-  // Released dept files: visible to all dept members in Files section
+  // Released Files: files the current user themself created AND released —
+  // GET /docket/released/mine already scopes by released_by == me (and, since
+  // only the creator can ever release a file, created_by == me too), so this
+  // never includes files released by other department members. Deliberately
+  // NOT /docket/released (department-wide) — that endpoint is left in place
+  // for any other consumer, just no longer used by this dashboard.
   const { data: releasedFiles = [], isLoading: loadReleased } = useQuery<ReleasedItem[]>({
-    queryKey: ["docket-released"],
-    queryFn: async () => (await api.get("/docket/released")).data,
+    queryKey: ["docket-released-mine"],
+    queryFn: async () => (await api.get("/docket/released/mine")).data,
   });
 
   const releaseMutation = useMutation({
     mutationFn: (fileId: string) => api.post(`/docket/${fileId}/release`, {}),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["my-docket"] });
-      qc.invalidateQueries({ queryKey: ["docket-released"] });
+      qc.invalidateQueries({ queryKey: ["docket-released-mine"] });
       showSuccess("File released to your department.");
     },
     onError: (err: unknown) => {
@@ -324,8 +329,8 @@ export function EFMSDashboard() {
             {/* Released dept files */}
             {(loadReleased || releasedFiles.length > 0) && (
               <div>
-                <h2 className="text-xl font-bold text-[#1A1A2E] mt-2">Department Files</h2>
-                <p className="text-base text-gray-500 mt-0.5">Files released by colleagues in your department.</p>
+                <h2 className="text-xl font-bold text-[#1A1A2E] mt-2">Released Files</h2>
+                <p className="text-base text-gray-500 mt-0.5">Files you have released.</p>
 
                 {loadReleased ? (
                   <div className="flex items-center justify-center py-10 gap-3 text-gray-400 mt-3"><Loader2 size={22} className="animate-spin" /> Loading…</div>

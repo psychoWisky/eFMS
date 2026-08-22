@@ -2,17 +2,21 @@
 import { motion, AnimatePresence } from "framer-motion";
 import { usePathname, useRouter } from "next/navigation";
 import { LayoutDashboard, ShieldCheck, ChevronLeft, ChevronRight, Search, History } from "lucide-react";
-import { useActiveRole, type EfmsRole } from "@/stores/auth.store";
+import { useActiveRole } from "@/stores/auth.store";
 import { guardedNavigate } from "@/hooks/use-unsaved-changes-guard";
 import { cn } from "@/lib/utils";
 
-interface NavItem { label: string; icon: React.ElementType; href: string; roles: EfmsRole[]; }
+// All non-SUPER_ADMIN roles are equal, ordinary eFMS roles — including any
+// role Super Admin creates through Role Management. Normal eFMS workflow
+// pages are therefore available to every role except super_admin (which
+// only sees Admin Panel), rather than an enumerated legacy-role list.
+interface NavItem { label: string; icon: React.ElementType; href: string; audience: "normal" | "super_admin"; }
 
 const NAV_ITEMS: NavItem[] = [
-  { label: "Dashboard",    icon: LayoutDashboard, href: "/dashboard", roles: ["efms_officer","efms_admin","registrar","dispatch_officer","hod","faculty"] },
-  { label: "Search Files", icon: Search,          href: "/search",    roles: ["efms_officer","efms_admin","registrar","dispatch_officer","hod","faculty"] },
-  { label: "Tracking History", icon: History,     href: "/tracking",  roles: ["efms_officer","efms_admin","registrar","dispatch_officer","hod","faculty"] },
-  { label: "Admin Panel",  icon: ShieldCheck,     href: "/admin",     roles: ["admin","super_admin"] },
+  { label: "Dashboard",    icon: LayoutDashboard, href: "/dashboard", audience: "normal" },
+  { label: "Search Files", icon: Search,          href: "/search",    audience: "normal" },
+  { label: "Tracking History", icon: History,     href: "/tracking",  audience: "normal" },
+  { label: "Admin Panel",  icon: ShieldCheck,     href: "/admin",     audience: "super_admin" },
 ];
 
 interface SidebarProps { collapsed: boolean; onToggle: () => void; }
@@ -21,7 +25,9 @@ export function EFMSSidebar({ collapsed, onToggle }: SidebarProps) {
   const pathname = usePathname();
   const router = useRouter();
   const role = useActiveRole();
-  const visible = NAV_ITEMS.filter((item) => !role || item.roles.includes(role));
+  const visible = NAV_ITEMS.filter((item) =>
+    !role ? true : item.audience === "super_admin" ? role === "super_admin" : role !== "super_admin"
+  );
 
   return (
     <motion.aside

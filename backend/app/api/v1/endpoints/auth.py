@@ -6,10 +6,10 @@ from email.mime.text import MIMEText
 from datetime import datetime, timezone, timedelta, date
 from typing import Optional, List
 from uuid import UUID
-from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Query
 from fastapi.responses import Response
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, func, update
 from sqlalchemy.orm import selectinload
 from sqlalchemy.exc import IntegrityError
 from pydantic import BaseModel, EmailStr, ValidationError
@@ -22,16 +22,18 @@ from app.core.security import (
 )
 from app.core.config import settings
 from app.core.dependencies import get_current_user, require_roles
-from app.models.user import User, UserRole, RefreshToken, SystemRole, EFMS_ASSIGNABLE_ROLES
+import re
+
+from app.models.user import User, UserRole, RefreshToken, SystemRole, DeactivationReasonType, Role
 from app.models.efms_extra import OTP
 from app.schemas.auth import LoginRequest, TokenResponse, RefreshRequest, UserBrief
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
-_super = require_roles(SystemRole.SUPER_ADMIN, SystemRole.ADMIN)
-# Bulk import and delete are explicitly Super-Admin-only (stricter than the
-# existing _super, which also admits plain Admin) — reuses the same
-# require_roles() mechanism, just with a narrower role set, rather than a
-# new authorization system.
+# SUPER_ADMIN is the only privileged role — no other role (including plain
+# ADMIN) may perform user management. _super_admin_only is kept as a
+# separate name (identical role set) only because call sites already
+# reference both names; both now enforce the same SUPER_ADMIN-only gate.
+_super = require_roles(SystemRole.SUPER_ADMIN)
 _super_admin_only = require_roles(SystemRole.SUPER_ADMIN)
 
 
@@ -132,7 +134,7 @@ def build_user_brief(user: User) -> UserBrief:
 async def _issue_tokens(user: User, db: AsyncSession) -> TokenResponse:
     access_token = create_access_token(
         subject=str(user.id),
-        extra_claims={"role": user.active_role.value if user.active_role else None},
+        extra_claims={"role": user.active_role if user.active_role else None},
     )
     refresh_token = create_refresh_token(subject=str(user.id))
     token_hash = hashlib.sha256(refresh_token.encode()).hexdigest()
@@ -287,6 +289,7 @@ class AdminUserOut(BaseModel):
     id: UUID
     email: str
     first_name: Optional[str]
+    middle_name: Optional[str] = None
     last_name: Optional[str]
     full_name: str
     mobile: Optional[str]
@@ -301,13 +304,17 @@ class AdminUserOut(BaseModel):
     is_active: bool
     must_change_password: bool
     can_sign: bool
+    deactivation_reason_type: Optional[str] = None
+    deactivation_remarks: Optional[str] = None
+    deactivated_at: Optional[datetime] = None
+    deactivated_by: Optional[UUID] = None
     model_config = {"from_attributes": True}
 
     @classmethod
     def from_user(cls, u: "User") -> "AdminUserOut":
         return cls(
             id=u.id, email=u.email,
-            first_name=u.first_name, last_name=u.last_name, full_name=u.full_name,
+            first_name=u.first_name, middle_name=u.middle_name, last_name=u.last_name, full_name=u.full_name,
             mobile=u.mobile, employee_code=u.employee_code,
             date_of_birth=u.date_of_birth.isoformat() if u.date_of_birth else None,
             designation=u.designation,
@@ -315,10 +322,14 @@ class AdminUserOut(BaseModel):
             establishment_name=u.establishment.name if u.establishment else None,
             department_id=u.department_id,
             department_name=u.department.name if u.department else None,
-            active_role=u.active_role.value if u.active_role else None,
+            active_role=u.active_role,
             is_active=u.is_active,
             must_change_password=u.must_change_password,
             can_sign=u.can_sign,
+            deactivation_reason_type=u.deactivation_reason_type.value if u.deactivation_reason_type else None,
+            deactivation_remarks=u.deactivation_remarks,
+            deactivated_at=u.deactivated_at,
+            deactivated_by=u.deactivated_by,
         )
 
 
@@ -334,7 +345,7 @@ async def _load_user(db: AsyncSession, uid: UUID) -> User:
     return user
 
 
-async def _set_single_role(db: AsyncSession, user: User, role: SystemRole) -> None:
+async def _set_single_role(db: AsyncSession, user: User, role: str) -> None:
     """Replace whatever UserRole rows a user has with exactly one, matching
     active_role. Roles here are a single organizational context, not a
     multi-role grant list."""
@@ -346,17 +357,23 @@ async def _set_single_role(db: AsyncSession, user: User, role: SystemRole) -> No
 
 
 @router.get("/admin/users", response_model=List[AdminUserOut])
-async def list_admin_users(db: AsyncSession = Depends(get_db), _: User = Depends(_super)):
-    result = await db.execute(
-        select(User)
-        .options(selectinload(User.department), selectinload(User.establishment))
-        .order_by(User.created_at.desc())
-    )
+async def list_admin_users(
+    status_filter: str = Query("all", alias="status", pattern="^(all|active|inactive)$"),
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(_super),
+):
+    q = select(User).options(selectinload(User.department), selectinload(User.establishment))
+    if status_filter == "active":
+        q = q.where(User.is_active == True)
+    elif status_filter == "inactive":
+        q = q.where(User.is_active == False)
+    result = await db.execute(q.order_by(User.created_at.desc()))
     return [AdminUserOut.from_user(u) for u in result.scalars().all()]
 
 
 class CreateUserRequest(BaseModel):
     first_name: str
+    middle_name: Optional[str] = None
     last_name: str
     email: EmailStr
     mobile: str
@@ -370,6 +387,25 @@ class CreateUserRequest(BaseModel):
     temp_password: str
 
 
+async def _validate_assignable_role(db: AsyncSession, name: str) -> str:
+    """Validates a role name submitted for assignment to a user (create or
+    edit) against the `roles` catalog, returning the canonical name string.
+
+    All non-SUPER_ADMIN roles are equal, ordinary eFMS roles — any role
+    that exists in `roles` is assignable, whether it's one of the original
+    12 development/test roles or a role Super Admin created through Role
+    Management. There is no separate eligibility list: role names carry no
+    inherent meaning beyond "does this role exist." Assigning a role can
+    never grant SUPER_ADMIN-equivalent privilege regardless: the only place
+    that privilege is checked is User.is_super_admin, an explicit
+    `== "super_admin"` comparison this table has no influence over."""
+    result = await db.execute(select(Role).where(func.lower(Role.name) == name.strip().lower()))
+    role = result.scalar_one_or_none()
+    if not role:
+        raise HTTPException(400, "Invalid role.")
+    return role.name
+
+
 async def _create_user_record(db: AsyncSession, body: CreateUserRequest) -> User:
     """Core "create one user" logic — role/password-policy/email-uniqueness
     validation, then the actual User + UserRole rows. Shared by the single-
@@ -379,12 +415,7 @@ async def _create_user_record(db: AsyncSession, body: CreateUserRequest) -> User
     NOT commit — callers decide their own commit/rollback boundary (the
     single-user endpoint commits once; the bulk importer commits per row so
     one bad row can't roll back rows that already succeeded)."""
-    role_map = {r.value: r for r in SystemRole}
-    role = role_map.get(body.role)
-    if not role:
-        raise HTTPException(400, "Invalid role.")
-    if role not in EFMS_ASSIGNABLE_ROLES:
-        raise HTTPException(400, "This role cannot be assigned to eFMS users.")
+    role = await _validate_assignable_role(db, body.role)
     if not is_password_policy_compliant(body.temp_password):
         raise HTTPException(400, PASSWORD_POLICY_MESSAGE)
 
@@ -397,6 +428,7 @@ async def _create_user_record(db: AsyncSession, body: CreateUserRequest) -> User
         email=email,
         hashed_password=hash_password(body.temp_password),
         first_name=body.first_name.strip(),
+        middle_name=(body.middle_name or "").strip() or None,
         last_name=body.last_name.strip(),
         mobile=body.mobile,
         employee_code=body.employee_code,
@@ -429,7 +461,7 @@ async def create_user(
 # ── Bulk user import (Super Admin only) ────────────────────────────────────────
 
 _BULK_CSV_COLUMNS = [
-    "first_name", "last_name", "email", "mobile", "employee_code",
+    "first_name", "middle_name", "last_name", "email", "mobile", "employee_code",
     "date_of_birth", "designation", "establishment_id", "department_id",
     "role", "is_active", "temp_password",
 ]
@@ -440,13 +472,15 @@ _BULK_REQUIRED_COLUMNS = {"first_name", "last_name", "email", "mobile", "designa
 async def download_bulk_user_sample(_: User = Depends(_super_admin_only)):
     """A ready-to-fill CSV template for bulk user creation — same columns
     CreateUserRequest accepts (see _BULK_CSV_COLUMNS), so what validates here
-    is exactly what validates on single-user creation. temp_password may be
-    left blank; a strong one is auto-generated per row (see bulk_create_users)."""
+    is exactly what validates on single-user creation. middle_name may be
+    left blank (optional). temp_password may be left blank; a strong one is
+    auto-generated per row (see bulk_create_users) and returned in the
+    upload result — never persisted in plaintext or logged."""
     buf = io.StringIO()
     writer = csv.writer(buf)
     writer.writerow(_BULK_CSV_COLUMNS)
     writer.writerow([
-        "John", "Doe", "john.doe@example.com", "9876543210", "EMP001",
+        "John", "", "Doe", "john.doe@example.com", "9876543210", "EMP001",
         "1990-01-15", "Assistant Registrar", "", "", "efms_officer", "true", "",
     ])
     # UTF-8 BOM so Excel opens the file with the correct encoding by default.
@@ -461,9 +495,11 @@ async def download_bulk_user_sample(_: User = Depends(_super_admin_only)):
 class BulkUserRowResult(BaseModel):
     row: int
     email: Optional[str] = None
+    full_name: Optional[str] = None
     status: str  # "created" | "failed"
     error: Optional[str] = None
     temp_password: Optional[str] = None
+    password_generated: bool = False
 
 
 class BulkUserUploadResult(BaseModel):
@@ -519,11 +555,15 @@ async def bulk_create_users(
     for idx, raw_row in enumerate(reader, start=2):  # row 1 is the header
         row = {(k or "").strip(): (v or "").strip() for k, v in raw_row.items() if k}
         email = row.get("email", "").lower()
-        temp_password = row.get("temp_password") or generate_temp_password()
+        supplied_password = row.get("temp_password") or ""
+        temp_password = supplied_password or generate_temp_password()
+        password_generated = not supplied_password
+        full_name = " ".join(p for p in (row.get("first_name"), row.get("middle_name"), row.get("last_name")) if p)
 
         try:
             body = CreateUserRequest(
                 first_name=row.get("first_name", ""),
+                middle_name=row.get("middle_name") or None,
                 last_name=row.get("last_name", ""),
                 email=email,
                 mobile=row.get("mobile", ""),
@@ -555,13 +595,17 @@ async def bulk_create_users(
             continue
 
         created_count += 1
-        results.append(BulkUserRowResult(row=idx, email=email, status="created", temp_password=temp_password))
+        results.append(BulkUserRowResult(
+            row=idx, email=email, full_name=full_name, status="created",
+            temp_password=temp_password, password_generated=password_generated,
+        ))
 
     return BulkUserUploadResult(total=len(results), created=created_count, failed=len(results) - created_count, results=results)
 
 
 class EditUserRequest(BaseModel):
     first_name: Optional[str] = None
+    middle_name: Optional[str] = None
     last_name: Optional[str] = None
     email: Optional[EmailStr] = None
     mobile: Optional[str] = None
@@ -591,6 +635,8 @@ async def edit_user(
             user.email = email
     if body.first_name is not None:
         user.first_name = body.first_name.strip()
+    if body.middle_name is not None:
+        user.middle_name = body.middle_name.strip() or None
     if body.last_name is not None:
         user.last_name = body.last_name.strip()
     if body.mobile is not None:
@@ -606,16 +652,20 @@ async def edit_user(
     if body.department_id is not None:
         user.department_id = body.department_id
     if body.role is not None:
-        role_map = {r.value: r for r in SystemRole}
-        role = role_map.get(body.role)
-        if not role:
-            raise HTTPException(400, "Invalid role.")
-        # Grandfather legacy roles: re-submitting a user's existing role is a
-        # no-op regardless of the allow-list, so editing other fields on a
-        # legacy-role user never breaks just because their role predates
-        # EFMS_ASSIGNABLE_ROLES. Only an actual change is checked against it.
-        if role != user.active_role and role not in EFMS_ASSIGNABLE_ROLES:
-            raise HTTPException(400, "This role cannot be assigned to eFMS users.")
+        # Re-submitting a user's existing role is a no-op that skips
+        # catalog validation entirely — only an actual role change is
+        # checked against the roles table.
+        role = body.role if body.role == user.active_role else await _validate_assignable_role(db, body.role)
+        if (
+            role != SystemRole.SUPER_ADMIN
+            and user.active_role == SystemRole.SUPER_ADMIN
+            and user.is_active
+            and await _count_other_active_super_admins(db, uid) == 0
+        ):
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "Cannot change the role of the only active Super Admin. Assign Super Admin to another user first.",
+            )
         await _set_single_role(db, user, role)
 
     await db.commit()
@@ -624,6 +674,20 @@ async def edit_user(
 
 class UserStatusRequest(BaseModel):
     is_active: bool
+    # Required (validated below) when deactivating; ignored when reactivating.
+    reason_type: Optional[str] = None
+    remarks: Optional[str] = None
+
+
+async def _count_other_active_super_admins(db: AsyncSession, exclude_uid: UUID) -> int:
+    result = await db.execute(
+        select(func.count()).select_from(User).where(
+            User.active_role == SystemRole.SUPER_ADMIN,
+            User.is_active == True,
+            User.id != exclude_uid,
+        )
+    )
+    return result.scalar_one()
 
 
 @router.patch("/admin/users/{uid}/status", response_model=AdminUserOut)
@@ -631,10 +695,37 @@ async def set_user_status(
     uid: UUID,
     body: UserStatusRequest,
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(_super),
+    current_user: User = Depends(_super),
 ):
     user = await _load_user(db, uid)
-    user.is_active = body.is_active
+
+    if body.is_active:
+        user.is_active = True
+    else:
+        if (
+            user.active_role == SystemRole.SUPER_ADMIN
+            and user.is_active
+            and await _count_other_active_super_admins(db, uid) == 0
+        ):
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "Cannot deactivate the only active Super Admin. Assign Super Admin to another user first.",
+            )
+
+        reason_map = {r.value: r for r in DeactivationReasonType}
+        reason = reason_map.get((body.reason_type or "").strip())
+        if not reason:
+            raise HTTPException(400, "A deactivation reason is required.")
+        remarks = (body.remarks or "").strip() or None
+        if remarks and len(remarks) > 1000:
+            raise HTTPException(400, "Remarks must be 1000 characters or fewer.")
+
+        user.is_active = False
+        user.deactivation_reason_type = reason
+        user.deactivation_remarks = remarks
+        user.deactivated_at = datetime.now(timezone.utc)
+        user.deactivated_by = current_user.id
+
     await db.commit()
     return AdminUserOut.from_user(await _load_user(db, uid))
 
@@ -656,36 +747,153 @@ async def reset_user_password(
     return {"temp_password": temp_password}
 
 
-@router.delete("/admin/users/{uid}", status_code=204)
-async def delete_user(
-    uid: UUID,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(_super_admin_only),
-):
-    """Permanently remove a user — Super Admin only (stricter than every
-    other endpoint in this section, which also admits plain Admin). This is
-    a real hard delete, not a soft-delete: the app has no
-    deleted_at/is_deleted pattern anywhere, and is_active already covers
-    "disable without deleting" (see set_user_status above), so a separate
-    "Delete" action is expected to actually remove the row.
 
-    Most non-trivial User FKs across the schema (EfmsFile.created_by,
-    RouteEntry.from_user_id/to_user_id, FileAttachment.uploaded_by, etc.)
-    have no ON DELETE clause, so the database itself refuses to delete a
-    user with real eFMS history — that IntegrityError is caught and turned
-    into a clear, actionable message rather than a raw 500. Only a user
-    with no such history (e.g. a freshly created account) can actually be
-    deleted; everyone else must be deactivated instead."""
-    if uid == current_user.id:
-        raise HTTPException(400, "You cannot delete your own account.")
-    user = await _load_user(db, uid)
-    try:
-        await db.delete(user)
-        await db.commit()
-    except IntegrityError:
-        await db.rollback()
+# User deletion is intentionally NOT implemented anywhere in this API.
+# Deactivation (PATCH /admin/users/{uid}/status) is the only supported way
+# to disable a user — this preserves historical file/tracking/signature
+# references (which have no ON DELETE clause pointing at users.id) and
+# avoids ever needing to reason about "was this user hard-deletable."
+# There used to be a DELETE /admin/users/{uid} endpoint here; it has been
+# removed rather than merely hidden in the frontend, per the product
+# decision that deletion is not a supported user-lifecycle action.
+
+
+# ── Admin: Role Management ────────────────────────────────────────────────────
+# A metadata/administration layer over the same role names User.active_role
+# has always used (see app.models.user.Role's docstring). CRITICAL: nothing
+# here ever grants privilege — SUPER_ADMIN's system-wide bypass is decided
+# exclusively by User.is_super_admin (an explicit `== "super_admin"` check),
+# never by anything in this table. Creating or editing a Role row can never
+# make a role act like SUPER_ADMIN.
+
+_ROLE_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{1,49}$")
+
+
+def _normalize_role_name(name: str) -> str:
+    normalized = (name or "").strip().lower().replace(" ", "_")
+    if not _ROLE_NAME_RE.match(normalized):
+        raise HTTPException(
+            400,
+            "Role name must be 2-50 characters, start with a letter, and contain only "
+            "lowercase letters, numbers, and underscores.",
+        )
+    return normalized
+
+
+class RoleOut(BaseModel):
+    id: UUID
+    name: str
+    description: Optional[str] = None
+    is_system: bool
+    user_count: int
+    model_config = {"from_attributes": True}
+
+
+class RoleCreateRequest(BaseModel):
+    name: str
+    description: Optional[str] = None
+
+
+class RoleUpdateRequest(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+
+
+async def _role_user_count(db: AsyncSession, role_name: str) -> int:
+    result = await db.execute(select(func.count()).select_from(User).where(User.active_role == role_name))
+    return result.scalar_one()
+
+
+async def _load_role(db: AsyncSession, role_id: UUID) -> Role:
+    role = await db.get(Role, role_id)
+    if not role:
+        raise HTTPException(404, "Role not found.")
+    return role
+
+
+@router.get("/admin/roles", response_model=List[RoleOut])
+async def list_roles(db: AsyncSession = Depends(get_db), _: User = Depends(_super)):
+    result = await db.execute(select(Role).order_by(Role.is_system.desc(), Role.name))
+    roles = result.scalars().all()
+    counts = {}
+    if roles:
+        count_result = await db.execute(
+            select(User.active_role, func.count()).where(User.active_role.in_([r.name for r in roles])).group_by(User.active_role)
+        )
+        counts = dict(count_result.all())
+    return [
+        RoleOut(id=r.id, name=r.name, description=r.description, is_system=r.is_system, user_count=counts.get(r.name, 0))
+        for r in roles
+    ]
+
+
+@router.post("/admin/roles", status_code=201, response_model=RoleOut)
+async def create_role(body: RoleCreateRequest, db: AsyncSession = Depends(get_db), _: User = Depends(_super)):
+    name = _normalize_role_name(body.name)
+    existing = await db.execute(select(Role).where(func.lower(Role.name) == name))
+    if existing.scalar_one_or_none():
+        raise HTTPException(409, "A role with this name already exists.")
+    description = (body.description or "").strip() or None
+    if description and len(description) > 255:
+        raise HTTPException(400, "Description must be 255 characters or fewer.")
+
+    role = Role(name=name, description=description, is_system=False)
+    db.add(role)
+    await db.commit()
+    await db.refresh(role)
+    return RoleOut(id=role.id, name=role.name, description=role.description, is_system=role.is_system, user_count=0)
+
+
+@router.patch("/admin/roles/{role_id}", response_model=RoleOut)
+async def update_role(role_id: UUID, body: RoleUpdateRequest, db: AsyncSession = Depends(get_db), _: User = Depends(_super)):
+    role = await _load_role(db, role_id)
+
+    if body.name is not None:
+        new_name = _normalize_role_name(body.name)
+        if new_name != role.name:
+            if role.is_system:
+                raise HTTPException(
+                    400,
+                    "The Super Admin role cannot be renamed — it is the one role this application's "
+                    "privilege check is explicitly tied to. Only its description can be edited.",
+                )
+            existing = await db.execute(select(Role).where(func.lower(Role.name) == new_name, Role.id != role_id))
+            if existing.scalar_one_or_none():
+                raise HTTPException(409, "A role with this name already exists.")
+            # Renaming a custom role must keep every existing assignment
+            # pointing at the same role, so the rename is propagated to
+            # every user/user_roles row currently holding the old name —
+            # otherwise those users would silently lose their role.
+            await db.execute(update(User).where(User.active_role == role.name).values(active_role=new_name))
+            await db.execute(update(UserRole).where(UserRole.role == role.name).values(role=new_name))
+            role.name = new_name
+
+    if body.description is not None:
+        description = body.description.strip() or None
+        if description and len(description) > 255:
+            raise HTTPException(400, "Description must be 255 characters or fewer.")
+        role.description = description
+
+    await db.commit()
+    await db.refresh(role)
+    user_count = await _role_user_count(db, role.name)
+    return RoleOut(id=role.id, name=role.name, description=role.description, is_system=role.is_system, user_count=user_count)
+
+
+@router.delete("/admin/roles/{role_id}", status_code=204)
+async def delete_role(role_id: UUID, db: AsyncSession = Depends(get_db), _: User = Depends(_super)):
+    role = await _load_role(db, role_id)
+    if role.is_system:
+        raise HTTPException(400, "The Super Admin role cannot be deleted.")
+
+    count = await _role_user_count(db, role.name)
+    if count > 0:
         raise HTTPException(
             409,
-            "This user cannot be deleted because they have existing activity in the system "
-            "(files, attachments, signatures, or other records). Deactivate the user instead.",
+            f"Cannot delete this role because {count} user{'s' if count != 1 else ''} "
+            f"{'are' if count != 1 else 'is'} currently assigned to it. "
+            "Reassign those users before deleting the role.",
         )
+
+    await db.delete(role)
+    await db.commit()

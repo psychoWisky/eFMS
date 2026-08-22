@@ -66,16 +66,37 @@ interface TimelineEvent {
 }
 
 function buildTimeline(item: TrackingItem, trackEntries: TrackEntry[], initialNotesheet?: InitialNotesheet): (TimelineEvent & { created_at: string })[] {
+  // Merge "Created" with the FIRST forward, but only when that first
+  // tracking entry actually is a forward authored by the creator — a
+  // dispatch, a sign event, or no entries at all (never-forwarded Draft)
+  // all leave "Created" standing alone, exactly as before.
+  const firstEntry = trackEntries[0];
+  const firstIsCreatorForward =
+    !!firstEntry && firstEntry.type !== "sign" && firstEntry.action === "forward" &&
+    !!item.creator_info?.id && firstEntry.from_user_id === item.creator_info.id;
+
   const events: (TimelineEvent & { created_at: string })[] = [
-    {
-      key: "created", type: "created", label: "Created", person: item.creator_info,
-      hasContent: !!initialNotesheet?.has_notesheet,
-      content: initialNotesheet?.accessible ? initialNotesheet.content : null,
-      created_at: item.created_at,
-    },
+    firstIsCreatorForward
+      ? {
+          key: "created", type: "created", label: "Created and forwarded",
+          fromPerson: item.creator_info, toPerson: firstEntry.to_user_info,
+          hasContent: !!initialNotesheet?.has_notesheet,
+          content: initialNotesheet?.accessible ? initialNotesheet.content : null,
+          // The combined entry is dated by when the forward actually
+          // happened (when the file left the creator), not by the file's
+          // own created_at, which may predate it by any amount of time.
+          created_at: firstEntry.created_at,
+        }
+      : {
+          key: "created", type: "created", label: "Created", person: item.creator_info,
+          hasContent: !!initialNotesheet?.has_notesheet,
+          content: initialNotesheet?.accessible ? initialNotesheet.content : null,
+          created_at: item.created_at,
+        },
   ];
 
   for (const e of trackEntries) {
+    if (firstIsCreatorForward && e === firstEntry) continue; // already folded into the "created" event above
     if (e.type === "sign") {
       events.push({ key: e.id, type: "sign", label: "Signed", person: e.from_user_info, hasContent: !!e.has_remark, content: e.remarks, created_at: e.created_at });
     } else {
@@ -163,7 +184,7 @@ export function TimelineModal({ item, onClose }: { item: TrackingItem; onClose: 
                         <span className="text-xs text-gray-400 shrink-0">{formatDate(ev.created_at, "datetime")}</span>
                       </div>
                       <div className="mt-1.5 flex flex-wrap items-center gap-2 text-sm">
-                        {ev.type === "route" ? (
+                        {ev.type === "route" || (ev.type === "created" && ev.toPerson) ? (
                           <>
                             <PersonBadge person={ev.fromPerson} fallback="System" compact />
                             {ev.toPerson && (

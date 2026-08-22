@@ -12,11 +12,18 @@ import { ManageFavoritesDialog } from "@/components/shared/manage-favorites-dial
 
 interface Notification { id: string; title: string; message: string | null; type: string; file_id: string | null; is_read: boolean; }
 
-const ROLE_LABELS: Record<EfmsRole, string> = {
+// Friendly labels for the roles this app shipped with; any other role
+// (including every role Super Admin creates through Role Management) falls
+// back to a prettified version of its raw name rather than rendering blank.
+const ROLE_LABELS: Partial<Record<EfmsRole, string>> = {
   efms_officer: "eFMS Officer", efms_admin: "eFMS Admin", registrar: "Registrar",
   dispatch_officer: "Dispatch Officer", hod: "Head of Department",
   faculty: "Faculty", admin: "Admin", super_admin: "Super Admin",
 };
+
+function roleLabel(role: string): string {
+  return ROLE_LABELS[role as EfmsRole] ?? role.split("_").map((w) => w[0]?.toUpperCase() + w.slice(1)).join(" ");
+}
 
 export function EFMSTopNav({ sidebarWidth }: { sidebarWidth: number }) {
   const router = useRouter();
@@ -150,7 +157,7 @@ export function EFMSTopNav({ sidebarWidth }: { sidebarWidth: number }) {
             </div>
             <div className="hidden md:block text-left">
               <p className="text-sm font-semibold text-[#1A1A2E] leading-tight">{user?.full_name ?? "User"}</p>
-              <p className="text-xs text-[#4A5568]">{activeRole ? ROLE_LABELS[activeRole] : ""}</p>
+              <p className="text-xs text-[#4A5568]">{activeRole ? roleLabel(activeRole) : ""}</p>
             </div>
             <ChevronDown size={14} className="text-[#9CA3AF]" />
           </button>
@@ -164,7 +171,7 @@ export function EFMSTopNav({ sidebarWidth }: { sidebarWidth: number }) {
                 <div className="px-4 py-3 border-b border-[#D1D9E0]">
                   <p className="text-sm font-semibold text-[#1A1A2E]">{user?.full_name}</p>
                   <p className="text-xs text-[#4A5568] mt-0.5">{user?.email}</p>
-                  <p className="text-xs text-[#0D6E6E] font-medium mt-0.5">{activeRole ? ROLE_LABELS[activeRole] : ""}</p>
+                  <p className="text-xs text-[#0D6E6E] font-medium mt-0.5">{activeRole ? roleLabel(activeRole) : ""}</p>
                 </div>
                 <div className="border-t border-[#D1D9E0] mt-1">
                   <button onClick={() => { setShowFavorites(true); setMenuOpen(false); }}

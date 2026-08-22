@@ -2,7 +2,7 @@
 import enum
 from sqlalchemy import (
     Column, String, Integer, Boolean, ForeignKey, Text,
-    Enum as PgEnum, Index, DateTime, UniqueConstraint,
+    Enum as PgEnum, Index, DateTime,
 )
 from sqlalchemy.orm import relationship
 from sqlalchemy.dialects.postgresql import JSONB, UUID
@@ -60,7 +60,7 @@ class EfmsFile(Base, UUIDMixin, TimestampMixin):
     recipient     = relationship("User", foreign_keys=[recipient_id])
     department    = relationship("Department")
     notesheet     = relationship("Notesheet", back_populates="file", uselist=False, cascade="all, delete-orphan")
-    holder_notes  = relationship("HolderNote", back_populates="file", cascade="all, delete-orphan", order_by="HolderNote.created_at")
+    holder_notes  = relationship("HolderNote", back_populates="file", cascade="all, delete-orphan", order_by="HolderNote.sequence")
     route_entries = relationship("RouteEntry", back_populates="file", cascade="all, delete-orphan", order_by="RouteEntry.created_at")
     attachments   = relationship("FileAttachment", back_populates="file", cascade="all, delete-orphan", order_by="FileAttachment.created_at")
     dispatch      = relationship("DispatchRecord", back_populates="file", uselist=False)
@@ -106,30 +106,45 @@ class NotesheetVersion(Base, UUIDMixin, TimestampMixin):
 
 
 class HolderNote(Base, UUIDMixin, TimestampMixin):
-    """A current/past holder's OWN Notesheet for a file — distinct from the
-    single, creator-owned `Notesheet` row above. Every user who has ever held
-    the file gets at most one row per (file_id, user_id); it's writable only
-    while that user is the file's current_holder_id (enforced in the API
-    layer, not here), and becomes permanently read-only the moment the file
-    is forwarded away from them — the row itself is never deleted, so it
-    stays visible as that holder's historical contribution. Deliberately NOT
+    """One distinct HOLDING-PERIOD's Notesheet for a file — distinct from the
+    single, creator-owned `Notesheet` row above. A user who holds a file more
+    than once (e.g. A -> B -> C -> A) gets a SEPARATE row for each holding
+    period, not one shared row keyed by user — a returning holder must never
+    overwrite their own earlier historical contribution. Deliberately NOT
     RouteEntry.remarks (a routing-audit annotation attached to a forward
     action) and NOT Notesheet.content (the creator's original, immutable
-    once non-draft) — this is the third, independent concept the per-user
-    Notesheet business rule requires."""
+    once non-draft) — this is the third, independent concept the per-holder
+    Notesheet business rule requires.
+
+    `sequence` is the stable, chronological holding-period number used for
+    display numbering — assigned once at creation (2, 3, 4, ... per file;
+    1 is reserved for the creator's immutable initial Notesheet above, which
+    has no HolderNote row of its own) and never recalculated from display
+    order. `is_current` marks the single holding-period row that belongs to
+    the file's live current_holder_id and is still editable; every other row
+    for that file is historical/read-only. Lifecycle (creating a new row /
+    finalizing the outgoing one) is owned by the routing workflow — see
+    route_file's forward branch and docket.py's release_file/reopen_file —
+    never by this model directly."""
     __tablename__ = "holder_notes"
 
     file_id       = Column(UUID(as_uuid=True), ForeignKey("efms_files.id"), nullable=False)
     user_id       = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
     content       = Column(Text, default="")
+    sequence      = Column(Integer, nullable=False)
+    is_current    = Column(Boolean, default=True, nullable=False)
 
     file          = relationship("EfmsFile", back_populates="holder_notes")
     user          = relationship("User")
 
     __table_args__ = (
-        UniqueConstraint("file_id", "user_id", name="uq_holder_note_file_user"),
         Index("ix_holder_note_file", "file_id"),
         Index("ix_holder_note_user", "user_id"),
+        # At most one "current" (editable) holding-period row per file at a
+        # time — matches the invariant that a file has at most one current
+        # holder. Postgres partial unique index; SQLAlchemy emits it via
+        # postgresql_where.
+        Index("uq_holder_note_current_per_file", "file_id", unique=True, postgresql_where=(is_current == True)),
     )
 
 

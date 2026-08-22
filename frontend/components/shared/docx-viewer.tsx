@@ -5,8 +5,18 @@
 // use one implementation instead of two. Fetches the file as a Blob and lets
 // the docx-preview package convert it to HTML in-place; no server-side
 // rendering, no PDF conversion.
+//
+// Fetches via the shared `api` axios client (not raw `fetch`) so the
+// Authorization header is attached automatically — the attachment
+// view/preview-docx endpoints now require authentication. Works for both
+// relative backend paths and the absolute URLs the eSign canvas already
+// passes (a plain static-file URL for native .docx, or an API_URL-prefixed
+// preview-docx URL for legacy .doc) — axios uses an absolute `url` as-is,
+// ignoring baseURL, while the request interceptor still attaches the token
+// either way.
 import { useEffect, useRef, useState } from "react";
 import { Loader2, AlertCircle } from "lucide-react";
+import { api } from "@/services/api";
 
 interface Props {
   fileUrl: string;
@@ -28,21 +38,8 @@ export default function DocxViewer({ fileUrl }: Props) {
 
     (async () => {
       try {
-        const res = await fetch(fileUrl);
-        if (!res.ok) {
-          // Backend errors here (e.g. preview-docx's 503 when LibreOffice is
-          // unavailable) return a clean {"detail": "..."} body — surface that
-          // instead of just the status code, when present. Never anything
-          // beyond that JSON `detail` string, so no stack trace/internal
-          // detail can leak through even if a response body is unexpected.
-          let message = `Failed to load document (${res.status})`;
-          try {
-            const body = await res.json();
-            if (body && typeof body.detail === "string") message = body.detail;
-          } catch { /* not JSON — keep the generic message */ }
-          throw new Error(message);
-        }
-        const blob = await res.blob();
+        const res = await api.get(fileUrl, { responseType: "blob" });
+        const blob = res.data as Blob;
         if (cancelled) return;
         const { renderAsync } = await import("docx-preview");
         await renderAsync(blob, container, undefined, {
@@ -52,7 +49,21 @@ export default function DocxViewer({ fileUrl }: Props) {
           ignoreHeight: false,
         });
       } catch (err) {
-        if (!cancelled) setError(err instanceof Error ? err.message : "Failed to render document.");
+        // With responseType "blob", an error response body also arrives as a
+        // Blob (axios doesn't auto-parse it as JSON) — read/parse it
+        // manually to surface the backend's actual {"detail": "..."}
+        // message. Never anything beyond that JSON `detail` string, so no
+        // stack trace/internal detail can leak through even if a response
+        // body is unexpected.
+        let message = "Failed to load document.";
+        const errBlob = (err as { response?: { data?: unknown } })?.response?.data;
+        if (errBlob instanceof Blob) {
+          try {
+            const parsed = JSON.parse(await errBlob.text());
+            if (typeof parsed?.detail === "string") message = parsed.detail;
+          } catch { /* not JSON — keep the generic message */ }
+        }
+        if (!cancelled) setError(message);
       } finally {
         if (!cancelled) setLoading(false);
       }

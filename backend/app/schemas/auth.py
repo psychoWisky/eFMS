@@ -28,11 +28,11 @@ class UserBrief(BaseModel):
     id: str
     email: str
     full_name: str
-    active_role: Optional[SystemRole]
+    active_role: Optional[str]
     kyc_completed: bool
     must_change_password: bool = False
     profile_photo_url: Optional[str]
-    roles: list[SystemRole]
+    roles: list[str]
     can_sign: bool = False
 
     model_config = {"from_attributes": True}
