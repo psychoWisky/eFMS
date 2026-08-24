@@ -459,6 +459,19 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
     URL.revokeObjectURL(blobUrl);
   }
 
+  // Single entry point for "select this attachment" — always highlights the
+  // card AND opens its content, so every attachment (not just the first) can
+  // become the active one from a single click anywhere on its card. Native
+  // types (PDF/image) open in a new tab via viewAttachment; docx/doc/sheet
+  // open in the in-page AttachmentPreviewModal; unsupported ("none") types
+  // are still selectable/highlighted, just with nothing further to open.
+  function selectAttachment(att: Attachment) {
+    setSelectedPdf(att);
+    const kind = getAttachmentPreviewKind(att);
+    if (kind === "native") viewAttachment(att.id);
+    else if (kind !== "none") setPreviewAttachment(att);
+  }
+
   // Returns whether the save fully succeeded — callers (the plain Save
   // button, and the unsaved-changes guard) must never treat a partial
   // failure (metadata saved but notesheet failed) as success or navigate/
@@ -729,7 +742,7 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
           <button onClick={() => guardNavigation(() => router.back())} className="flex items-center gap-1 text-sm text-[#0D6E6E] hover:underline mb-3">
             <ChevronLeft size={14} /> Back
           </button>
-          <div className="flex items-center justify-between gap-2">
+          <div className="flex flex-col gap-2">
             <div>
               <h2 className="text-base font-bold text-gray-900">Attached Files</h2>
               <p className="text-xs text-gray-400 mt-0.5">PDF versions for download</p>
@@ -739,9 +752,9 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                 type="button"
                 onClick={downloadAllAttachmentsZip}
                 title="Download all attachments as a ZIP"
-                className="flex items-center gap-1 text-xs text-gray-500 hover:text-[#0D6E6E] border border-gray-200 rounded-lg px-2 py-1.5 shrink-0"
+                className="flex items-center justify-center gap-2 w-full text-sm font-semibold text-[#0D6E6E] border border-[#0D6E6E]/30 bg-[#F0F7F7] hover:bg-[#E6F4F4] rounded-lg px-3 py-2.5"
               >
-                <Download size={12} /> All
+                <Download size={16} /> Download All Attachment
               </button>
             )}
           </div>
@@ -761,7 +774,11 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                 && Date.now() - new Date(att.created_at).getTime() < ATTACHMENT_DELETE_WINDOW_MS;
               return (
               <div key={att.id}
-                className={cn("w-full flex items-start gap-3 p-3 rounded-xl border text-left transition-all",
+                role="button"
+                tabIndex={0}
+                onClick={() => selectAttachment(att)}
+                onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); selectAttachment(att); } }}
+                className={cn("w-full flex items-start gap-3 p-3 rounded-xl border text-left transition-all cursor-pointer",
                   selectedPdf?.id === att.id ? "border-[#0D6E6E] bg-[#E6F4F4]" : "border-gray-100 bg-gray-50")}>
                 <FileText size={18} className="text-[#0D6E6E] shrink-0 mt-0.5" />
                 <div className="flex-1 min-w-0">
@@ -770,17 +787,6 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                   <div className="flex items-center gap-3 mt-2">
                     {(() => {
                       const kind = getAttachmentPreviewKind(att);
-                      if (kind === "native") {
-                        return (
-                          <button
-                            type="button"
-                            onClick={() => { setSelectedPdf(att); viewAttachment(att.id); }}
-                            className="text-xs text-[#0D6E6E] font-semibold hover:underline"
-                          >
-                            View
-                          </button>
-                        );
-                      }
                       if (kind === "none") {
                         return (
                           <span
@@ -794,7 +800,7 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                       return (
                         <button
                           type="button"
-                          onClick={() => { setSelectedPdf(att); setPreviewAttachment(att); }}
+                          onClick={(e) => { e.stopPropagation(); selectAttachment(att); }}
                           className="text-xs text-[#0D6E6E] font-semibold hover:underline"
                         >
                           View
@@ -803,7 +809,7 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                     })()}
                     <button
                       type="button"
-                      onClick={() => downloadAttachment(att.id, att.original_name)}
+                      onClick={(e) => { e.stopPropagation(); downloadAttachment(att.id, att.original_name); }}
                       className="text-xs text-gray-500 hover:text-gray-700 hover:underline"
                     >
                       Download
@@ -811,7 +817,8 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                     {canDelete && (
                       <button
                         type="button"
-                        onClick={async () => {
+                        onClick={async (e) => {
+                          e.stopPropagation();
                           const confirmed = await confirmAction({
                             title: "Delete this attachment?",
                             text: `"${att.original_name}" will be permanently removed from this file.`,
@@ -833,14 +840,6 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
             })
           )}
         </div>
-        {selectedPdf && (
-          <div className="p-3 border-t border-gray-200">
-            <button type="button" onClick={() => downloadAttachment(selectedPdf.id, selectedPdf.original_name)}
-              className="flex items-center justify-center gap-2 w-full py-2.5 bg-[#0D6E6E] text-white rounded-xl text-sm font-semibold hover:bg-[#178F8F]">
-              <Download size={15} /> Download
-            </button>
-          </div>
-        )}
       </div>
 
       {/* Main panel */}
