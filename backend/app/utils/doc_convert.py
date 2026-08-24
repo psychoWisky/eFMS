@@ -32,11 +32,22 @@ class DocConversionFailed(Exception):
     """The conversion tool ran but did not produce usable output."""
 
 
+_FALLBACK_SOFFICE_PATHS = ("/usr/bin/soffice", "/usr/bin/libreoffice")
+
+
 def _find_soffice() -> str:
     soffice = shutil.which("soffice") or shutil.which("libreoffice")
-    if not soffice:
-        raise DocConversionUnavailable("LibreOffice (soffice) is not installed on this server.")
-    return soffice
+    if soffice:
+        return soffice
+    # shutil.which() only searches this process's PATH, which can differ
+    # from an interactive login shell's (e.g. a service manager launching
+    # this process with a minimal PATH) even when LibreOffice is genuinely
+    # installed at its standard location. Fall back to checking the usual
+    # Debian/Ubuntu install paths directly before giving up.
+    for path in _FALLBACK_SOFFICE_PATHS:
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+    raise DocConversionUnavailable("LibreOffice (soffice) is not installed on this server.")
 
 
 def _run_soffice_convert(content: bytes, src_filename: str, target_format: str, out_ext: str) -> bytes:
