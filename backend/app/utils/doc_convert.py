@@ -22,6 +22,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+from pathlib import Path
 
 
 class DocConversionUnavailable(Exception):
@@ -64,9 +65,20 @@ def _run_soffice_convert(content: bytes, src_filename: str, target_format: str, 
         with open(src_path, "wb") as f:
             f.write(content)
 
+        # Concurrent requests share the same server, so without an isolated
+        # profile every simultaneous soffice invocation fights over the same
+        # default LibreOffice user profile (~/.config/libreoffice/), which
+        # can make one of them fail with no output despite running fine in
+        # isolation. Each call gets its own scratch profile inside its own
+        # tmp_dir — never shared, never reused, cleaned up with everything
+        # else when tmp_dir is removed.
+        lo_profile = os.path.join(tmp_dir, "lo-profile")
+        profile_uri = Path(lo_profile).absolute().as_uri()
+
         try:
             result = subprocess.run(
-                [soffice, "--headless", "--norestore", "--convert-to", target_format, "--outdir", tmp_dir, src_path],
+                [soffice, "--headless", "--norestore", f"-env:UserInstallation={profile_uri}",
+                 "--convert-to", target_format, "--outdir", tmp_dir, src_path],
                 capture_output=True, timeout=60,
             )
         except subprocess.TimeoutExpired as exc:
