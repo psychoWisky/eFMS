@@ -17,7 +17,7 @@ from pydantic import BaseModel, EmailStr, ValidationError
 from app.db.base import get_db
 from app.core.security import (
     verify_password, hash_password,
-    create_access_token, create_refresh_token, verify_token,
+    create_access_token, create_refresh_token, create_password_reset_token, verify_token, verify_token_payload,
     is_password_policy_compliant, generate_temp_password, PASSWORD_POLICY_MESSAGE,
 )
 from app.core.config import settings
@@ -27,6 +27,10 @@ import re
 from app.models.user import User, UserRole, RefreshToken, SystemRole, DeactivationReasonType, Role
 from app.models.efms_extra import OTP
 from app.schemas.auth import LoginRequest, TokenResponse, RefreshRequest, UserBrief
+# Forgot Password reuses the SHARED OTP/email helpers (used elsewhere for
+# e-signature OTP), not this file's own private _create_otp/_verify_otp/
+# _send_email_otp below, which carry a login-only DEV_TEST_BYPASS_OTP.
+from app.utils.otp import create_otp as otp_create, verify_otp as otp_verify, send_email as otp_send_email
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 # SUPER_ADMIN is the only privileged role — no other role (including plain
@@ -232,6 +236,132 @@ async def change_password(
     current_user.must_change_password = False
     await db.commit()
     return {"message": "Password changed successfully."}
+
+
+# ── Forgot Password (unauthenticated self-service recovery) ─────────────────
+# Deliberately uses the SHARED OTP/email helpers in app.utils.otp, not this
+# file's own _create_otp/_verify_otp/_send_email_otp — those carry
+# DEV_TEST_BYPASS_OTP (a login-only testing shortcut), which must never be
+# reachable through a password-reset flow. otp_type="password_reset" keeps
+# this OTP unable to satisfy (or be satisfied by) a login OTP check
+# (otp_type="email") or an e-signature OTP check (also otp_type="email") —
+# see app/api/v1/endpoints/efms_files.py's signature-verification use of the
+# same shared helpers.
+
+_PASSWORD_RESET_OTP_TYPE = "password_reset"
+_FORGOT_PASSWORD_GENERIC_MESSAGE = "If an account exists for this email address, a password reset OTP has been sent."
+
+
+class ForgotPasswordRequest(BaseModel):
+    email: str
+
+
+class ForgotPasswordVerifyRequest(BaseModel):
+    email: str
+    otp: str
+
+
+class ForgotPasswordResetRequest(BaseModel):
+    reset_token: str
+    new_password: str
+    confirm_password: str
+
+
+@router.post("/forgot-password", status_code=200)
+async def forgot_password(payload: ForgotPasswordRequest, db: AsyncSession = Depends(get_db)):
+    """Step 1 of self-service recovery: request an OTP. Always returns the
+    same generic message regardless of whether the email belongs to an
+    active account — the identical anti-enumeration principle login/step1
+    already applies (same error for wrong email vs wrong password). No OTP
+    is created/sent for an unknown or deactivated account, but the caller
+    cannot distinguish that from "sent" by the response alone."""
+    email = payload.email.lower().strip()
+    result = await db.execute(select(User).where(User.email == email))
+    user = result.scalar_one_or_none()
+    if user and user.is_active:
+        code = await otp_create(db, email, _PASSWORD_RESET_OTP_TYPE)
+        otp_send_email(
+            email,
+            f"AVFU eFMS — Password Reset OTP: {code}",
+            "A password reset was requested for your AVFU eFMS account.\n\n"
+            f"Your one-time password (OTP) is:\n\n  {code}\n\n"
+            "This OTP is valid for 10 minutes and can only be used once. "
+            "Do not share it with anyone.\n\n"
+            "If you did not request this, you can safely ignore this email — "
+            "your password has not been changed.",
+        )
+    return {"message": _FORGOT_PASSWORD_GENERIC_MESSAGE}
+
+
+@router.post("/forgot-password/verify")
+async def forgot_password_verify(payload: ForgotPasswordVerifyRequest, db: AsyncSession = Depends(get_db)):
+    """Step 2: verify the OTP. On success, issues a short-lived,
+    single-purpose JWT (type="password_reset", see create_password_reset_
+    token) as proof of verification — this token, not a client-supplied
+    boolean, is what /forgot-password/reset trusts to identify the account."""
+    email = payload.email.lower().strip()
+    ok = await otp_verify(db, email, _PASSWORD_RESET_OTP_TYPE, payload.otp)
+    if not ok:
+        raise HTTPException(status_code=400, detail="Invalid or expired OTP. Please request a new one.")
+
+    result = await db.execute(select(User).where(User.email == email))
+    user = result.scalar_one_or_none()
+    if not user or not user.is_active:
+        raise HTTPException(status_code=400, detail="Invalid or expired OTP. Please request a new one.")
+
+    # Bind the token to the CURRENT password hash so a successful reset
+    # (which changes the hash) makes any further use of this same token
+    # fail — see create_password_reset_token's docstring.
+    pwd_sig = hashlib.sha256((user.hashed_password or "").encode()).hexdigest()
+    return {"reset_token": create_password_reset_token(subject=str(user.id), extra_claims={"pwd_sig": pwd_sig})}
+
+
+@router.post("/forgot-password/reset")
+async def forgot_password_reset(payload: ForgotPasswordResetRequest, db: AsyncSession = Depends(get_db)):
+    """Step 3: set the new password. The account is identified ONLY by the
+    verified reset_token from step 2 (verify_token(..., token_type=
+    "password_reset")) — never by an email/user id supplied directly in
+    this request body, so a client cannot reset an arbitrary account
+    without having actually passed OTP verification for it."""
+    if payload.new_password != payload.confirm_password:
+        raise HTTPException(status_code=400, detail="New password and confirmation do not match.")
+    if not is_password_policy_compliant(payload.new_password):
+        raise HTTPException(status_code=400, detail=PASSWORD_POLICY_MESSAGE)
+
+    token_payload = verify_token_payload(payload.reset_token, token_type="password_reset")
+    if not token_payload:
+        raise HTTPException(status_code=400, detail="Invalid or expired password reset session. Please start again.")
+    user_id = token_payload.get("sub")
+
+    result = await db.execute(select(User).where(User.id == user_id, User.is_active == True))
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=400, detail="Invalid or expired password reset session. Please start again.")
+
+    # Reject replay of an already-used token: its pwd_sig was computed from
+    # the hash that was current at verify-OTP time, so it no longer matches
+    # once a reset has already happened.
+    current_sig = hashlib.sha256((user.hashed_password or "").encode()).hexdigest()
+    if token_payload.get("pwd_sig") != current_sig:
+        raise HTTPException(status_code=400, detail="Invalid or expired password reset session. Please start again.")
+
+    user.hashed_password = hash_password(payload.new_password)
+    # The user just chose their own permanent password through a verified
+    # recovery flow — equivalent in effect to completing the mandatory
+    # first-login change, so they must not be forced through that flow too.
+    user.must_change_password = False
+
+    # Revoke every other still-active session: if the account needed
+    # recovery, nothing that was logged in before the reset should remain
+    # valid afterward. Reuses the existing RefreshToken.revoked mechanism
+    # (already used by /logout and refresh-token rotation) — no new
+    # session/token system introduced.
+    await db.execute(
+        update(RefreshToken).where(RefreshToken.user_id == user.id, RefreshToken.revoked == False).values(revoked=True)
+    )
+
+    await db.commit()
+    return {"message": "Password has been reset successfully. Please log in with your new password."}
 
 
 # ── Refresh ───────────────────────────────────────────────────────────────────
@@ -730,22 +860,20 @@ async def set_user_status(
     return AdminUserOut.from_user(await _load_user(db, uid))
 
 
-@router.post("/admin/users/{uid}/reset-password")
-async def reset_user_password(
-    uid: UUID,
-    db: AsyncSession = Depends(get_db),
-    _: User = Depends(_super),
-):
-    """Future-proofed reuse of the temporary-password mechanism: generates a
-    new temp password and requires the user to change it on next login, same
-    as account creation."""
-    user = await _load_user(db, uid)
-    temp_password = generate_temp_password()
-    user.hashed_password = hash_password(temp_password)
-    user.must_change_password = True
-    await db.commit()
-    return {"temp_password": temp_password}
 
+# Super Admin password-reset-for-another-user is intentionally NOT
+# implemented anywhere in this API. There used to be a
+# POST /admin/users/{uid}/reset-password endpoint here (generated a new
+# temp password for another user); it has been removed entirely — not
+# merely hidden in the frontend — per the product rule that no admin,
+# including SUPER_ADMIN, may change or reset another user's password.
+# Every user (including SUPER_ADMIN) can only ever change their OWN
+# password, via POST /auth/change-password (authenticated) or the
+# Forgot Password flow below (unauthenticated, OTP-verified). Super Admin
+# retains only the pre-existing, unrelated capability of setting a NEW
+# user's *initial* temporary password at account-creation time
+# (_create_user_record / bulk_create_users) — that is a different action
+# (creating an account) and is unchanged.
 
 
 # User deletion is intentionally NOT implemented anywhere in this API.

@@ -1,7 +1,7 @@
 "use client";
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { Bell, ChevronDown, LogOut, Loader2, CheckCheck, FileText, Star } from "lucide-react";
+import { Bell, ChevronDown, LogOut, Loader2, CheckCheck, FileText, Star, KeyRound } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useAuthStore, useUser, useActiveRole, type EfmsRole } from "@/stores/auth.store";
@@ -177,6 +177,14 @@ export function EFMSTopNav({ sidebarWidth }: { sidebarWidth: number }) {
                   <button onClick={() => { setShowFavorites(true); setMenuOpen(false); }}
                     className="w-full flex items-center gap-3 px-4 py-2.5 text-base text-[#1A1A2E] hover:bg-[#F0F7F7]">
                     <Star size={15} /> Manage Favorite Recipients
+                  </button>
+                  {/* Available to every authenticated user regardless of
+                      role — SUPER_ADMIN sees the same option here and can
+                      only ever change their OWN password through it, same
+                      as everyone else. */}
+                  <button onClick={() => { setMenuOpen(false); router.push("/account/change-password"); }}
+                    className="w-full flex items-center gap-3 px-4 py-2.5 text-base text-[#1A1A2E] hover:bg-[#F0F7F7]">
+                    <KeyRound size={15} /> Change Password
                   </button>
                 </div>
                 <div className="border-t border-[#D1D9E0] mt-1">

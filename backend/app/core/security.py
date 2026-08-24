@@ -61,8 +61,45 @@ def create_refresh_token(subject: Any) -> str:
     return jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
 
 
+def create_password_reset_token(subject: Any, extra_claims: dict | None = None) -> str:
+    """Short-lived, single-purpose JWT proving a Forgot Password OTP was
+    successfully verified — minted by /auth/forgot-password/verify and
+    consumed once by /auth/forgot-password/reset. Same create/verify pattern
+    as create_access_token/create_refresh_token above (verify_token already
+    accepts any token_type), just a third, distinct `type` value — this is
+    the "secure server-verifiable reset context" standing in for a
+    client-supplied `otp_verified: true` boolean, which would be trivially
+    forgeable.
+
+    Callers should pass extra_claims={"pwd_sig": <hash of the CURRENT
+    hashed_password>} so /auth/forgot-password/reset can detect and reject
+    replay of an already-used token: a JWT has no server-side "used" state
+    by itself, but once the password changes, the stored fingerprint no
+    longer matches, making a second use fail exactly like an expired token
+    would — without a new database table just to track single-use tokens."""
+    expire = datetime.now(timezone.utc) + timedelta(minutes=15)
+    payload = {"sub": str(subject), "exp": expire, "type": "password_reset"}
+    if extra_claims:
+        payload.update(extra_claims)
+    return jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+
+
 def decode_token(token: str) -> dict:
     return jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+
+
+def verify_token_payload(token: str, token_type: str = "access") -> Optional[dict]:
+    """Like verify_token, but returns the full decoded payload instead of
+    just the `sub` claim — for callers (e.g. the password-reset flow) that
+    need to read an additional custom claim after confirming the token's
+    type and signature/expiry are valid."""
+    try:
+        payload = decode_token(token)
+        if payload.get("type") != token_type:
+            return None
+        return payload
+    except JWTError:
+        return None
 
 
 def verify_token(token: str, token_type: str = "access") -> Optional[str]:

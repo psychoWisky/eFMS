@@ -1,6 +1,7 @@
 "use client";
 import { useState } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import { Mail, Lock, Eye, EyeOff, ChevronRight, AlertCircle, Loader2, ArrowLeft } from "lucide-react";
 import { useMutation } from "@tanstack/react-query";
 import { api } from "@/services/api";
@@ -152,6 +153,11 @@ export default function LoginPage() {
                   >
                     {showPwd ? <EyeOff size={17} /> : <Eye size={17} />}
                   </button>
+                </div>
+                <div className="flex justify-end mt-2">
+                  <Link href="/forgot-password" className="text-sm text-[#0D6E6E] hover:underline">
+                    Forgot Password?
+                  </Link>
                 </div>
               </div>
 
