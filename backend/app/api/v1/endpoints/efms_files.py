@@ -981,7 +981,7 @@ h1 {{ font-size: 20px; }} h2 {{ font-size: 17px; }} h3 {{ font-size: 15px; }}
     except DocConversionUnavailable:
         raise HTTPException(status_code=503, detail="PDF generation is not available on this server.")
     except DocConversionFailed:
-        raise HTTPException(status_code=422, detail="The notesheet could not be converted to PDF.")
+        raise HTTPException(status_code=422, detail=str(exc))
 
     file_name = f"{f.ref_number.replace('/', '-')}-notesheet.pdf"
     encoded_name = urllib.parse.quote(file_name, safe="")
