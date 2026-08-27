@@ -1055,18 +1055,24 @@ async def download_notesheet(
       1. Creator's initial Notesheet
       2. Holder Notesheets in chronological sequence order
 
-    The PDF also contains:
+    The PDF includes:
       - AVFU logo
+      - University name
       - File/reference number
       - Subject
-      - Download date and time
-      - Author/holder information for each Notesheet
-      - Creation/update timestamp for each contribution
+      - Download date/time
+      - Creator/holder information
+      - Notesheet sequence number
+      - Created/recorded and updated timestamps
+      - Complete Notesheet content
 
     This endpoint is read-only. It never modifies Notesheet or HolderNote
     records.
     """
 
+    # ------------------------------------------------------------------
+    # Load file and enforce existing full-access rules.
+    # ------------------------------------------------------------------
     f = await _load_file(file_id, db)
     await _assert_full_file_access(f, user, db)
 
@@ -1079,9 +1085,8 @@ async def download_notesheet(
     # ------------------------------------------------------------------
     # Load all holder Notesheets in chronological order.
     #
-    # sequence:
-    #   1 = creator's initial Notesheet (stored separately in Notesheet)
-    #   2+ = HolderNote holding periods
+    # sequence 1 = creator's initial Notesheet
+    # sequence 2+ = HolderNote records
     # ------------------------------------------------------------------
     holder_result = await db.execute(
         select(HolderNote)
@@ -1090,24 +1095,42 @@ async def download_notesheet(
     )
     holder_notes = holder_result.scalars().all()
 
-    # Fetch user information for all holder Notesheets in one batch.
-    holder_user_ids = {note.user_id for note in holder_notes}
-    people = await person_info_map(holder_user_ids, db)
+    # ------------------------------------------------------------------
+    # Fetch creator + holder information together.
+    # ------------------------------------------------------------------
+    person_ids = {f.created_by}
+
+    person_ids.update(
+        note.user_id
+        for note in holder_notes
+        if note.user_id is not None
+    )
+
+    people = await person_info_map(person_ids, db)
+
+    creator = people.get(f.created_by)
+
+    if creator:
+        creator_name = creator.full_name or "Unknown User"
+        creator_designation = creator.designation or ""
+        creator_department = creator.department_name or ""
+    else:
+        creator_name = "Unknown User"
+        creator_designation = ""
+        creator_department = ""
 
     # ------------------------------------------------------------------
-    # Load AVFU logo.
+    # AVFU logo.
     #
-    # efms_files.py lives at:
+    # efms_files.py:
     #   <project>/backend/app/api/v1/endpoints/efms_files.py
     #
-    # Therefore parents[4] is the project root:
-    #   <project>/
-    #       avfu_logo.png
-    #       backend/
-    #       frontend/
+    # parents[4] => <project>/
+    #
+    # Expected:
+    #   <project>/avfu_logo.png
     # ------------------------------------------------------------------
-    project_root = Path(__file__).resolve().parents[4]
-    logo_path = project_root / "avfu_logo.png"
+    logo_path = Path(__file__).resolve().parents[5] / "avfu_logo.png"
 
     logo_html = ""
 
@@ -1120,30 +1143,83 @@ async def download_notesheet(
                 'alt="AVFU Logo">'
             )
         except OSError:
-            # PDF generation should still work if the logo cannot be read.
             logo_html = ""
-    else:
-        # Do not fail the entire PDF merely because the optional logo
-        # is missing.
-        logo_html = ""
 
     # ------------------------------------------------------------------
-    # Download timestamp.
-    #
-    # AVFU is in India, so explicitly use Asia/Kolkata rather than relying
-    # on the server's timezone configuration.
+    # Timestamp in AVFU local timezone.
     # ------------------------------------------------------------------
-    download_time = datetime.now(ZoneInfo("Asia/Kolkata"))
+    india_tz = ZoneInfo("Asia/Kolkata")
+
+    download_time = datetime.now(india_tz)
+
     download_time_display = download_time.strftime(
         "%d %B %Y, %I:%M:%S %p"
     )
 
     # ------------------------------------------------------------------
-    # Build holder Notesheet sections.
+    # Helper for timestamps.
+    # ------------------------------------------------------------------
+    def format_timestamp(value):
+        if not value:
+            return ""
+
+        return value.astimezone(india_tz).strftime(
+            "%d %B %Y, %I:%M:%S %p"
+        )
+
+    # ------------------------------------------------------------------
+    # Creator metadata.
+    # ------------------------------------------------------------------
+    creator_details = []
+
+    if creator_designation:
+        creator_details.append(
+            _escape_html(creator_designation)
+        )
+
+    if creator_department:
+        creator_details.append(
+            _escape_html(creator_department)
+        )
+
+    creator_details_html = ""
+
+    if creator_details:
+        creator_details_html = (
+            '<div class="person-details">'
+            + " &bull; ".join(creator_details)
+            + "</div>"
+        )
+
+    initial_created_display = format_timestamp(
+        f.notesheet.created_at
+    )
+
+    initial_updated_display = format_timestamp(
+        f.notesheet.updated_at
+    )
+
+    initial_content = f.notesheet.content or ""
+
+    if not initial_content.strip():
+        initial_content = (
+            '<p class="empty-notesheet">'
+            'No initial Notesheet content was entered.'
+            '</p>'
+        )
+
+    # ------------------------------------------------------------------
+    # Build Holder Notesheet sections.
+    #
+    # IMPORTANT:
+    # These are real HTML tables rather than div/table-cell CSS.
+    # This is intentional because LibreOffice's HTML importer handles
+    # actual tables much more reliably.
     # ------------------------------------------------------------------
     holder_sections = []
 
     for note in holder_notes:
+
         person = people.get(note.user_id)
 
         if person:
@@ -1155,145 +1231,173 @@ async def download_notesheet(
             holder_designation = ""
             holder_department = ""
 
-        # Build the secondary author information without leaving
-        # unnecessary separators when fields are unavailable.
-        author_details = []
+        holder_details = []
 
         if holder_designation:
-            author_details.append(_escape_html(holder_designation))
+            holder_details.append(
+                _escape_html(holder_designation)
+            )
 
         if holder_department:
-            author_details.append(_escape_html(holder_department))
+            holder_details.append(
+                _escape_html(holder_department)
+            )
 
-        author_details_html = ""
+        holder_details_html = ""
 
-        if author_details:
-            author_details_html = (
-                '<div class="author-details">'
-                + " • ".join(author_details)
+        if holder_details:
+            holder_details_html = (
+                '<div class="person-details">'
+                + " &bull; ".join(holder_details)
                 + "</div>"
             )
 
-        created_display = ""
-        if note.created_at:
-            created_display = note.created_at.astimezone(
-                ZoneInfo("Asia/Kolkata")
-            ).strftime("%d %B %Y, %I:%M:%S %p")
+        created_display = format_timestamp(
+            note.created_at
+        )
+
+        updated_display = format_timestamp(
+            note.updated_at
+        )
 
         holder_content = note.content or ""
 
         if not holder_content.strip():
             holder_content = (
-                '<p class="empty-notesheet">No Notesheet content was entered '
-                'during this holding period.</p>'
+                '<p class="empty-notesheet">'
+                'No Notesheet content was entered during this '
+                'holding period.'
+                '</p>'
             )
 
+        # --------------------------------------------------------------
+        # Timestamp HTML
+        # --------------------------------------------------------------
+        timestamp_parts = []
+
+        if created_display:
+            timestamp_parts.append(
+                f"<strong>Recorded:</strong> "
+                f"{_escape_html(created_display)} IST"
+            )
+
+        if updated_display:
+            timestamp_parts.append(
+                f"<strong>Updated:</strong> "
+                f"{_escape_html(updated_display)} IST"
+            )
+
+        timestamp_html = ""
+
+        if timestamp_parts:
+            timestamp_html = (
+                '<div class="section-meta">'
+                + " &nbsp;&nbsp; | &nbsp;&nbsp; ".join(timestamp_parts)
+                + "</div>"
+            )
+
+        # --------------------------------------------------------------
+        # Holder section
+        # --------------------------------------------------------------
         holder_sections.append(
             f"""
-            <section class="notesheet-section holder-section">
-                <div class="section-heading">
-                    <div class="section-number">
+            <table class="notesheet-section">
+                <tr>
+                    <td class="section-number">
                         {note.sequence}
-                    </div>
-                    <div class="section-title-block">
-                        <div class="section-label">HOLDER NOTESHEET</div>
-                        <h2>{_escape_html(holder_name)}</h2>
-                        {author_details_html}
-                    </div>
-                </div>
+                    </td>
 
-                <div class="section-meta">
-                    <span>
-                        <strong>Notesheet No.</strong> {note.sequence}
-                    </span>
-                    {
-                        f'<span><strong>Recorded:</strong> {created_display}</span>'
-                        if created_display
-                        else ""
-                    }
-                </div>
+                    <td class="section-heading">
+                        <div class="section-label">
+                            HOLDER NOTESHEET
+                        </div>
 
-                <div class="notesheet-content">
-                    {holder_content}
-                </div>
-            </section>
+                        <div class="person-name">
+                            {_escape_html(holder_name)}
+                        </div>
+
+                        {holder_details_html}
+                    </td>
+                </tr>
+
+                <tr>
+                    <td class="section-meta-number">
+                        No. {note.sequence}
+                    </td>
+
+                    <td>
+                        {timestamp_html}
+                    </td>
+                </tr>
+
+                <tr>
+                    <td colspan="2" class="notesheet-content">
+                        {holder_content}
+                    </td>
+                </tr>
+            </table>
             """
         )
 
     holder_sections_html = "\n".join(holder_sections)
 
     # ------------------------------------------------------------------
-    # Initial Notesheet.
+    # Initial Notesheet timestamps.
     # ------------------------------------------------------------------
-    initial_content = f.notesheet.content or ""
+    initial_timestamp_parts = []
 
-    if not initial_content.strip():
-        initial_content = (
-            '<p class="empty-notesheet">No initial Notesheet content was entered.</p>'
+    if initial_created_display:
+        initial_timestamp_parts.append(
+            f"<strong>Created:</strong> "
+            f"{_escape_html(initial_created_display)} IST"
         )
 
-    # Creator information.
-    creator_people = await person_info_map({f.created_by}, db)
-    creator = creator_people.get(f.created_by)
+    if initial_updated_display:
+        initial_timestamp_parts.append(
+            f"<strong>Updated:</strong> "
+            f"{_escape_html(initial_updated_display)} IST"
+        )
 
-    if creator:
-        creator_name = creator.full_name or "Unknown User"
-        creator_designation = creator.designation or ""
-        creator_department = creator.department_name or ""
-    else:
-        creator_name = "Unknown User"
-        creator_designation = ""
-        creator_department = ""
+    initial_timestamp_html = ""
 
-    creator_details = []
-
-    if creator_designation:
-        creator_details.append(_escape_html(creator_designation))
-
-    if creator_department:
-        creator_details.append(_escape_html(creator_department))
-
-    creator_details_html = ""
-
-    if creator_details:
-        creator_details_html = (
-            '<div class="author-details">'
-            + " • ".join(creator_details)
+    if initial_timestamp_parts:
+        initial_timestamp_html = (
+            '<div class="section-meta">'
+            + " &nbsp;&nbsp; | &nbsp;&nbsp; ".join(
+                initial_timestamp_parts
+            )
             + "</div>"
         )
 
-    initial_created_display = ""
-
-    if f.notesheet.created_at:
-        initial_created_display = f.notesheet.created_at.astimezone(
-            ZoneInfo("Asia/Kolkata")
-        ).strftime("%d %B %Y, %I:%M:%S %p")
-
     # ------------------------------------------------------------------
-    # Complete standalone HTML document.
+    # Complete PDF HTML.
+    #
+    # NOTE:
+    # This is an f-string, so ALL CSS curly braces MUST be doubled:
+    # {{
+    # }}
     # ------------------------------------------------------------------
     html = f"""<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
-<title>{_escape_html(f.subject)} — Complete Notesheet</title>
+
+<title>
+    {_escape_html(f.subject)} — Complete Notesheet
+</title>
 
 <style>
+
 @page {{
     size: A4;
-    margin: 18mm 16mm 18mm 16mm;
-}}
-
-* {{
-    box-sizing: border-box;
+    margin: 15mm 15mm 17mm 15mm;
 }}
 
 body {{
-    font-family: "Liberation Serif", Georgia, "Times New Roman", serif;
-    color: #202124;
-    background: #ffffff;
-    font-size: 11pt;
-    line-height: 1.55;
+    font-family: "Liberation Serif", "Times New Roman", serif;
+    font-size: 10.5pt;
+    line-height: 1.45;
+    color: #222222;
     margin: 0;
     padding: 0;
 }}
@@ -1302,53 +1406,60 @@ body {{
     width: 100%;
 }}
 
+/* ================================================================
+   HEADER
+   ================================================================ */
+
 .header {{
+    width: 100%;
     text-align: center;
-    border-bottom: 2px solid #222;
-    padding-bottom: 14px;
-    margin-bottom: 18px;
+    border-bottom: 2px solid #222222;
+    padding-bottom: 10px;
+    margin-bottom: 16px;
 }}
 
 .logo {{
-    width: 105px;
-    max-height: 105px;
-    object-fit: contain;
-    margin-bottom: 8px;
+    width: 78px;
+    height: 78px;
+    margin-bottom: 5px;
 }}
 
 .institution {{
-    font-size: 18pt;
+    font-size: 16pt;
     font-weight: bold;
-    letter-spacing: 0.3px;
     margin: 2px 0;
 }}
 
 .document-title {{
-    font-size: 14pt;
+    font-size: 12.5pt;
     font-weight: bold;
     margin-top: 5px;
-    letter-spacing: 0.8px;
+    letter-spacing: 0.5px;
 }}
 
 .subtitle {{
-    font-size: 9.5pt;
-    color: #555;
+    font-size: 8.5pt;
+    color: #555555;
     margin-top: 3px;
 }}
 
+/* ================================================================
+   FILE INFORMATION
+   ================================================================ */
+
 .file-information {{
-    border: 1px solid #b8b8b8;
-    margin-bottom: 24px;
-    padding: 0;
+    width: 100%;
+    border: 1px solid #999999;
+    border-collapse: collapse;
+    margin-bottom: 18px;
 }}
 
 .file-information-title {{
     background: #eeeeee;
-    border-bottom: 1px solid #b8b8b8;
-    padding: 7px 10px;
+    border-bottom: 1px solid #999999;
+    padding: 6px 9px;
+    font-size: 9pt;
     font-weight: bold;
-    font-size: 10pt;
-    text-transform: uppercase;
     letter-spacing: 0.5px;
 }}
 
@@ -1358,7 +1469,7 @@ body {{
 }}
 
 .file-information-table td {{
-    padding: 7px 10px;
+    padding: 5px 8px;
     vertical-align: top;
     border-bottom: 1px solid #dddddd;
 }}
@@ -1367,122 +1478,125 @@ body {{
     border-bottom: none;
 }}
 
-.file-information-table .label {{
-    width: 27%;
+.file-information-label {{
+    width: 25%;
     font-weight: bold;
 }}
 
-.file-information-table .value {{
-    width: 73%;
+.file-information-value {{
+    width: 75%;
 }}
+
+/* ================================================================
+   NOTESHEET SECTION
+   ================================================================ */
 
 .notesheet-section {{
-    margin-top: 22px;
-}}
-
-.holder-section {{
-    page-break-before: auto;
-}}
-
-.section-heading {{
-    display: table;
     width: 100%;
-    border-bottom: 1px solid #333;
-    padding-bottom: 8px;
-    margin-bottom: 8px;
+    border: 1px solid #888888;
+    border-collapse: collapse;
+    margin-top: 17px;
+    margin-bottom: 17px;
     page-break-inside: avoid;
 }}
 
 .section-number {{
-    display: table-cell;
-    width: 38px;
-    height: 38px;
-    vertical-align: middle;
+    width: 42px;
+    padding: 7px 5px;
     text-align: center;
+    vertical-align: top;
     font-size: 15pt;
     font-weight: bold;
-    border: 1px solid #444;
+    border-right: 1px solid #888888;
+    background: #f2f2f2;
 }}
 
-.section-title-block {{
-    display: table-cell;
-    vertical-align: middle;
-    padding-left: 10px;
+.section-heading {{
+    padding: 7px 10px;
+    vertical-align: top;
 }}
 
 .section-label {{
-    font-size: 8.5pt;
+    font-size: 8pt;
     font-weight: bold;
-    letter-spacing: 1px;
-    color: #555;
+    letter-spacing: 0.8px;
+    color: #555555;
+    margin-bottom: 2px;
 }}
 
-.section-title-block h2 {{
-    font-size: 14pt;
-    margin: 1px 0 0 0;
+.person-name {{
+    font-size: 13pt;
+    font-weight: bold;
+    margin-bottom: 1px;
 }}
 
-.author-details {{
-    font-size: 9.5pt;
-    color: #555;
-    margin-top: 1px;
+.person-details {{
+    font-size: 8.5pt;
+    color: #555555;
+}}
+
+.section-meta-number {{
+    width: 42px;
+    padding: 5px;
+    text-align: center;
+    vertical-align: top;
+    font-size: 7.5pt;
+    color: #666666;
+    border-top: 1px solid #dddddd;
+    border-right: 1px solid #888888;
 }}
 
 .section-meta {{
-    font-size: 8.5pt;
-    color: #555;
-    padding: 5px 8px;
-    border-bottom: 1px solid #dddddd;
-    margin-bottom: 12px;
-}}
-
-.section-meta span {{
-    margin-right: 20px;
+    padding: 5px 10px;
+    font-size: 7.5pt;
+    color: #555555;
+    border-top: 1px solid #dddddd;
 }}
 
 .notesheet-content {{
-    font-family: "Liberation Serif", Georgia, "Times New Roman", serif;
-    font-size: 11pt;
-    line-height: 1.65;
-    text-align: left;
+    padding: 12px 12px 14px 12px;
+    vertical-align: top;
+    border-top: 1px solid #888888;
+    font-size: 10.5pt;
+    line-height: 1.55;
 }}
 
 .notesheet-content p {{
-    margin: 0 0 9px 0;
+    margin: 0 0 8px 0;
 }}
 
 .notesheet-content h1 {{
-    font-size: 17pt;
-    margin: 14px 0 8px 0;
+    font-size: 16pt;
+    margin: 12px 0 7px 0;
 }}
 
 .notesheet-content h2 {{
-    font-size: 15pt;
-    margin: 13px 0 7px 0;
+    font-size: 14pt;
+    margin: 11px 0 6px 0;
 }}
 
 .notesheet-content h3 {{
-    font-size: 13pt;
-    margin: 12px 0 6px 0;
+    font-size: 12pt;
+    margin: 10px 0 5px 0;
 }}
 
 .notesheet-content ul,
 .notesheet-content ol {{
-    margin-top: 6px;
-    margin-bottom: 10px;
+    margin-top: 5px;
+    margin-bottom: 8px;
 }}
 
 .notesheet-content table {{
     width: 100%;
     border-collapse: collapse;
-    margin: 12px 0;
-    font-size: 10pt;
+    margin: 9px 0;
+    font-size: 9.5pt;
 }}
 
 .notesheet-content th,
 .notesheet-content td {{
-    border: 1px solid #888;
-    padding: 6px 7px;
+    border: 1px solid #888888;
+    padding: 5px 6px;
     vertical-align: top;
 }}
 
@@ -1491,22 +1605,27 @@ body {{
 }}
 
 .notesheet-content blockquote {{
-    margin: 10px 0;
-    padding: 6px 12px;
-    border-left: 3px solid #777;
+    margin: 8px 0;
+    padding: 5px 10px;
+    border-left: 3px solid #777777;
 }}
 
 .empty-notesheet {{
-    color: #777;
+    color: #777777;
     font-style: italic;
 }}
 
+/* ================================================================
+   FOOTER
+   ================================================================ */
+
 .footer {{
-    margin-top: 28px;
-    padding-top: 8px;
-    border-top: 1px solid #aaa;
-    font-size: 8.5pt;
-    color: #666;
+    width: 100%;
+    border-top: 1px solid #999999;
+    margin-top: 20px;
+    padding-top: 6px;
+    font-size: 7.5pt;
+    color: #666666;
     text-align: center;
 }}
 
@@ -1514,98 +1633,154 @@ body {{
 </head>
 
 <body>
+
 <div class="document">
 
-    <header class="header">
-        {logo_html}
-        <div class="institution">
-            ASSAM VETERINARY AND FISHERY UNIVERSITY
-        </div>
-        <div class="document-title">
-            COMPLETE NOTESHEET
-        </div>
-        <div class="subtitle">
-            Electronic File Management System (eFMS)
-        </div>
-    </header>
+    <!-- ============================================================
+         AVFU HEADER
+         ============================================================ -->
 
-    <section class="file-information">
-        <div class="file-information-title">
-            File Information
-        </div>
+    <table width="100%" cellpadding="0" cellspacing="0"
+           style="border-collapse: collapse; margin-bottom: 12px;">
 
-        <table class="file-information-table">
-            <tr>
-                <td class="label">File Number</td>
-                <td class="value">{_escape_html(f.ref_number)}</td>
-            </tr>
+        <tr>
+            <td align="center">
 
-            <tr>
-                <td class="label">Subject</td>
-                <td class="value">{_escape_html(f.subject)}</td>
-            </tr>
+                {logo_html}
 
-            <tr>
-                <td class="label">Downloaded On</td>
-                <td class="value">{_escape_html(download_time_display)} IST</td>
-            </tr>
-        </table>
-    </section>
+                <div class="institution">
+                    ASSAM VETERINARY AND FISHERY UNIVERSITY
+                </div>
 
-    <!-- ==============================================================
-         INITIAL NOTESHEET — ALWAYS FIRST
-         ============================================================== -->
+                <div class="document-title">
+                    COMPLETE NOTESHEET
+                </div>
 
-    <section class="notesheet-section">
+                <div class="subtitle">
+                    Electronic File Management System (eFMS)
+                </div>
 
-        <div class="section-heading">
-            <div class="section-number">
+            </td>
+        </tr>
+
+    </table>
+
+
+    <!-- ============================================================
+         FILE INFORMATION
+         ============================================================ -->
+
+    <table class="file-information">
+
+        <tr>
+            <td colspan="2" class="file-information-title">
+                FILE INFORMATION
+            </td>
+        </tr>
+
+        <tr>
+            <td class="file-information-label">
+                File Number
+            </td>
+
+            <td class="file-information-value">
+                {_escape_html(f.ref_number)}
+            </td>
+        </tr>
+
+        <tr>
+            <td class="file-information-label">
+                Subject
+            </td>
+
+            <td class="file-information-value">
+                {_escape_html(f.subject)}
+            </td>
+        </tr>
+
+        <tr>
+            <td class="file-information-label">
+                Downloaded On
+            </td>
+
+            <td class="file-information-value">
+                {_escape_html(download_time_display)} IST
+            </td>
+        </tr>
+
+    </table>
+
+
+    <!-- ============================================================
+         INITIAL NOTESHEET — ALWAYS NO. 1
+         ============================================================ -->
+
+    <table class="notesheet-section">
+
+        <tr>
+
+            <td class="section-number">
                 1
-            </div>
+            </td>
 
-            <div class="section-title-block">
+            <td class="section-heading">
+
                 <div class="section-label">
                     INITIAL NOTESHEET
                 </div>
 
-                <h2>
+                <div class="person-name">
                     {_escape_html(creator_name)}
-                </h2>
+                </div>
 
                 {creator_details_html}
-            </div>
-        </div>
 
-        <div class="section-meta">
-            <span>
-                <strong>Notesheet No.</strong> 1
-            </span>
+            </td>
 
-            {
-                f'<span><strong>Created:</strong> {initial_created_display}</span>'
-                if initial_created_display
-                else ""
-            }
-        </div>
+        </tr>
 
-        <div class="notesheet-content">
-            {initial_content}
-        </div>
+        <tr>
 
-    </section>
+            <td class="section-meta-number">
+                No. 1
+            </td>
 
-    <!-- ==============================================================
+            <td>
+                {initial_timestamp_html}
+            </td>
+
+        </tr>
+
+        <tr>
+
+            <td colspan="2" class="notesheet-content">
+                {initial_content}
+            </td>
+
+        </tr>
+
+    </table>
+
+
+    <!-- ============================================================
          HOLDER NOTESHEETS — CHRONOLOGICAL ORDER
-         ============================================================== -->
+         ============================================================ -->
 
     {holder_sections_html}
 
+
+    <!-- ============================================================
+         FOOTER
+         ============================================================ -->
+
     <div class="footer">
-        Generated from AVFU eFMS • Complete Notesheet •
-        Downloaded {download_time_display} IST
+        Generated from AVFU eFMS &bull;
+        Complete Notesheet &bull;
+        Downloaded {_escape_html(download_time_display)} IST
     </div>
 
 </div>
+
 </body>
 </html>
 """
@@ -1620,20 +1795,33 @@ body {{
     )
 
     try:
-        pdf_bytes = convert_html_to_pdf(html.encode("utf-8"))
+        pdf_bytes = convert_html_to_pdf(
+            html.encode("utf-8")
+        )
+
     except DocConversionUnavailable:
         raise HTTPException(
             status_code=503,
             detail="PDF generation is not available on this server.",
         )
+
     except DocConversionFailed:
         raise HTTPException(
             status_code=422,
             detail="Failed to generate notesheet PDF.",
         )
 
-    file_name = f"{f.ref_number.replace('/', '-')}-notesheet.pdf"
-    encoded_name = urllib.parse.quote(file_name, safe="")
+    # ------------------------------------------------------------------
+    # Download filename.
+    # ------------------------------------------------------------------
+    file_name = (
+        f"{f.ref_number.replace('/', '-')}-notesheet.pdf"
+    )
+
+    encoded_name = urllib.parse.quote(
+        file_name,
+        safe="",
+    )
 
     return Response(
         content=pdf_bytes,
