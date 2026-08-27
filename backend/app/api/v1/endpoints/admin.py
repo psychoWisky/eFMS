@@ -221,6 +221,13 @@ async def list_users(
         User.is_active == True,
         User.id != current_user.id,
         User.active_role.is_not(None),
+        # Super Admin must never be selectable as a file recipient/forward
+        # target — this endpoint is exclusively the recipient/forward/
+        # signature-permission picker (see module comment above), so this
+        # exclusion is safe to apply unconditionally here without affecting
+        # User Management, which lists users via a separate endpoint
+        # (GET /auth/admin/users) and still shows Super Admin accounts.
+        User.active_role != SystemRole.SUPER_ADMIN,
     )
     if establishment_id:
         q = q.where(User.establishment_id == establishment_id)

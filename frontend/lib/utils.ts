@@ -44,6 +44,17 @@ export function getInitials(name: string): string {
   return name.split(" ").filter(Boolean).slice(0, 2).map((w) => w[0]).join("").toUpperCase();
 }
 
+// Client-side mirror of the backend's _is_notesheet_content_empty
+// (route_file) — used only for immediate UI feedback before ever calling
+// the API; the backend re-checks this itself on every forward regardless,
+// so this is a UX nicety, never the actual enforcement. Tiptap's own
+// "empty" output is never literally "" (e.g. "<p></p>"/"<p><br></p>"), so
+// tags must be stripped before checking for visible text.
+export function isNotesheetEmpty(html: string | null | undefined): boolean {
+  if (!html) return true;
+  return html.replace(/<[^>]*>/g, "").trim().length === 0;
+}
+
 const PREVIEWABLE_MIME_TYPES = new Set([
   "application/pdf",
   "image/png", "image/jpeg", "image/gif", "image/webp", "image/svg+xml",

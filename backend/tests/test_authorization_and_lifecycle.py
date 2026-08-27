@@ -126,11 +126,14 @@ async def test_legitimate_relationships_still_work(client, users, db):
         r = await client.get(f"/efms/files/{file_id}", headers=auth_headers(people["priya"]))
         assert r.status_code == 200
 
-        # Akash is the creator but no longer current holder -> full-open
-        # denied, but tracking/history access remains (existing rule,
-        # untouched by this task).
+        # Akash is the creator but no longer current holder -> full-open is
+        # replaced by the deliberate My Files creator_restricted carve-out
+        # (My Files/Direct Forward task, Part 1-3): a 200 with restricted
+        # content instead of a 403. Tracking/history access remains
+        # available too, exactly as before.
         r = await client.get(f"/efms/files/{file_id}", headers=auth_headers(people["akash"]))
-        assert r.status_code == 403
+        assert r.status_code == 200
+        assert r.json()["access_level"] == "creator_restricted"
         r = await client.get(f"/efms/files/{file_id}/track", headers=auth_headers(people["akash"]))
         assert r.status_code == 200
 

@@ -119,6 +119,12 @@ class FileOut(BaseModel):
     route_entries: List[RouteEntryOut] = []
     attachments: List[AttachmentOut] = []
     signatures: List[SignatureOut] = []
+    # "full" (current holder / admin / dept-released viewer — existing
+    # behavior) or "creator_restricted" (the file's own creator, no longer
+    # current holder — new My Files read-only carve-out). Lets the frontend
+    # render the correct viewer mode from the response itself rather than
+    # re-deriving it from current_holder_id/created_by comparisons.
+    access_level: str = "full"
     model_config = {"from_attributes": True}
 
 
@@ -148,6 +154,10 @@ class HolderNotesheetOut(BaseModel):
     created_at: datetime
     updated_at: datetime
     user_info: Optional[PersonInfo] = None
+    # False only for another holder's row returned to a creator_restricted
+    # viewer (list_holder_notesheets) — `content` is withheld ("") in that
+    # case. Always True for every existing caller/row; new field, additive.
+    accessible: bool = True
     model_config = {"from_attributes": True}
 
 

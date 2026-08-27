@@ -19,6 +19,7 @@ interface EfmsFile {
   id: string; ref_number: string; subject: string; category: string;
   status: string; priority: string; created_at: string; updated_at: string;
   recipient_name: string | null; created_by: string; is_released: boolean;
+  current_holder_id: string | null; current_holder_info: PersonInfo | null;
 }
 interface DocketItem {
   file_id: string; ref_number: string; subject: string; category: string;
@@ -289,7 +290,7 @@ export function EFMSDashboard() {
                 <table className="w-full min-w-[960px]">
                   <thead className="bg-gray-50 border-b border-gray-200">
                     <tr>
-                      {["Note ID", "Subject", "File Category", "File / Doc Number", "Created At", "Status", "Action"].map((h) => (
+                      {["Note ID", "Subject", "File Category", "File / Doc Number", "Created At", "Status", "Current Holder", "Action"].map((h) => (
                         <th key={h} className="text-left px-5 py-4 text-base font-semibold text-gray-600">{h}</th>
                       ))}
                     </tr>
@@ -312,6 +313,15 @@ export function EFMSDashboard() {
                           <span className={cn("px-2 py-1 rounded-full text-sm font-medium", STATUS_COLOR[displayStatus] ?? "bg-gray-100")}>
                             {displayStatus}
                           </span>
+                        </td>
+                        <td className="px-5 py-4">
+                          {f.current_holder_id ? (
+                            <PersonBadge person={f.current_holder_info} fallback="Unknown" compact />
+                          ) : (
+                            <span className="text-sm text-gray-400 italic">
+                              {f.is_released ? "Released — no current holder" : "—"}
+                            </span>
+                          )}
                         </td>
                         <td className="px-5 py-4">
                           <div className="flex items-center gap-2">

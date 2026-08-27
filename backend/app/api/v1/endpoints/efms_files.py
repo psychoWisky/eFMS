@@ -1,5 +1,6 @@
 """eFMS file, notesheet, routing, and dispatch endpoints."""
 import uuid as _uuid
+import re
 import smtplib
 import urllib.parse
 import io
@@ -168,14 +169,13 @@ async def _load_file(file_id: UUID, db: AsyncSession) -> EfmsFile:
     return f
 
 
-async def _assert_full_file_access(f: EfmsFile, user: User, db: AsyncSession) -> None:
-    """Strict/full file-access check — raises 403 unless the user is an
-    admin, the CURRENT holder (file.current_holder_id == user.id, and
-    nothing else), or a department member viewing a file released to their
-    department. This is the boundary for actually opening/using a file:
-    GET /efms/files/{id}, notesheet download, and (transitively, since they
-    all route through GET /efms/files/{id}) notification click-through,
-    direct file URLs, and Search -> View.
+async def _has_full_file_access(f: EfmsFile, user: User, db: AsyncSession) -> bool:
+    """True for an admin, the CURRENT holder (file.current_holder_id ==
+    user.id, and nothing else), or a department member viewing a file
+    released to their department. This is the boundary for actually
+    opening/using a file: GET /efms/files/{id}, notesheet download, and
+    (transitively, since they all route through GET /efms/files/{id})
+    notification click-through, direct file URLs, and Search -> View.
 
     Deliberately narrower than _assert_tracking_access below: being the
     creator or a past routing participant (someone the file passed through
@@ -185,11 +185,17 @@ async def _assert_full_file_access(f: EfmsFile, user: User, db: AsyncSession) ->
     its current_holder_id while it's still a Draft (set that way at
     creation and never reassigned until the first forward), so this still
     covers the "creator viewing their own still-held draft" case for free —
-    it only stops covering them once they've actually forwarded it."""
+    it only stops covering them once they've actually forwarded it.
+
+    Extracted out of _assert_full_file_access so _authorize_file_open (the
+    new My Files restricted-creator-view gate) can reuse the exact same
+    "full access" test without duplicating the department-release lookup —
+    _assert_full_file_access below is now a thin wrapper with its external
+    behavior completely unchanged."""
     if user.is_super_admin:
-        return
+        return True
     if f.current_holder_id == user.id:
-        return
+        return True
     if user.department_id:
         from app.models.efms_extra import Docket
         rel = await db.execute(
@@ -200,7 +206,34 @@ async def _assert_full_file_access(f: EfmsFile, user: User, db: AsyncSession) ->
             )
         )
         if rel.scalar_one_or_none():
-            return
+            return True
+    return False
+
+
+async def _assert_full_file_access(f: EfmsFile, user: User, db: AsyncSession) -> None:
+    if not await _has_full_file_access(f, user, db):
+        raise HTTPException(status_code=403, detail="You don't have access to view this file.")
+
+
+async def _authorize_file_open(f: EfmsFile, user: User, db: AsyncSession) -> str:
+    """Gate for My Files' "open a file I created" flow. Returns "full" for
+    anyone _has_full_file_access already allows (current holder, admin,
+    dept-released viewer) — identical to today's get_file/holder-notesheet
+    behavior for all of them, nothing changes. Returns "creator_restricted"
+    for exactly one new case: the file's own creator, once they are no
+    longer its current holder — a narrow, additive, read-only carve-out
+    (their own original Notesheet, their own HolderNote holding period(s),
+    their own/original attachments, no download) requested specifically for
+    My Files. Deliberately keyed on f.created_by == user.id ONLY — a past
+    holder who is not the creator gets neither branch and still raises 403,
+    exactly as _assert_full_file_access already does today; this must never
+    be broadened to "any past routing participant" (that's the separate,
+    intentionally broader _assert_tracking_access rule used by Tracking
+    History, not this one)."""
+    if await _has_full_file_access(f, user, db):
+        return "full"
+    if f.created_by == user.id:
+        return "creator_restricted"
     raise HTTPException(status_code=403, detail="You don't have access to view this file.")
 
 
@@ -330,6 +363,28 @@ async def _assert_attachment_access(f: EfmsFile, att: FileAttachment, user: User
         raise HTTPException(status_code=403, detail="You don't have access to this attachment.")
 
 
+async def _has_attachment_download_access(f: EfmsFile, att: FileAttachment, user: User, db: AsyncSession) -> bool:
+    """Same as _has_attachment_access, with exactly one narrowing: the
+    file's own creator loses DOWNLOAD rights (they keep view/preview via
+    _has_attachment_access, unchanged) once they are no longer the current
+    holder — the My Files restricted-creator-view rule. Every other
+    existing accessor keeps identical download rights to before this
+    change: a non-creator uploader can still download their own upload
+    after losing holder status, and a department-released viewer can still
+    download original attachments — neither of those cases is mentioned by
+    the restricted-creator requirement, so neither is touched here.
+    Used by download_attachment and download_all_attachments; view_attachment
+    intentionally keeps using _has_attachment_access directly."""
+    if f.created_by == user.id and f.current_holder_id != user.id and not user.is_super_admin:
+        return False
+    return await _has_attachment_access(f, att, user, db)
+
+
+async def _assert_attachment_download_access(f: EfmsFile, att: FileAttachment, user: User, db: AsyncSession) -> None:
+    if not await _has_attachment_download_access(f, att, user, db):
+        raise HTTPException(status_code=403, detail="You don't have access to download this attachment.")
+
+
 def _visible_file(f: EfmsFile, viewer: User, *, full_access: bool = True) -> FileOut:
     """Viewer-scoped serialization of a file. The routing-chain skeleton
     (who/whom/when/action) is always intact — forwarding attachments and
@@ -426,7 +481,17 @@ async def list_files(
     result = await db.execute(q.order_by(EfmsFile.updated_at.desc()))
     files = result.scalars().all()
     await _attach_is_released(files, db)
-    return [_list_safe_file(f) for f in files]
+    payloads = [_list_safe_file(f) for f in files]
+    if outbox:
+        # My Files only — populate current_holder_info (name/designation/
+        # is_active) for the "Current Holder" column via one batched lookup,
+        # not one query per row. Every other list_files caller (inbox, the
+        # default "All Files" list, and Docket, which has its own separate
+        # endpoint entirely) is left exactly as before.
+        people = await person_info_map({f.current_holder_id for f in files}, db)
+        for payload, f in zip(payloads, files):
+            payload.current_holder_info = people.get(f.current_holder_id) if f.current_holder_id else None
+    return payloads
 
 
 @router.get("/search", response_model=list[FileOut])
@@ -599,15 +664,26 @@ async def get_file(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_verified_user),
 ):
-    """Full file open — the current holder (or admin, or a department
-    member viewing a file released to their department) only. A past
-    participant who has forwarded the file onward is rejected here (see
-    _assert_full_file_access); they can still reach the movement/audit
-    trail via GET /{file_id}/track, which uses the broader
-    _assert_tracking_access instead."""
+    """File open. Current holder / admin / dept-released viewer get the
+    existing full behavior — unchanged. The file's own creator, once no
+    longer current holder, now gets a restricted, read-only 200 instead of
+    a 403 (My Files' "open a forwarded file I created" case) — everyone
+    else who isn't tracking-eligible still gets 403 exactly as before (see
+    _authorize_file_open). `access_level` on the response ("full" or
+    "creator_restricted") tells the frontend which mode it's rendering,
+    without it having to re-derive that from current_holder_id itself.
+
+    _visible_file(..., full_access=True) already keeps the notesheet
+    (correct for both cases — it's always the creator's own document) and
+    already narrows attachments/route-entry remarks down to the viewer's
+    own via its existing _has_full_remark_visibility branch, which a
+    creator_restricted viewer (never the current holder, never admin) falls
+    into automatically — no change needed there."""
     f = await _load_file(file_id, db)
-    await _assert_full_file_access(f, user, db)
-    return _visible_file(f, user, full_access=True)
+    access_level = await _authorize_file_open(f, user, db)
+    payload = _visible_file(f, user, full_access=True)
+    payload.access_level = access_level
+    return payload
 
 
 @router.post("", response_model=FileOut, status_code=201)
@@ -827,7 +903,12 @@ async def get_my_holder_notesheet(
     Save Changes, or already exists from the forward that made them the
     current holder)."""
     f = await _load_file(file_id, db)
-    await _assert_full_file_access(f, user, db)
+    # "full" or "creator_restricted" — both may reach this far; the query
+    # below is already scoped to the caller's OWN current row regardless,
+    # so no further branching is needed here. A creator_restricted caller
+    # will normally get None back anyway, since forwarding the file already
+    # finalized their row (is_current -> False) — that's correct, not a bug.
+    await _authorize_file_open(f, user, db)
     result = await db.execute(
         select(HolderNote).where(HolderNote.file_id == file_id, HolderNote.user_id == user.id, HolderNote.is_current == True)
     )
@@ -852,29 +933,46 @@ async def list_holder_notesheets(
     holding periods both appear here, as separate rows with separate
     sequence numbers — never merged or overwritten.
 
-    Having "full file access" (current holder, admin, or a department member
-    viewing a released file) is the boundary for reaching this endpoint at
+    Passing _authorize_file_open (current holder, admin, a department
+    member viewing a released file, OR — new — the file's own creator once
+    no longer current holder) is the boundary for reaching this endpoint at
     all — it is NOT the same thing as being allowed to read every other
     holder's individual Notesheet. Only the current holder and admins get
     that broader visibility (_has_full_remark_visibility — the same
     established rule _visible_file already uses to decide who sees every
-    forwarding remark/attachment vs. just their own). Everyone else who can
-    still open the file — most notably a department-released viewer — sees
-    only their own row(s) here, never another user's HolderNote. Nothing
+    forwarding remark/attachment vs. just their own).
+
+    For every OTHER caller who can still reach this endpoint, the exact
+    presentation now differs by why they got in: a full-access-but-not-
+    full-remark-visibility viewer (a department-released viewer — existing,
+    unchanged) still only ever gets their own row(s) back, nothing else.
+    The new creator_restricted caller instead gets EVERY row back (so they
+    can see the holding-period history/who held it when, matching Tracking
+    History's presentation), but with `content` withheld and
+    `accessible=False` on every row that isn't their own — the same
+    has-a-row-but-can't-read-it shape GET /{file_id}/track/notesheet
+    already uses (`accessible`), rendered by the frontend the same way
+    Tracking's "You don't have access to read this" already is. Nothing
     here is ever editable through this endpoint regardless."""
     f = await _load_file(file_id, db)
-    await _assert_full_file_access(f, user, db)
+    access_level = await _authorize_file_open(f, user, db)
     query = select(HolderNote).where(HolderNote.file_id == file_id)
-    if not _has_full_remark_visibility(f, user):
+    if access_level == "full" and not _has_full_remark_visibility(f, user):
         query = query.where(HolderNote.user_id == user.id)
     result = await db.execute(query.order_by(HolderNote.sequence))
     notes = result.scalars().all()
     if not notes:
         return []
     people = await person_info_map({n.user_id for n in notes}, db)
+    out = []
     for n in notes:
-        n.user_info = people.get(n.user_id)  # type: ignore[attr-defined]
-    return notes
+        item = HolderNotesheetOut.model_validate(n)
+        item.user_info = people.get(n.user_id)
+        if access_level == "creator_restricted" and n.user_id != user.id:
+            item.content = ""
+            item.accessible = False
+        out.append(item)
+    return out
 
 
 @router.patch("/{file_id}/holder-notesheet", response_model=HolderNotesheetOut)
@@ -954,10 +1052,13 @@ async def download_notesheet(
     as before, then converts it to PDF via convert_html_to_pdf() (the same
     LibreOffice-headless mechanism convert_doc_to_docx() already uses for
     .doc preview/signing — one conversion mechanism, not a second one).
-    notesheet.content itself is only ever read here, never modified. Uses
-    the same strict, current-holder-only access rule as get_file — a past
-    participant who has forwarded the file onward must not be able to
-    download its notesheet."""
+    notesheet.content itself is only ever read here, never modified. Still
+    uses _assert_full_file_access directly (current holder / admin /
+    dept-released viewer only) — deliberately NOT extended to the new
+    creator_restricted case get_file now allows: PDF download of the
+    notesheet wasn't part of the requested restricted-view scope, so a
+    restricted creator can read their own notesheet on the file page but
+    not download it as a PDF via this endpoint."""
     f = await _load_file(file_id, db)
     await _assert_full_file_access(f, user, db)
     if not f.notesheet:
@@ -997,6 +1098,23 @@ h1 {{ font-size: 20px; }} h2 {{ font-size: 17px; }} h3 {{ font-size: 15px; }}
 
 # ── Routing ───────────────────────────────────────────────────────────────────
 
+_HTML_TAG_RE = re.compile(r"<[^>]*>")
+
+
+def _is_notesheet_content_empty(content: Optional[str]) -> bool:
+    """True for null, "", whitespace-only, or HTML whose only content is
+    markup with no visible text (e.g. Tiptap's empty "<p></p>"/"<p><br></p>"
+    output) — stripping tags before checking is required specifically
+    because an "empty-looking" Tiptap document is never actually an empty
+    string. Used to enforce "never forward with an empty notesheet" — see
+    route_file's forward branch, the single place this is checked, so a
+    direct API call can never bypass whatever the frontend does or doesn't
+    validate client-side."""
+    if not content:
+        return True
+    return not _HTML_TAG_RE.sub("", content).strip()
+
+
 @router.post("/{file_id}/route", response_model=FileOut)
 async def route_file(
     file_id: UUID,
@@ -1019,6 +1137,23 @@ async def route_file(
     # Forward requires a destination user
     if body.action == RouteAction.forward and not body.to_user_id:
         raise HTTPException(status_code=400, detail="Please select a user to forward the file to.")
+
+    if body.action == RouteAction.forward:
+        # A file must never move forward with nothing written in it —
+        # enforced here (not just in the UI) so a direct API call can't
+        # bypass it either. Applies to every forward path, including a
+        # brand-new file being forwarded directly instead of saved as a
+        # Draft first, since they all funnel through this one endpoint.
+        if _is_notesheet_content_empty(f.notesheet.content if f.notesheet else None):
+            raise HTTPException(status_code=400, detail="Please write the notesheet before forwarding this file.")
+
+        # Super Admin must never become a file's holder via Forward — see
+        # GET /admin/users' exclusion of SUPER_ADMIN from the recipient
+        # picker; this is the backend backstop in case a recipient id is
+        # ever submitted directly rather than picked from that list.
+        to_user = await db.get(User, body.to_user_id)
+        if to_user and to_user.is_super_admin:
+            raise HTTPException(status_code=400, detail="Files cannot be forwarded to a Super Admin.")
 
     for entry in f.route_entries:
         entry.is_current = False
@@ -1211,12 +1346,16 @@ async def download_attachment(
 ):
     """Force-download attachment with the original filename and UTF-8
     encoding. Requires authentication and per-attachment authorization —
-    see view_attachment above for why this changed from unauthenticated."""
+    see view_attachment above for why this changed from unauthenticated.
+    Uses _assert_attachment_download_access (not _assert_attachment_access)
+    so the file's own creator can still be denied DOWNLOAD specifically
+    once no longer current holder, while keeping view/preview available via
+    the unchanged view_attachment endpoint above."""
     att = await db.get(FileAttachment, att_id)
     if not att or att.file_id != file_id:
         raise HTTPException(status_code=404, detail="Attachment not found.")
     f = await _load_file(file_id, db)
-    await _assert_attachment_access(f, att, user, db)
+    await _assert_attachment_download_access(f, att, user, db)
     path = os.path.join(os.path.abspath(settings.UPLOAD_DIR), att.stored_name)
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="File not found on disk.")
@@ -1237,16 +1376,20 @@ async def download_all_attachments(
     user: User = Depends(get_current_verified_user),
 ):
     """Download every attachment ON THIS FILE THAT THIS USER IS AUTHORIZED
-    TO SEE as one .zip — silently excludes any attachment
-    _has_attachment_access rejects, rather than requiring all-or-nothing
-    access to the whole file's attachment set. Reuses the exact same
-    disk-path resolution as download_attachment for each entry (no second
-    file-lookup implementation) and preserves each attachment's original
-    filename inside the archive."""
+    TO DOWNLOAD as one .zip — silently excludes any attachment
+    _has_attachment_download_access rejects (not the broader
+    _has_attachment_access), rather than requiring all-or-nothing access to
+    the whole file's attachment set. This is what stops Download All from
+    being used to route around the restricted creator's individual-download
+    block: an attachment they can view but not download is simply left out
+    of the zip, same "silently exclude" pattern as before. Reuses the exact
+    same disk-path resolution as download_attachment for each entry (no
+    second file-lookup implementation) and preserves each attachment's
+    original filename inside the archive."""
     f = await _load_file(file_id, db)
     result = await db.execute(select(FileAttachment).where(FileAttachment.file_id == file_id))
     all_attachments = result.scalars().all()
-    attachments = [a for a in all_attachments if await _has_attachment_access(f, a, user, db)]
+    attachments = [a for a in all_attachments if await _has_attachment_download_access(f, a, user, db)]
     if not attachments:
         raise HTTPException(status_code=404, detail="This file has no attachments you have access to.")
 

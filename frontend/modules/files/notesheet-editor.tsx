@@ -7,7 +7,7 @@ import { api, FILES_BASE_URL, API_URL } from "@/services/api";
 import { toast } from "sonner";
 import { confirmAction, showSuccess, escapeHtml } from "@/lib/alert";
 import { useUser, useActiveRole } from "@/stores/auth.store";
-import { cn, formatDate, getAttachmentPreviewKind } from "@/lib/utils";
+import { cn, formatDate, getAttachmentPreviewKind, isNotesheetEmpty } from "@/lib/utils";
 import {
   ChevronLeft, FileText, Download, ArrowRight,
   Loader2, Lock, Clock, MessageSquare, Upload, X, PenLine,
@@ -48,6 +48,12 @@ interface EfmsFile {
   creator_info?: PersonInfo | null; current_holder_info?: PersonInfo | null; recipient_info?: PersonInfo | null;
   notesheet: Notesheet | null; route_entries: RouteEntry[]; attachments: Attachment[];
   signatures: Signature[];
+  // "full" (current holder / admin / dept-released viewer) or
+  // "creator_restricted" (the file's own creator, no longer current holder
+  // — My Files' read-only carve-out: own notesheet/attachments only, no
+  // download, no holder-only actions). Defaults to "full" when absent so
+  // this never breaks against an older cached response shape.
+  access_level?: "full" | "creator_restricted";
 }
 // A holder's OWN Notesheet for this file — distinct from `Notesheet` above
 // (the creator's single, shared document). This is the ONE user-facing note
@@ -55,7 +61,7 @@ interface EfmsFile {
 // field, never a second editor. One row per (file, user); writable only
 // while that user is current_holder_id, permanently read-only afterward but
 // still visible here as their historical contribution.
-interface HolderNotesheet { id: string; file_id: string; user_id: string; content: string; sequence: number; is_current: boolean; created_at: string; updated_at: string; user_info?: PersonInfo | null; }
+interface HolderNotesheet { id: string; file_id: string; user_id: string; content: string; sequence: number; is_current: boolean; created_at: string; updated_at: string; user_info?: PersonInfo | null; accessible?: boolean; }
 interface DropItem { id: string; name: string; label?: string; is_active?: boolean; }
 interface DeptItem { id: string; name: string; }
 
@@ -187,6 +193,13 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
   });
 
   const isHolder = file?.current_holder_id === user?.id;
+  // My Files' restricted read-only view — the file's own creator, viewing
+  // a file they've forwarded away. Every holder-only action below is
+  // already gated on isHolder/canForwardAfter/etc., which are all false
+  // here since current_holder_id !== user.id; this flag additionally hides
+  // attachment downloads and shows the "no access" placeholder for other
+  // holders' Notesheets, per the backend's access_level field.
+  const isRestricted = file?.access_level === "creator_restricted";
   const isCreator = file?.created_by === user?.id;
   const isDraft = file?.status === "draft";
   const isTerminal = file?.status === "dispatched";
@@ -261,6 +274,13 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
   async function handleFirstForward(recipientId?: string) {
     const target = recipientId ?? file?.recipient_id;
     if (!target) return;
+    // Client-side mirror of the backend's own check (route_file) — the
+    // backend re-validates this on every forward regardless, so this is
+    // only immediate UX feedback, never the actual enforcement.
+    if (isNotesheetEmpty(file?.notesheet?.content)) {
+      toast.error("Please write the notesheet before forwarding this file.");
+      return;
+    }
     try {
       // No remarks field exists at first-forward — omitted (not "") so the
       // backend/timeline never mistake "nothing was ever written" for
@@ -747,7 +767,7 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
               <h2 className="text-base font-bold text-gray-900">Attached Files</h2>
               <p className="text-xs text-gray-400 mt-0.5">PDF versions for download</p>
             </div>
-            {file.attachments.length > 0 && (
+            {file.attachments.length > 0 && !isRestricted && (
               <button
                 type="button"
                 onClick={downloadAllAttachmentsZip}
@@ -807,13 +827,15 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                         </button>
                       );
                     })()}
-                    <button
-                      type="button"
-                      onClick={(e) => { e.stopPropagation(); downloadAttachment(att.id, att.original_name); }}
-                      className="text-xs text-gray-500 hover:text-gray-700 hover:underline"
-                    >
-                      Download
-                    </button>
+                    {!isRestricted && (
+                      <button
+                        type="button"
+                        onClick={(e) => { e.stopPropagation(); downloadAttachment(att.id, att.original_name); }}
+                        className="text-xs text-gray-500 hover:text-gray-700 hover:underline"
+                      >
+                        Download
+                      </button>
+                    )}
                     {canDelete && (
                       <button
                         type="button"
@@ -935,7 +957,12 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                displayStatus === "released"   ? "Released to the department." :
                displayStatus === "dispatched" ? "Officially dispatched." : "Active."}
             </p>
-            {!isHolder && <span className="ml-auto text-sm text-gray-400 shrink-0"><Lock size={13} className="inline mr-1" />Read-only</span>}
+            {!isHolder && (
+              <span className="ml-auto text-sm text-gray-400 shrink-0">
+                <Lock size={13} className="inline mr-1" />
+                {isRestricted ? "Restricted view — your notesheet & attachments only" : "Read-only"}
+              </span>
+            )}
           </div>
 
           {/* Tabs */}
@@ -1069,9 +1096,19 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                                       <Clock size={12} className="text-gray-400" />{formatDate(n.updated_at, "datetime")}
                                     </span>
                                   </div>
-                                  {/* Notesheet content — same prose rendering as the Initial Notesheet card */}
-                                  <div className={cn("bg-gray-50 border border-gray-200 rounded-xl px-4 py-3", NOTESHEET_PROSE_CLASS)}
-                                    dangerouslySetInnerHTML={{ __html: toSafeNotesheetHtml(n.content) }} />
+                                  {/* Notesheet content — same prose rendering as the Initial Notesheet card.
+                                      A restricted creator's view gets every holding period back so the
+                                      history/timeline stays visible, but content for holders other than
+                                      themselves is withheld (accessible === false) — same presentation
+                                      convention as Tracking History's "You don't have access to read this". */}
+                                  {n.accessible === false ? (
+                                    <p className="text-sm text-gray-400 flex items-center gap-1.5 bg-gray-50 border border-gray-200 rounded-xl px-4 py-3">
+                                      <Lock size={12} /> You don&apos;t have access to read this
+                                    </p>
+                                  ) : (
+                                    <div className={cn("bg-gray-50 border border-gray-200 rounded-xl px-4 py-3", NOTESHEET_PROSE_CLASS)}
+                                      dangerouslySetInnerHTML={{ __html: toSafeNotesheetHtml(n.content) }} />
+                                  )}
                                 </div>
                               </div>
                             ))}

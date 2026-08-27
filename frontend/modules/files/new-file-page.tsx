@@ -4,6 +4,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/services/api";
 import { toast } from "sonner";
 import { showSuccess } from "@/lib/alert";
+import { isNotesheetEmpty } from "@/lib/utils";
 import { EditorContent } from "@tiptap/react";
 import { Loader2, Upload, X, FileText, Send, AlertTriangle, CheckCircle2, Save } from "lucide-react";
 import { PersonBadge } from "@/components/shared/person-badge";
@@ -105,52 +106,90 @@ export function NewFileForm({ onSuccess }: NewFileFormProps) {
     return () => { if (autoSaveRef.current) clearInterval(autoSaveRef.current); };
   }, [editor, subject, category, priority]);
 
+  // Shared by both "Save Draft" and "Forward" — creates the file and
+  // uploads any queued attachments, returning the new file's id. Forward
+  // (createAndForwardFile below) does the create step identically, then
+  // makes one additional call to the SAME existing POST /{id}/route
+  // endpoint the file page's own Forward button already uses — no second,
+  // parallel forwarding implementation.
+  async function doCreateFile(): Promise<string> {
+    const noteContent = editor?.getHTML() ?? "";
+    const selectedUser = allUsers.find((u) => u.id === recipientId);
+    const res = await api.post("/efms/files", {
+      subject,
+      category,
+      priority,
+      is_confidential: isConfidential,
+      recipient_id: recipientId || undefined,
+      recipient_name: selectedUser?.full_name,
+      initial_content: noteContent,
+    });
+    const fileId = res.data.id;
+    // Reporting variant: the file already exists at this point and isn't
+    // safely re-creatable, so an attachment failure here must not block
+    // navigation the way a genuinely-retryable save would — it's reported
+    // to the user instead of silently swallowed (unlike the ordinary
+    // uploadAll used nowhere else in this flow anymore).
+    const { failed } = await attachmentQueue.uploadAllReporting(fileId);
+    if (failed.length > 0) {
+      toast.error(
+        `File saved, but ${failed.length} attachment${failed.length > 1 ? "s" : ""} failed to upload: ${failed.map((f) => f.name).join(", ")}. You can add them again from the file page.`
+      );
+    }
+    return fileId;
+  }
+
+  function resetFormAfterSuccess() {
+    setSubject(""); setCategory(""); setPriority(""); setRecipientId(""); attachmentQueue.clear(); setDraftRestored(false);
+    localStorage.removeItem(DRAFT_KEY);
+    editor?.commands.setContent(DEFAULT_NOTESHEET_HTML);
+    setNotesheetDirty(false);
+    setConfirm(false);
+  }
+
+  function handleCreateError(err: unknown) {
+    const data = (err as { response?: { data?: { detail?: string; message?: string; errors?: { field: string; message: string }[] } } })?.response?.data;
+    const msg = data?.detail ?? data?.message;
+    const fieldErrors = data?.errors?.map((e) => `${e.field}: ${e.message}`).join("; ");
+    toast.error(fieldErrors ?? msg ?? "Failed to save file.");
+    setConfirm(false);
+  }
+
   const createFile = useMutation({
-    mutationFn: async () => {
-      const noteContent = editor?.getHTML() ?? "";
-      const selectedUser = allUsers.find((u) => u.id === recipientId);
-      const res = await api.post("/efms/files", {
-        subject,
-        category,
-        priority,
-        is_confidential: isConfidential,
-        recipient_id: recipientId || undefined,
-        recipient_name: selectedUser?.full_name,
-        initial_content: noteContent,
-      });
-      const fileId = res.data.id;
-      // Reporting variant: the file already exists at this point and isn't
-      // safely re-creatable, so an attachment failure here must not block
-      // navigation the way a genuinely-retryable save would — it's reported
-      // to the user instead of silently swallowed (unlike the ordinary
-      // uploadAll used nowhere else in this flow anymore).
-      const { failed } = await attachmentQueue.uploadAllReporting(fileId);
-      if (failed.length > 0) {
-        toast.error(
-          `File saved, but ${failed.length} attachment${failed.length > 1 ? "s" : ""} failed to upload: ${failed.map((f) => f.name).join(", ")}. You can add them again from the file page.`
-        );
-      }
-      return res.data;
-    },
+    mutationFn: doCreateFile,
     onSuccess: () => {
       showSuccess("File created and submitted successfully.");
       qc.invalidateQueries({ queryKey: ["efms-files"] });
       qc.invalidateQueries({ queryKey: ["efms-files-outbox"] });
       onSuccess?.();
-      // Reset form
-      setSubject(""); setCategory(""); setPriority(""); setRecipientId(""); attachmentQueue.clear(); setDraftRestored(false);
-      localStorage.removeItem(DRAFT_KEY);
-      editor?.commands.setContent(DEFAULT_NOTESHEET_HTML);
-      setNotesheetDirty(false);
-      setConfirm(false);
+      resetFormAfterSuccess();
     },
-    onError: (err: unknown) => {
-      const data = (err as { response?: { data?: { detail?: string; message?: string; errors?: { field: string; message: string }[] } } })?.response?.data;
-      const msg = data?.detail ?? data?.message;
-      const fieldErrors = data?.errors?.map((e) => `${e.field}: ${e.message}`).join("; ");
-      toast.error(fieldErrors ?? msg ?? "Failed to create file.");
-      setConfirm(false);
+    onError: handleCreateError,
+  });
+
+  // Direct Forward: create the file, then immediately forward it to the
+  // chosen recipient via the existing POST /{id}/route endpoint (action:
+  // "forward") — the exact same routing/notesheet/holder-transfer logic
+  // the file page's own Forward button triggers, reused as-is rather than
+  // reimplemented. The backend independently re-validates the notesheet
+  // isn't empty and that the recipient isn't a Super Admin on that call —
+  // this mutation doesn't duplicate either check, it just surfaces
+  // whatever the backend rejects.
+  const createAndForwardFile = useMutation({
+    mutationFn: async () => {
+      const fileId = await doCreateFile();
+      await api.post(`/efms/files/${fileId}/route`, { action: "forward", to_user_id: recipientId });
+      return fileId;
     },
+    onSuccess: () => {
+      showSuccess("File created and forwarded successfully.");
+      qc.invalidateQueries({ queryKey: ["efms-files"] });
+      qc.invalidateQueries({ queryKey: ["efms-files-outbox"] });
+      qc.invalidateQueries({ queryKey: ["my-docket"] });
+      onSuccess?.();
+      resetFormAfterSuccess();
+    },
+    onError: handleCreateError,
   });
 
   function handleDrop(e: React.DragEvent) {
@@ -412,7 +451,7 @@ export function NewFileForm({ onSuccess }: NewFileFormProps) {
               <div className="w-12 h-12 rounded-xl bg-[#E6F4F4] flex items-center justify-center">
                 <AlertTriangle className="w-6 h-6 text-[#0D6E6E]" />
               </div>
-              <div><h3 className="text-xl font-bold text-gray-900">Confirm Draft</h3><p className="text-base text-gray-500">This saves a Draft — it is not sent to anyone yet. Use Forward afterwards to send it.</p></div>
+              <div><h3 className="text-xl font-bold text-gray-900">Confirm</h3><p className="text-base text-gray-500">Save as a Draft (not sent to anyone yet), or Forward it directly to the recipient below now.</p></div>
             </div>
             <div className="bg-gray-50 rounded-xl p-4 space-y-2 mb-6 text-base">
               <div><span className="font-semibold text-gray-600">Subject:</span> <span>{subject}</span></div>
@@ -424,10 +463,23 @@ export function NewFileForm({ onSuccess }: NewFileFormProps) {
             </div>
             <div className="flex gap-3">
               <button type="button" onClick={() => setConfirm(false)} className="flex-1 px-5 py-3 text-base border border-gray-200 rounded-xl hover:bg-gray-50 font-medium">Edit</button>
-              <button type="button" onClick={() => createFile.mutate()} disabled={createFile.isPending}
-                className="flex-1 px-5 py-3 text-base bg-[#0D6E6E] text-white rounded-xl font-bold flex items-center justify-center gap-2 hover:bg-[#178F8F] disabled:opacity-50">
-                {createFile.isPending ? <Loader2 size={18} className="animate-spin" /> : <Send size={18} />}
+              <button type="button" onClick={() => createFile.mutate()} disabled={createFile.isPending || createAndForwardFile.isPending}
+                className="flex-1 px-5 py-3 text-base border-2 border-[#0D6E6E] text-[#0D6E6E] rounded-xl font-bold flex items-center justify-center gap-2 hover:bg-[#E6F4F4] disabled:opacity-50">
+                {createFile.isPending ? <Loader2 size={18} className="animate-spin" /> : <Save size={18} />}
                 {createFile.isPending ? "Saving…" : "Save Draft"}
+              </button>
+              <button
+                type="button"
+                title={!selectedRecipient ? "Choose a recipient above first" : undefined}
+                onClick={() => {
+                  if (!selectedRecipient) { toast.error("Please choose a recipient before forwarding."); return; }
+                  if (isNotesheetEmpty(editor?.getHTML())) { toast.error("Please write the notesheet before forwarding this file."); return; }
+                  createAndForwardFile.mutate();
+                }}
+                disabled={createFile.isPending || createAndForwardFile.isPending || !selectedRecipient}
+                className="flex-1 px-5 py-3 text-base bg-[#0D6E6E] text-white rounded-xl font-bold flex items-center justify-center gap-2 hover:bg-[#178F8F] disabled:opacity-50 disabled:cursor-not-allowed">
+                {createAndForwardFile.isPending ? <Loader2 size={18} className="animate-spin" /> : <Send size={18} />}
+                {createAndForwardFile.isPending ? "Forwarding…" : "Forward"}
               </button>
             </div>
           </div>
