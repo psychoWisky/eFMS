@@ -1138,8 +1138,14 @@ async def download_notesheet(
     if logo_path.is_file():
         try:
             logo_b64 = base64.b64encode(logo_path.read_bytes()).decode("ascii")
+            # width="70" is set as a real HTML attribute (not just CSS) —
+            # LibreOffice's HTML import sizes/anchors <img> more reliably
+            # when width is present as an attribute; height is left to the
+            # CSS "height: auto" rule below so the logo's aspect ratio is
+            # preserved regardless of its actual pixel dimensions.
             logo_html = (
                 '<img class="logo" '
+                'width="70" '
                 f'src="data:image/png;base64,{logo_b64}" '
                 'alt="AVFU Logo">'
             )
@@ -1169,28 +1175,33 @@ async def download_notesheet(
         )
 
     # ------------------------------------------------------------------
-    # Creator metadata.
+    # Small presentational helper: renders "Designation:"/"Department:"
+    # as separate identity lines (skipping whichever is blank). Shared by
+    # the initial Notesheet and every holder section below so the two
+    # never drift into different layouts.
     # ------------------------------------------------------------------
-    creator_details = []
+    def person_detail_lines(designation: str, department: str) -> str:
+        lines = []
 
-    if creator_designation:
-        creator_details.append(
-            _escape_html(creator_designation)
-        )
+        if designation:
+            lines.append(
+                '<div class="identity-line">'
+                '<span class="identity-label">Designation:</span> '
+                f'{_escape_html(designation)}</div>'
+            )
 
-    if creator_department:
-        creator_details.append(
-            _escape_html(creator_department)
-        )
+        if department:
+            lines.append(
+                '<div class="identity-line">'
+                '<span class="identity-label">Department:</span> '
+                f'{_escape_html(department)}</div>'
+            )
 
-    creator_details_html = ""
+        return "".join(lines)
 
-    if creator_details:
-        creator_details_html = (
-            '<div class="person-details">'
-            + " &bull; ".join(creator_details)
-            + "</div>"
-        )
+    creator_details_html = person_detail_lines(
+        creator_designation, creator_department
+    )
 
     initial_created_display = format_timestamp(
         f.notesheet.created_at
@@ -1210,12 +1221,43 @@ async def download_notesheet(
         )
 
     # ------------------------------------------------------------------
-    # Build Holder Notesheet sections.
+    # Initial Notesheet timestamp line.
+    # ------------------------------------------------------------------
+    initial_timestamp_parts = []
+
+    if initial_created_display:
+        initial_timestamp_parts.append(
+            f"<strong>Created:</strong> "
+            f"{_escape_html(initial_created_display)} IST"
+        )
+
+    if initial_updated_display:
+        initial_timestamp_parts.append(
+            f"<strong>Updated:</strong> "
+            f"{_escape_html(initial_updated_display)} IST"
+        )
+
+    initial_timestamp_html = ""
+
+    if initial_timestamp_parts:
+        initial_timestamp_html = (
+            '<div class="identity-line">'
+            + " &nbsp;&nbsp;|&nbsp;&nbsp; ".join(
+                initial_timestamp_parts
+            )
+            + "</div>"
+        )
+
+    # ------------------------------------------------------------------
+    # Build Holder Notesheet boxes.
     #
-    # IMPORTANT:
-    # These are real HTML tables rather than div/table-cell CSS.
-    # This is intentional because LibreOffice's HTML importer handles
-    # actual tables much more reliably.
+    # Each box is a single bordered <div> — no outer/nested tables and
+    # no vertical "number column". The Notesheet number is shown plainly
+    # in the box heading text ("NOTESHEET N — HOLDER NOTESHEET"), and the
+    # heading + identity + timestamp are kept together on one page via
+    # page-break-inside: avoid on just that small inner block — the
+    # actual Notesheet content below it is free to flow onto the next
+    # page for long entries.
     # ------------------------------------------------------------------
     holder_sections = []
 
@@ -1232,26 +1274,9 @@ async def download_notesheet(
             holder_designation = ""
             holder_department = ""
 
-        holder_details = []
-
-        if holder_designation:
-            holder_details.append(
-                _escape_html(holder_designation)
-            )
-
-        if holder_department:
-            holder_details.append(
-                _escape_html(holder_department)
-            )
-
-        holder_details_html = ""
-
-        if holder_details:
-            holder_details_html = (
-                '<div class="person-details">'
-                + " &bull; ".join(holder_details)
-                + "</div>"
-            )
+        holder_details_html = person_detail_lines(
+            holder_designation, holder_department
+        )
 
         created_display = format_timestamp(
             note.created_at
@@ -1272,7 +1297,7 @@ async def download_notesheet(
             )
 
         # --------------------------------------------------------------
-        # Timestamp HTML
+        # Timestamp line
         # --------------------------------------------------------------
         timestamp_parts = []
 
@@ -1292,86 +1317,45 @@ async def download_notesheet(
 
         if timestamp_parts:
             timestamp_html = (
-                '<div class="section-meta">'
-                + " &nbsp;&nbsp; | &nbsp;&nbsp; ".join(timestamp_parts)
+                '<div class="identity-line">'
+                + " &nbsp;&nbsp;|&nbsp;&nbsp; ".join(timestamp_parts)
                 + "</div>"
             )
 
         # --------------------------------------------------------------
-        # Holder section
+        # Holder Notesheet box
         # --------------------------------------------------------------
         holder_sections.append(
             f"""
-            <table class="notesheet-section">
-                <tr class="section-header-row">
-                    <td class="section-number">
-                        {note.sequence}
-                    </td>
-
-                    <td class="section-heading">
-                        <div class="section-label">
-                            NOTESHEET {note.sequence} &middot; HOLDER NOTESHEET
-                        </div>
-
-                        <div class="person-name">
-                            {_escape_html(holder_name)}
-                        </div>
-
-                        {holder_details_html}
-                    </td>
-                </tr>
-
-                <tr class="section-meta-row">
-                    <td class="section-meta-number">
-                        No. {note.sequence}
-                    </td>
-
-                    <td>
-                        {timestamp_html}
-                    </td>
-                </tr>
-
-                <tr>
-                    <td colspan="2" class="notesheet-content">
-                        {holder_content}
-                    </td>
-                </tr>
-            </table>
+            <div class="notesheet-box">
+                <div class="notesheet-meta">
+                    <div class="notesheet-heading">
+                        NOTESHEET {note.sequence} &mdash; HOLDER NOTESHEET
+                    </div>
+                    <div class="identity-line">
+                        <span class="identity-label">Holder:</span>
+                        {_escape_html(holder_name)}
+                    </div>
+                    {holder_details_html}
+                    {timestamp_html}
+                </div>
+                <div class="notesheet-divider"></div>
+                <div class="notesheet-content">
+                    {holder_content}
+                </div>
+            </div>
             """
         )
 
     holder_sections_html = "\n".join(holder_sections)
 
     # ------------------------------------------------------------------
-    # Initial Notesheet timestamps.
-    # ------------------------------------------------------------------
-    initial_timestamp_parts = []
-
-    if initial_created_display:
-        initial_timestamp_parts.append(
-            f"<strong>Created:</strong> "
-            f"{_escape_html(initial_created_display)} IST"
-        )
-
-    if initial_updated_display:
-        initial_timestamp_parts.append(
-            f"<strong>Updated:</strong> "
-            f"{_escape_html(initial_updated_display)} IST"
-        )
-
-    initial_timestamp_html = ""
-
-    if initial_timestamp_parts:
-        initial_timestamp_html = (
-            '<div class="section-meta">'
-            + " &nbsp;&nbsp; | &nbsp;&nbsp; ".join(
-                initial_timestamp_parts
-            )
-            + "</div>"
-        )
-
-    # ------------------------------------------------------------------
     # Complete PDF HTML.
+    #
+    # Structurally simple on purpose: the header, file-information block,
+    # and every Notesheet box are plain <div>s (no outer/wrapping table),
+    # so the document begins rendering immediately on page 1 instead of
+    # LibreOffice needing to lay out a table-based skeleton first.
     #
     # NOTE:
     # This is an f-string, so ALL CSS curly braces MUST be doubled:
@@ -1384,7 +1368,7 @@ async def download_notesheet(
 <meta charset="utf-8">
 
 <title>
-    {_escape_html(f.subject)} — Complete Notesheet
+    {_escape_html(f.subject)}
 </title>
 
 <style>
@@ -1395,7 +1379,7 @@ async def download_notesheet(
 }}
 
 body {{
-    font-family: "Liberation Serif", "Times New Roman", serif;
+    font-family: "Liberation Serif", Georgia, "Times New Roman", serif;
     font-size: 10.5pt;
     line-height: 1.45;
     color: #222222;
@@ -1403,37 +1387,28 @@ body {{
     padding: 0;
 }}
 
-.document {{
-    width: 100%;
-}}
-
 /* ================================================================
    HEADER
    ================================================================ */
 
 .header {{
-    width: 100%;
     border-bottom: 2px solid #222222;
-    padding-bottom: 10px;
-    margin-bottom: 16px;
+    padding-bottom: 8px;
+    margin-bottom: 14px;
 }}
 
-.header-logo-cell {{
-    width: 90px;
-    text-align: left;
+.header-logo {{
+    display: inline-block;
     vertical-align: top;
-    padding-right: 12px;
+    width: 22%;
 }}
 
 .logo {{
-    width: 70px;
     height: auto;
-    display: block;
 }}
 
 .download-meta {{
     margin-top: 6px;
-    text-align: left;
     font-size: 8pt;
     color: #555555;
     line-height: 1.3;
@@ -1446,149 +1421,101 @@ body {{
     color: #777777;
 }}
 
-.header-info-cell {{
-    text-align: left;
+.header-info {{
+    display: inline-block;
     vertical-align: top;
+    width: 76%;
 }}
 
 .institution {{
     font-size: 15pt;
     font-weight: bold;
     margin: 2px 0;
-    text-align: left;
 }}
 
 .subtitle {{
     font-size: 8.5pt;
     color: #555555;
     margin-top: 3px;
-    text-align: left;
 }}
 
 /* ================================================================
    FILE INFORMATION
    ================================================================ */
 
-.file-information {{
-    width: 100%;
+.file-info {{
     border: 1px solid #999999;
-    border-collapse: collapse;
-    margin-bottom: 18px;
+    padding: 8px 10px 10px 10px;
+    margin-bottom: 16px;
 }}
 
-.file-information-title {{
-    background: #eeeeee;
-    border-bottom: 1px solid #999999;
-    padding: 6px 9px;
+.file-info-title {{
     font-size: 9pt;
     font-weight: bold;
     letter-spacing: 0.5px;
+    color: #444444;
+    border-bottom: 1px solid #cccccc;
+    padding-bottom: 4px;
+    margin-bottom: 6px;
 }}
 
-.file-information-table {{
-    width: 100%;
-    border-collapse: collapse;
+.file-info-row {{
+    padding: 2px 0;
 }}
 
-.file-information-table td {{
-    padding: 5px 8px;
-    vertical-align: top;
-    border-bottom: 1px solid #dddddd;
-}}
-
-.file-information-table tr:last-child td {{
-    border-bottom: none;
-}}
-
-.file-information-label {{
-    width: 25%;
+.file-info-label {{
+    display: inline-block;
+    width: 110px;
     font-weight: bold;
+    vertical-align: top;
 }}
 
-.file-information-value {{
-    width: 75%;
+.file-info-value {{
+    display: inline-block;
+    vertical-align: top;
 }}
 
 /* ================================================================
-   NOTESHEET SECTION
+   NOTESHEET BOX
    ================================================================ */
 
-.notesheet-section {{
-    width: 100%;
+.notesheet-box {{
     border: 1px solid #888888;
-    border-collapse: collapse;
-    margin-top: 17px;
-    margin-bottom: 17px;
-    /* Deliberately no page-break-inside: avoid here — a long Notesheet's
-       content must be allowed to continue onto the next page rather than
-       being forced onto one page (which would leave a large blank gap at
-       the bottom of the previous page). Only the heading and its
-       immediate metadata row are kept together below. */
+    padding: 12px 14px;
+    margin: 0 0 17px 0;
 }}
 
-.section-header-row,
-.section-meta-row {{
+.notesheet-meta {{
+    /* Keeps the heading + identity + timestamp together on one page.
+       Deliberately NOT applied to the whole .notesheet-box — the actual
+       content below must be free to continue onto the next page for a
+       long Notesheet instead of being forced onto a single page. */
     page-break-inside: avoid;
-    page-break-after: avoid;
 }}
 
-.section-number {{
-    width: 42px;
-    padding: 7px 5px;
-    text-align: center;
-    vertical-align: top;
-    font-size: 15pt;
+.notesheet-heading {{
+    font-size: 12pt;
     font-weight: bold;
-    border-right: 1px solid #888888;
-    background: #f2f2f2;
+    margin-bottom: 6px;
 }}
 
-.section-heading {{
-    padding: 7px 10px;
-    vertical-align: top;
+.identity-line {{
+    font-size: 9.5pt;
+    color: #333333;
+    margin: 1px 0;
 }}
 
-.section-label {{
-    font-size: 8pt;
+.identity-label {{
     font-weight: bold;
-    letter-spacing: 0.8px;
-    color: #555555;
-    margin-bottom: 2px;
-}}
-
-.person-name {{
-    font-size: 13pt;
-    font-weight: bold;
-    margin-bottom: 1px;
-}}
-
-.person-details {{
-    font-size: 8.5pt;
     color: #555555;
 }}
 
-.section-meta-number {{
-    width: 42px;
-    padding: 5px;
-    text-align: center;
-    vertical-align: top;
-    font-size: 7.5pt;
-    color: #666666;
-    border-top: 1px solid #dddddd;
-    border-right: 1px solid #888888;
-}}
-
-.section-meta {{
-    padding: 5px 10px;
-    font-size: 7.5pt;
-    color: #555555;
-    border-top: 1px solid #dddddd;
+.notesheet-divider {{
+    border-top: 1px solid #cccccc;
+    margin: 10px 0;
 }}
 
 .notesheet-content {{
-    padding: 12px 12px 14px 12px;
-    vertical-align: top;
-    border-top: 1px solid #888888;
     font-size: 10.5pt;
     line-height: 1.55;
 }}
@@ -1652,9 +1579,8 @@ body {{
    ================================================================ */
 
 .footer {{
-    width: 100%;
     border-top: 1px solid #999999;
-    margin-top: 20px;
+    margin-top: 18px;
     padding-top: 6px;
     font-size: 7.5pt;
     color: #666666;
@@ -1666,135 +1592,71 @@ body {{
 
 <body>
 
-<div class="document">
-
     <!-- ============================================================
          AVFU HEADER — logo + download timestamp top-left,
          institution name/subtitle beside the logo.
          ============================================================ -->
 
-    <table class="header" cellpadding="0" cellspacing="0">
-
-        <tr>
-            <td class="header-logo-cell">
-
-                {logo_html}
-
-                <div class="download-meta">
-                    <div class="download-meta-label">DOWNLOADED</div>
-                    {_escape_html(download_time_display)} IST
-                </div>
-
-            </td>
-
-            <td class="header-info-cell">
-
-                <div class="institution">
-                    ASSAM VETERINARY AND FISHERY UNIVERSITY
-                </div>
-
-                <div class="subtitle">
-                    Electronic File Management System (eFMS)
-                </div>
-
-            </td>
-        </tr>
-
-    </table>
-
+    <div class="header">
+        <div class="header-logo">
+            {logo_html}
+            <div class="download-meta">
+                <div class="download-meta-label">DOWNLOADED</div>
+                {_escape_html(download_time_display)} IST
+            </div>
+        </div><div class="header-info">
+            <div class="institution">
+                ASSAM VETERINARY AND FISHERY UNIVERSITY
+            </div>
+            <div class="subtitle">
+                Electronic File Management System (eFMS)
+            </div>
+        </div>
+    </div>
 
     <!-- ============================================================
          FILE INFORMATION
          ============================================================ -->
 
-    <table class="file-information">
-
-        <tr>
-            <td colspan="2" class="file-information-title">
-                FILE INFORMATION
-            </td>
-        </tr>
-
-        <tr>
-            <td class="file-information-label">
-                File Number
-            </td>
-
-            <td class="file-information-value">
-                {_escape_html(f.ref_number)}
-            </td>
-        </tr>
-
-        <tr>
-            <td class="file-information-label">
-                Subject
-            </td>
-
-            <td class="file-information-value">
-                {_escape_html(f.subject)}
-            </td>
-        </tr>
-
-    </table>
-
+    <div class="file-info">
+        <div class="file-info-title">FILE INFORMATION</div>
+        <div class="file-info-row">
+            <span class="file-info-label">File Number</span>
+            <span class="file-info-value">{_escape_html(f.ref_number)}</span>
+        </div>
+        <div class="file-info-row">
+            <span class="file-info-label">Subject</span>
+            <span class="file-info-value">{_escape_html(f.subject)}</span>
+        </div>
+    </div>
 
     <!-- ============================================================
          INITIAL NOTESHEET — ALWAYS NO. 1
          ============================================================ -->
 
-    <table class="notesheet-section">
-
-        <tr class="section-header-row">
-
-            <td class="section-number">
-                1
-            </td>
-
-            <td class="section-heading">
-
-                <div class="section-label">
-                    NOTESHEET 1 &middot; INITIAL NOTESHEET
-                </div>
-
-                <div class="person-name">
-                    {_escape_html(creator_name)}
-                </div>
-
-                {creator_details_html}
-
-            </td>
-
-        </tr>
-
-        <tr class="section-meta-row">
-
-            <td class="section-meta-number">
-                No. 1
-            </td>
-
-            <td>
-                {initial_timestamp_html}
-            </td>
-
-        </tr>
-
-        <tr>
-
-            <td colspan="2" class="notesheet-content">
-                {initial_content}
-            </td>
-
-        </tr>
-
-    </table>
-
+    <div class="notesheet-box">
+        <div class="notesheet-meta">
+            <div class="notesheet-heading">
+                NOTESHEET 1 &mdash; INITIAL NOTESHEET
+            </div>
+            <div class="identity-line">
+                <span class="identity-label">Author:</span>
+                {_escape_html(creator_name)}
+            </div>
+            {creator_details_html}
+            {initial_timestamp_html}
+        </div>
+        <div class="notesheet-divider"></div>
+        <div class="notesheet-content">
+            {initial_content}
+        </div>
+    </div>
 
     <!-- ============================================================
          HOLDER NOTESHEETS — CHRONOLOGICAL ORDER
          ============================================================ -->
 
     {holder_sections_html}
-
 
     <!-- ============================================================
          FOOTER
@@ -1803,8 +1665,6 @@ body {{
     <div class="footer">
         AVFU eFMS &bull; Electronic Notesheet
     </div>
-
-</div>
 
 </body>
 </html>
