@@ -4,6 +4,7 @@ from app.api.v1.endpoints.efms_files import router as efms_router, dispatch_rout
 from app.api.v1.endpoints.admin import router as admin_router
 from app.api.v1.endpoints.docket import router as docket_router
 from app.api.v1.endpoints.tracking import router as tracking_router
+from app.api.v1.endpoints.projects import router as projects_router
 
 api_router = APIRouter(prefix="/api/v1")
 
@@ -13,3 +14,4 @@ api_router.include_router(dispatch_router)
 api_router.include_router(admin_router)
 api_router.include_router(docket_router)
 api_router.include_router(tracking_router)
+api_router.include_router(projects_router)

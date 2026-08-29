@@ -47,6 +47,7 @@ from app.models.efms import (
     FileStatus, RouteAction, DispatchMode, FilePriority,
 )
 from app.models.admin import FileRecipient
+from app.models.project import Project
 from app.schemas.efms import (
     FileCreate, FileUpdate, FileOut,
     NotesheetSave, RouteAction_ as RouteActionIn,
@@ -1892,6 +1893,16 @@ async def route_file(
         if to_user and to_user.is_super_admin:
             raise HTTPException(status_code=400, detail="Files cannot be forwarded to a Super Admin.")
 
+        # The recipient must be active — applies equally to an ordinary
+        # deactivated user and to an inactive/completed project profile
+        # (see User.origin_user_id in app/models/user.py). The recipient
+        # picker (GET /admin/users) already excludes inactive users, but
+        # that alone doesn't stop a direct API call from naming one, which
+        # would otherwise hand current_holder_id to an identity nobody can
+        # act as anymore.
+        if to_user and not to_user.is_active:
+            raise HTTPException(status_code=400, detail="Cannot forward a file to an inactive recipient.")
+
     for entry in f.route_entries:
         entry.is_current = False
 
@@ -1952,16 +1963,47 @@ async def route_file(
         # marked Urgent) must not trigger an email notification on forward.
         if to_user and f.priority == FilePriority.urgent:
             remarks_line = f"\nRemarks: {body.remarks}" if body.remarks else ""
-            _send_email(
-                to_user.email,
-                f"[AVFU eFMS] File forwarded to you: {f.ref_number}",
-                f"Dear {to_user.full_name},\n\n"
-                f"{actor_name} has forwarded the following file to you:\n\n"
-                f"File No : {f.ref_number}\n"
-                f"Subject : {f.subject}\n"
-                f"Priority: {f.priority.value if hasattr(f.priority,'value') else f.priority}{remarks_line}\n\n"
-                f"Please log in to AVFU eFMS to take action.\n\nAVFU eFMS"
-            )
+
+            if to_user.is_project_profile:
+                # A project profile is a credential-less identity with no
+                # real mailbox of its own (see app/api/v1/endpoints/
+                # projects.py) — its synthetic email must never be used as
+                # an actual send target. The person behind it (origin_user)
+                # is emailed at their real address instead. The file itself
+                # stays routed to the project profile's own users.id
+                # (current_holder_id, set above) — only where/how this
+                # notification email is sent changes.
+                original_user = await db.get(User, to_user.origin_user_id)
+                project = await db.get(Project, to_user.project_id)
+                email_to = original_user.email if original_user else None
+                greeting_name = original_user.full_name if original_user else to_user.full_name
+                subject = f"[AVFU eFMS] Urgent file forwarded to your project profile ({to_user.full_name}): {f.ref_number}"
+                project_line = f"Project : #{project.project_number} — {project.name}\n" if project else ""
+                profile_line = (
+                    f"This urgent notification is for your project profile, {to_user.full_name}, "
+                    f"not your regular eFMS account.\n"
+                    f"Profile : {to_user.full_name}\n{project_line}"
+                )
+                action_note = f"Please log in to AVFU eFMS and switch to your {to_user.full_name} profile to take action."
+            else:
+                email_to = to_user.email
+                greeting_name = to_user.full_name
+                subject = f"[AVFU eFMS] File forwarded to you: {f.ref_number}"
+                profile_line = ""
+                action_note = "Please log in to AVFU eFMS to take action."
+
+            if email_to:
+                _send_email(
+                    email_to,
+                    subject,
+                    f"Dear {greeting_name},\n\n"
+                    f"{profile_line}"
+                    f"{actor_name} has forwarded the following file to you:\n\n"
+                    f"File No : {f.ref_number}\n"
+                    f"Subject : {f.subject}\n"
+                    f"Priority: {f.priority.value if hasattr(f.priority,'value') else f.priority}{remarks_line}\n\n"
+                    f"{action_note}\n\nAVFU eFMS"
+                )
 
     return _visible_file(await _load_file(file_id, db), user)
 

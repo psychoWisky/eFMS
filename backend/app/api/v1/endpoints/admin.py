@@ -54,6 +54,12 @@ class UserOut(BaseModel):
     employee_code: Optional[str] = None
     is_favorite: bool = False
     favorite_created_at: Optional[datetime] = None
+    # Set only for a project profile (see User.origin_user_id/project_id) —
+    # lets the recipient picker show a clear "Project" badge next to
+    # "User A PI74" so it never reads as merely another label for "User A".
+    is_project_profile: bool = False
+    project_number: Optional[str] = None
+    project_name: Optional[str] = None
     model_config = {"from_attributes": True}
 
     @classmethod
@@ -62,7 +68,10 @@ class UserOut(BaseModel):
                    active_role=u.active_role,
                    designation=getattr(u, "designation", None),
                    department_name=u.department.name if u.department else None,
-                   employee_code=getattr(u, "employee_code", None))
+                   employee_code=getattr(u, "employee_code", None),
+                   is_project_profile=u.is_project_profile,
+                   project_number=u.project.project_number if u.project else None,
+                   project_name=u.project.name if u.project else None)
 
 class NotificationOut(BaseModel):
     id: UUID; title: str; message: Optional[str]; type: str
@@ -233,7 +242,7 @@ async def list_users(
         q = q.where(User.establishment_id == establishment_id)
     if department_id:
         q = q.where(User.department_id == department_id)
-    r = await db.execute(q.options(selectinload(User.department)).order_by(User.first_name))
+    r = await db.execute(q.options(selectinload(User.department), selectinload(User.project)).order_by(User.first_name))
     users = r.scalars().all()
 
     # One batched query for the caller's favorites — same "batch everything,

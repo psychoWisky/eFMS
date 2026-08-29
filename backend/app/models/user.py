@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Boolean, Enum, ForeignKey, Date, DateTime, UniqueConstraint
+from sqlalchemy import Column, String, Boolean, Enum, ForeignKey, Date, DateTime, UniqueConstraint, CheckConstraint
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
 from sqlalchemy.dialects.postgresql import UUID
@@ -111,12 +111,43 @@ class User(Base, UUIDMixin, TimestampMixin):
     # Digital signature permission
     can_sign = Column(Boolean, default=False, nullable=False)
 
+    # Project-specific profiles (PI profiles) — see app/models/project.py.
+    # origin_user_id IS NULL means this row IS an original/person identity.
+    # A non-NULL origin_user_id/project_id means this row is a separate,
+    # project-scoped eFMS identity for the SAME physical person named by
+    # origin_user_id: its own users.id flows through every existing
+    # ownership/routing FK (created_by, current_holder_id, RouteEntry.
+    # from_user_id/to_user_id, FileAttachment.uploaded_by, HolderNote.
+    # user_id) completely unchanged — this row is deliberately "just
+    # another user" to every existing authorization/ownership check in
+    # efms_files.py/docket.py. It has no independent credentials
+    # (hashed_password stays NULL — login/step1's existing
+    # `not user.hashed_password` check already refuses it) and is reachable
+    # only via POST /auth/switch-profile, which verifies origin_user_id
+    # matches the already-authenticated caller before minting a fresh token
+    # pair for it. Never hard-deleted — only ever is_active toggled by
+    # project completion/reactivation or reassignment (see projects.py).
+    origin_user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
+    project_id     = Column(UUID(as_uuid=True), ForeignKey("projects.id"), nullable=True)
+
     # Relationships
     roles = relationship("UserRole", back_populates="user", cascade="all, delete-orphan")
     establishment = relationship("Establishment", back_populates="users", foreign_keys=[establishment_id])
     department = relationship("Department", back_populates="users", foreign_keys=[department_id])
     refresh_tokens = relationship("RefreshToken", back_populates="user", cascade="all, delete-orphan")
     audit_logs = relationship("AuditLog", back_populates="user")
+    origin_user = relationship("User", remote_side="User.id", foreign_keys=[origin_user_id])
+    project_profiles = relationship("User", foreign_keys=[origin_user_id], overlaps="origin_user")
+    project = relationship("Project", foreign_keys=[project_id])
+
+    __table_args__ = (
+        # A profile row always has both origin_user_id and project_id, or
+        # neither — never one without the other.
+        CheckConstraint(
+            "(origin_user_id IS NULL) = (project_id IS NULL)",
+            name="ck_user_profile_origin_project_pair",
+        ),
+    )
 
     @property
     def full_name(self) -> str:
@@ -129,6 +160,10 @@ class User(Base, UUIDMixin, TimestampMixin):
         source of truth for the system-wide admin bypass. No other role
         (including plain ADMIN) may satisfy this."""
         return self.active_role == SystemRole.SUPER_ADMIN
+
+    @property
+    def is_project_profile(self) -> bool:
+        return self.origin_user_id is not None
 
 
 class UserRole(Base, UUIDMixin, TimestampMixin):

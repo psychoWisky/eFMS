@@ -34,6 +34,11 @@ class UserBrief(BaseModel):
     profile_photo_url: Optional[str]
     roles: list[str]
     can_sign: bool = False
+    # Lets GET /auth/my-profiles show an inactive/completed project profile
+    # disabled rather than omitting it silently. Always True for a normal
+    # login response (get_current_user already rejects inactive users
+    # before one could be issued), so existing consumers are unaffected.
+    is_active: bool = True
 
     model_config = {"from_attributes": True}
 

@@ -15,6 +15,7 @@ export interface AuthUser {
   must_change_password: boolean;
   roles: EfmsRole[];
   can_sign: boolean;
+  is_active?: boolean;
 }
 
 interface AuthState {

@@ -14,6 +14,12 @@ export interface FavoritableUser {
   department_name?: string | null;
   employee_code?: string | null;
   is_favorite?: boolean;
+  // Set only for a project-specific profile (e.g. "User A PI74") — see
+  // Project-Specific User Profiles. Never another label for the same
+  // person's original account; a genuinely separate, selectable recipient.
+  is_project_profile?: boolean;
+  project_number?: string | null;
+  project_name?: string | null;
 }
 
 // Any query whose key starts with "admin-users" — matches every recipient
@@ -48,7 +54,8 @@ export function useFavoriteRecipients() {
   }
 
   function personLabel(u: FavoritableUser): string {
-    return u.employee_code ? `${u.full_name} (${u.employee_code})` : u.full_name;
+    const base = u.employee_code ? `${u.full_name} (${u.employee_code})` : u.full_name;
+    return u.is_project_profile ? `${base} · Project #${u.project_number}` : base;
   }
 
   /** Partition an already-fetched user list into Favorite / All Recipients

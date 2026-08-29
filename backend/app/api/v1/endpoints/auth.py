@@ -9,7 +9,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Query
 from fastapi.responses import Response
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, update
+from sqlalchemy import select, func, update, or_
 from sqlalchemy.orm import selectinload
 from sqlalchemy.exc import IntegrityError
 from pydantic import BaseModel, EmailStr, ValidationError
@@ -132,6 +132,7 @@ def build_user_brief(user: User) -> UserBrief:
         profile_photo_url=user.profile_photo_url,
         roles=[r.role for r in user.roles],
         can_sign=user.can_sign,
+        is_active=user.is_active,
     )
 
 
@@ -274,11 +275,18 @@ async def forgot_password(payload: ForgotPasswordRequest, db: AsyncSession = Dep
     active account — the identical anti-enumeration principle login/step1
     already applies (same error for wrong email vs wrong password). No OTP
     is created/sent for an unknown or deactivated account, but the caller
-    cannot distinguish that from "sent" by the response alone."""
+    cannot distinguish that from "sent" by the response alone.
+
+    A project profile (User.origin_user_id IS NOT NULL) is deliberately
+    treated exactly like an unknown/inactive account here: it is
+    credential-less by design (see app/api/v1/endpoints/projects.py) and
+    must never be able to obtain a password via this flow, which would let
+    it authenticate independently of the person it belongs to. No OTP is
+    created/sent for it, and the response gives no indication either way."""
     email = payload.email.lower().strip()
     result = await db.execute(select(User).where(User.email == email))
     user = result.scalar_one_or_none()
-    if user and user.is_active:
+    if user and user.is_active and not user.is_project_profile:
         code = await otp_create(db, email, _PASSWORD_RESET_OTP_TYPE)
         otp_send_email(
             email,
@@ -306,7 +314,11 @@ async def forgot_password_verify(payload: ForgotPasswordVerifyRequest, db: Async
 
     result = await db.execute(select(User).where(User.email == email))
     user = result.scalar_one_or_none()
-    if not user or not user.is_active:
+    # Defense-in-depth: forgot_password never creates an OTP for a project
+    # profile, so otp_verify above should already fail for one — this
+    # second check means a reset_token can never be minted for one even if
+    # that first guard were ever bypassed or an OTP somehow existed.
+    if not user or not user.is_active or user.is_project_profile:
         raise HTTPException(status_code=400, detail="Invalid or expired OTP. Please request a new one.")
 
     # Bind the token to the CURRENT password hash so a successful reset
@@ -335,7 +347,12 @@ async def forgot_password_reset(payload: ForgotPasswordResetRequest, db: AsyncSe
 
     result = await db.execute(select(User).where(User.id == user_id, User.is_active == True))
     user = result.scalar_one_or_none()
-    if not user:
+    # Defense-in-depth (see forgot_password_verify above, which should
+    # already make this unreachable for a project profile): a project
+    # profile must never reach the hashed_password assignment below under
+    # any circumstance, including a token minted before this guard existed
+    # or otherwise obtained.
+    if not user or user.is_project_profile:
         raise HTTPException(status_code=400, detail="Invalid or expired password reset session. Please start again.")
 
     # Reject replay of an already-used token: its pwd_sig was computed from
@@ -389,6 +406,76 @@ async def refresh_token(payload: RefreshRequest, db: AsyncSession = Depends(get_
         raise HTTPException(status_code=401, detail="User not found.")
 
     resp = await _issue_tokens(user, db)
+    await db.commit()
+    return resp
+
+
+# ── Project profile switching ────────────────────────────────────────────────
+# A project profile (User.origin_user_id/project_id — see app/models/user.py
+# and app/api/v1/endpoints/projects.py) has no password of its own; it is
+# reachable only by an already-authenticated person switching into it here.
+# Switching mints a completely FRESH access+refresh token pair for the
+# target profile's own users.id via the existing _issue_tokens — no new JWT
+# claim, no server-side "active profile" state. Every downstream endpoint
+# (get_file, list_files, docket, attachments, etc.) then sees that token's
+# sub exactly as it would for any other user, with zero code changes to any
+# of them: the whole point of this design.
+
+class SwitchProfileRequest(BaseModel):
+    profile_user_id: UUID
+
+
+def _resolve_person_id(current_user: User) -> UUID:
+    """The real person's users.id, whether the caller is currently
+    authenticated AS their original profile or as one of their project
+    profiles — lets switching go directly between two project profiles
+    without first switching back to the original."""
+    return current_user.origin_user_id or current_user.id
+
+
+@router.get("/my-profiles", response_model=List[UserBrief])
+async def list_my_profiles(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """The authenticated person's original profile plus every project
+    profile assigned to them (active or not — an inactive one is included
+    so the frontend can show it, disabled, rather than silently omitting
+    it). user_id is never accepted as a parameter; the person is always
+    derived from the caller's own verified token."""
+    person_id = _resolve_person_id(current_user)
+    result = await db.execute(
+        select(User).options(selectinload(User.roles))
+        .where(or_(User.id == person_id, User.origin_user_id == person_id))
+        .order_by(User.origin_user_id.is_(None).desc(), User.created_at)
+    )
+    return [build_user_brief(u) for u in result.scalars().all()]
+
+
+@router.post("/switch-profile", response_model=TokenResponse)
+async def switch_profile(
+    body: SwitchProfileRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Verifies the target profile genuinely belongs to the authenticated
+    person and is currently active, then issues a fresh token pair for it —
+    identical in shape to a normal login's token response. A forged/
+    unrelated profile_user_id (someone else's account, or a project profile
+    belonging to a different person) is rejected with 403 regardless of
+    what the frontend would normally show; profile_user_id is the only
+    client-supplied input here, and it is authorized, never trusted."""
+    person_id = _resolve_person_id(current_user)
+    # selectinload(User.roles): _issue_tokens -> build_user_brief reads
+    # target.roles, which a plain db.get() would lazy-load outside of an
+    # async-safe context.
+    target = await db.scalar(select(User).options(selectinload(User.roles)).where(User.id == body.profile_user_id))
+    if not target or (target.id != person_id and target.origin_user_id != person_id):
+        raise HTTPException(status_code=403, detail="This profile does not belong to you.")
+    if not target.is_active:
+        raise HTTPException(status_code=403, detail="This profile is no longer active.")
+
+    resp = await _issue_tokens(target, db)
     await db.commit()
     return resp
 
@@ -475,6 +562,20 @@ async def _load_user(db: AsyncSession, uid: UUID) -> User:
     return user
 
 
+def _assert_not_project_profile(user: User) -> None:
+    """Project profiles (User.origin_user_id IS NOT NULL — see
+    app/api/v1/endpoints/projects.py) are managed EXCLUSIVELY through the
+    Project Management assign/reassign/complete/reactivate endpoints, never
+    through these generic person-management endpoints — otherwise a project
+    profile could be reactivated independently of its Project's own status
+    (desynchronizing the two), have person-deactivation metadata written to
+    it, or have its role/identity fields edited independently of the
+    origin person it belongs to, all of which the project-profile
+    architecture explicitly does not allow."""
+    if user.is_project_profile:
+        raise HTTPException(400, "Project profiles are managed through Project Management, not User Management.")
+
+
 async def _set_single_role(db: AsyncSession, user: User, role: str) -> None:
     """Replace whatever UserRole rows a user has with exactly one, matching
     active_role. Roles here are a single organizational context, not a
@@ -492,7 +593,10 @@ async def list_admin_users(
     db: AsyncSession = Depends(get_db),
     _: User = Depends(_super),
 ):
-    q = select(User).options(selectinload(User.department), selectinload(User.establishment))
+    # Person-centric screen — project profiles (User.origin_user_id set)
+    # are managed exclusively through the Projects screen instead, so they
+    # never appear here as if they were independent people to manage.
+    q = select(User).options(selectinload(User.department), selectinload(User.establishment)).where(User.origin_user_id.is_(None))
     if status_filter == "active":
         q = q.where(User.is_active == True)
     elif status_filter == "inactive":
@@ -755,6 +859,7 @@ async def edit_user(
     _: User = Depends(_super),
 ):
     user = await _load_user(db, uid)
+    _assert_not_project_profile(user)
 
     if body.email is not None:
         email = body.email.lower().strip()
@@ -828,6 +933,7 @@ async def set_user_status(
     current_user: User = Depends(_super),
 ):
     user = await _load_user(db, uid)
+    _assert_not_project_profile(user)
 
     if body.is_active:
         user.is_active = True

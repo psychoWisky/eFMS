@@ -1,7 +1,7 @@
 "use client";
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { Bell, ChevronDown, LogOut, Loader2, CheckCheck, FileText, Star, KeyRound } from "lucide-react";
+import { Bell, ChevronDown, LogOut, Loader2, CheckCheck, FileText, Star, KeyRound, Repeat, Lock } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useAuthStore, useUser, useActiveRole, type EfmsRole } from "@/stores/auth.store";
@@ -9,6 +9,7 @@ import { api } from "@/services/api";
 import { toast } from "sonner";
 import { cn, getInitials, formatDate } from "@/lib/utils";
 import { ManageFavoritesDialog } from "@/components/shared/manage-favorites-dialog";
+import { useMyProfiles, switchToProfile } from "@/hooks/use-my-profiles";
 
 interface Notification { id: string; title: string; message: string | null; type: string; file_id: string | null; is_read: boolean; }
 
@@ -29,10 +30,15 @@ export function EFMSTopNav({ sidebarWidth }: { sidebarWidth: number }) {
   const router = useRouter();
   const user = useUser();
   const activeRole = useActiveRole();
-  const { clearAuth, refreshToken } = useAuthStore();
+  const { clearAuth, refreshToken, setAuth } = useAuthStore();
   const qc = useQueryClient();
   const [menuOpen, setMenuOpen] = useState(false);
   const [notifOpen, setNotifOpen] = useState(false);
+  const [switchingId, setSwitchingId] = useState<string | null>(null);
+  // Only fetched to populate the Switch Profile list — most users have no
+  // project profiles at all (just their own original account), in which
+  // case the section below simply doesn't render.
+  const { data: myProfiles = [] } = useMyProfiles();
   const [showFavorites, setShowFavorites] = useState(false);
 
   const { data: notifications = [] } = useQuery<Notification[]>({
@@ -85,6 +91,30 @@ export function EFMSTopNav({ sidebarWidth }: { sidebarWidth: number }) {
     // doesn't briefly see the previous user's stale, self-filtered results.
     qc.clear();
     router.replace("/login");
+  };
+
+  // Switching identity replaces the ENTIRE auth state with a fresh token
+  // pair minted for the target profile's own users.id (POST /auth/
+  // switch-profile) — from every other screen's perspective this is
+  // indistinguishable from having logged in as that profile directly, so
+  // every cached query keyed by the previous identity (My Files, Docket,
+  // notifications, etc.) must be dropped exactly as handleLogout already
+  // does, or a stale cross-identity result could briefly render.
+  const handleSwitchProfile = async (profileId: string) => {
+    if (profileId === user?.id) { setMenuOpen(false); return; }
+    setSwitchingId(profileId);
+    try {
+      const { access_token, refresh_token, user: newUser } = await switchToProfile(profileId);
+      setAuth(newUser, access_token, refresh_token);
+      qc.clear();
+      setMenuOpen(false);
+      router.replace("/dashboard");
+    } catch (err) {
+      const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      toast.error(msg ?? "Could not switch profile.");
+    } finally {
+      setSwitchingId(null);
+    }
   };
 
   return (
@@ -173,6 +203,32 @@ export function EFMSTopNav({ sidebarWidth }: { sidebarWidth: number }) {
                   <p className="text-xs text-[#4A5568] mt-0.5">{user?.email}</p>
                   <p className="text-xs text-[#0D6E6E] font-medium mt-0.5">{activeRole ? roleLabel(activeRole) : ""}</p>
                 </div>
+                {myProfiles.length > 1 && (
+                  <div className="border-t border-[#D1D9E0] mt-1 py-1">
+                    <p className="px-4 pt-1.5 pb-1 text-xs font-semibold text-[#9CA3AF] uppercase tracking-wide">Switch Profile</p>
+                    {myProfiles.map((p) => {
+                      const isCurrent = p.id === user?.id;
+                      const isDisabled = p.is_active === false;
+                      return (
+                        <button
+                          key={p.id}
+                          disabled={isCurrent || isDisabled || switchingId === p.id}
+                          onClick={() => handleSwitchProfile(p.id)}
+                          title={isDisabled ? "This project profile is no longer active." : undefined}
+                          className={cn(
+                            "w-full flex items-center gap-3 px-4 py-2 text-sm text-left",
+                            isCurrent ? "text-[#0D6E6E] font-semibold" : "text-[#1A1A2E]",
+                            isDisabled ? "opacity-40 cursor-not-allowed" : "hover:bg-[#F0F7F7]"
+                          )}
+                        >
+                          {switchingId === p.id ? <Loader2 size={14} className="animate-spin shrink-0" /> : isDisabled ? <Lock size={14} className="shrink-0" /> : <Repeat size={14} className="shrink-0" />}
+                          <span className="truncate">{p.full_name}</span>
+                          {isCurrent && <span className="ml-auto text-xs text-gray-400 shrink-0">Current</span>}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
                 <div className="border-t border-[#D1D9E0] mt-1">
                   <button onClick={() => { setShowFavorites(true); setMenuOpen(false); }}
                     className="w-full flex items-center gap-3 px-4 py-2.5 text-base text-[#1A1A2E] hover:bg-[#F0F7F7]">
