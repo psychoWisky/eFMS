@@ -1303,14 +1303,14 @@ async def download_notesheet(
         holder_sections.append(
             f"""
             <table class="notesheet-section">
-                <tr>
+                <tr class="section-header-row">
                     <td class="section-number">
                         {note.sequence}
                     </td>
 
                     <td class="section-heading">
                         <div class="section-label">
-                            HOLDER NOTESHEET
+                            NOTESHEET {note.sequence} &middot; HOLDER NOTESHEET
                         </div>
 
                         <div class="person-name">
@@ -1321,7 +1321,7 @@ async def download_notesheet(
                     </td>
                 </tr>
 
-                <tr>
+                <tr class="section-meta-row">
                     <td class="section-meta-number">
                         No. {note.sequence}
                     </td>
@@ -1391,7 +1391,7 @@ async def download_notesheet(
 
 @page {{
     size: A4;
-    margin: 15mm 15mm 17mm 15mm;
+    margin: 15mm;
 }}
 
 body {{
@@ -1413,35 +1413,56 @@ body {{
 
 .header {{
     width: 100%;
-    text-align: center;
     border-bottom: 2px solid #222222;
     padding-bottom: 10px;
     margin-bottom: 16px;
 }}
 
+.header-logo-cell {{
+    width: 90px;
+    text-align: left;
+    vertical-align: top;
+    padding-right: 12px;
+}}
+
 .logo {{
-    width: 78px;
-    height: 78px;
-    margin-bottom: 5px;
+    width: 70px;
+    height: auto;
+    display: block;
+}}
+
+.download-meta {{
+    margin-top: 6px;
+    text-align: left;
+    font-size: 8pt;
+    color: #555555;
+    line-height: 1.3;
+}}
+
+.download-meta-label {{
+    font-size: 7pt;
+    font-weight: bold;
+    letter-spacing: 0.5px;
+    color: #777777;
+}}
+
+.header-info-cell {{
+    text-align: left;
+    vertical-align: top;
 }}
 
 .institution {{
-    font-size: 16pt;
+    font-size: 15pt;
     font-weight: bold;
     margin: 2px 0;
-}}
-
-.document-title {{
-    font-size: 12.5pt;
-    font-weight: bold;
-    margin-top: 5px;
-    letter-spacing: 0.5px;
+    text-align: left;
 }}
 
 .subtitle {{
     font-size: 8.5pt;
     color: #555555;
     margin-top: 3px;
+    text-align: left;
 }}
 
 /* ================================================================
@@ -1498,7 +1519,17 @@ body {{
     border-collapse: collapse;
     margin-top: 17px;
     margin-bottom: 17px;
+    /* Deliberately no page-break-inside: avoid here — a long Notesheet's
+       content must be allowed to continue onto the next page rather than
+       being forced onto one page (which would leave a large blank gap at
+       the bottom of the previous page). Only the heading and its
+       immediate metadata row are kept together below. */
+}}
+
+.section-header-row,
+.section-meta-row {{
     page-break-inside: avoid;
+    page-break-after: avoid;
 }}
 
 .section-number {{
@@ -1638,23 +1669,28 @@ body {{
 <div class="document">
 
     <!-- ============================================================
-         AVFU HEADER
+         AVFU HEADER — logo + download timestamp top-left,
+         institution name/subtitle beside the logo.
          ============================================================ -->
 
-    <table width="100%" cellpadding="0" cellspacing="0"
-           style="border-collapse: collapse; margin-bottom: 12px;">
+    <table class="header" cellpadding="0" cellspacing="0">
 
         <tr>
-            <td align="center">
+            <td class="header-logo-cell">
 
                 {logo_html}
 
-                <div class="institution">
-                    ASSAM VETERINARY AND FISHERY UNIVERSITY
+                <div class="download-meta">
+                    <div class="download-meta-label">DOWNLOADED</div>
+                    {_escape_html(download_time_display)} IST
                 </div>
 
-                <div class="document-title">
-                    COMPLETE NOTESHEET
+            </td>
+
+            <td class="header-info-cell">
+
+                <div class="institution">
+                    ASSAM VETERINARY AND FISHERY UNIVERSITY
                 </div>
 
                 <div class="subtitle">
@@ -1699,16 +1735,6 @@ body {{
             </td>
         </tr>
 
-        <tr>
-            <td class="file-information-label">
-                Downloaded On
-            </td>
-
-            <td class="file-information-value">
-                {_escape_html(download_time_display)} IST
-            </td>
-        </tr>
-
     </table>
 
 
@@ -1718,7 +1744,7 @@ body {{
 
     <table class="notesheet-section">
 
-        <tr>
+        <tr class="section-header-row">
 
             <td class="section-number">
                 1
@@ -1727,7 +1753,7 @@ body {{
             <td class="section-heading">
 
                 <div class="section-label">
-                    INITIAL NOTESHEET
+                    NOTESHEET 1 &middot; INITIAL NOTESHEET
                 </div>
 
                 <div class="person-name">
@@ -1740,7 +1766,7 @@ body {{
 
         </tr>
 
-        <tr>
+        <tr class="section-meta-row">
 
             <td class="section-meta-number">
                 No. 1
@@ -1775,9 +1801,7 @@ body {{
          ============================================================ -->
 
     <div class="footer">
-        Generated from AVFU eFMS &bull;
-        Complete Notesheet &bull;
-        Downloaded {_escape_html(download_time_display)} IST
+        AVFU eFMS &bull; Electronic Notesheet
     </div>
 
 </div>
