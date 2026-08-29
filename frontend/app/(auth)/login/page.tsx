@@ -2,6 +2,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
+import Image from "next/image";
 import { Mail, Lock, Eye, EyeOff, ChevronRight, AlertCircle, Loader2, ArrowLeft } from "lucide-react";
 import { useMutation } from "@tanstack/react-query";
 import { api } from "@/services/api";
@@ -87,6 +88,11 @@ export default function LoginPage() {
       <div className="w-full max-w-[480px]">
         {/* Header */}
         <div className="text-center mb-8">
+          <div className="flex justify-center mb-4">
+            <div className="w-20 h-20 rounded-2xl overflow-hidden bg-white shadow-md border border-gray-100 flex items-center justify-center">
+              <Image src="/avfu_logo.png" alt="AVFU Logo" width={80} height={80} className="object-contain w-full h-full" />
+            </div>
+          </div>
           <h1 className="text-3xl font-bold text-[#1A1A2E]">Sign In</h1>
           <p className="text-lg text-[#4A5568] mt-1">AVFU Electronic File Management System</p>
         </div>

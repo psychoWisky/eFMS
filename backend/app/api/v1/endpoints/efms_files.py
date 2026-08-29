@@ -1389,18 +1389,33 @@ body {{
 
 /* ================================================================
    HEADER
+   — Uses a plain <table> for the two-column layout because
+     LibreOffice's HTML import engine does not support
+     display:inline-block reliably; a table is the only layout
+     primitive it honours consistently.
    ================================================================ */
 
 .header {{
     border-bottom: 2px solid #222222;
     padding-bottom: 8px;
     margin-bottom: 14px;
+    width: 100%;
 }}
 
-.header-logo {{
-    display: inline-block;
-    vertical-align: top;
+.header-table {{
+    width: 100%;
+    border-collapse: collapse;
+}}
+
+.header-td-logo {{
     width: 22%;
+    vertical-align: top;
+    padding: 0;
+}}
+
+.header-td-info {{
+    vertical-align: top;
+    padding: 0 0 0 8px;
 }}
 
 .logo {{
@@ -1419,12 +1434,6 @@ body {{
     font-weight: bold;
     letter-spacing: 0.5px;
     color: #777777;
-}}
-
-.header-info {{
-    display: inline-block;
-    vertical-align: top;
-    width: 76%;
 }}
 
 .institution {{
@@ -1459,20 +1468,21 @@ body {{
     margin-bottom: 6px;
 }}
 
-.file-info-row {{
-    padding: 2px 0;
+.file-info-table {{
+    width: 100%;
+    border-collapse: collapse;
 }}
 
-.file-info-label {{
-    display: inline-block;
+.file-info-td-label {{
     width: 110px;
     font-weight: bold;
     vertical-align: top;
+    padding: 2px 0;
 }}
 
-.file-info-value {{
-    display: inline-block;
+.file-info-td-value {{
     vertical-align: top;
+    padding: 2px 0;
 }}
 
 /* ================================================================
@@ -1593,41 +1603,50 @@ body {{
 <body>
 
     <!-- ============================================================
-         AVFU HEADER — logo + download timestamp top-left,
-         institution name/subtitle beside the logo.
+         AVFU HEADER
+         Uses a table so LibreOffice renders the two columns correctly
+         (logo + download meta on the left, institution name on right).
          ============================================================ -->
 
     <div class="header">
-        <div class="header-logo">
-            {logo_html}
-            <div class="download-meta">
-                <div class="download-meta-label">DOWNLOADED</div>
-                {_escape_html(download_time_display)} IST
-            </div>
-        </div><div class="header-info">
-            <div class="institution">
-                ASSAM VETERINARY AND FISHERY UNIVERSITY
-            </div>
-            <div class="subtitle">
-                Electronic File Management System (eFMS)
-            </div>
-        </div>
+        <table class="header-table" cellpadding="0" cellspacing="0">
+            <tr>
+                <td class="header-td-logo">
+                    {logo_html}
+                    <div class="download-meta">
+                        <div class="download-meta-label">DOWNLOADED</div>
+                        {_escape_html(download_time_display)} IST
+                    </div>
+                </td>
+                <td class="header-td-info">
+                    <div class="institution">
+                        ASSAM VETERINARY AND FISHERY UNIVERSITY
+                    </div>
+                    <div class="subtitle">
+                        Electronic File Management System (eFMS)
+                    </div>
+                </td>
+            </tr>
+        </table>
     </div>
 
     <!-- ============================================================
          FILE INFORMATION
+         Uses a table for label/value alignment (same reason as above).
          ============================================================ -->
 
     <div class="file-info">
         <div class="file-info-title">FILE INFORMATION</div>
-        <div class="file-info-row">
-            <span class="file-info-label">File Number</span>
-            <span class="file-info-value">{_escape_html(f.ref_number)}</span>
-        </div>
-        <div class="file-info-row">
-            <span class="file-info-label">Subject</span>
-            <span class="file-info-value">{_escape_html(f.subject)}</span>
-        </div>
+        <table class="file-info-table" cellpadding="0" cellspacing="0">
+            <tr>
+                <td class="file-info-td-label">File Number</td>
+                <td class="file-info-td-value">{_escape_html(f.ref_number)}</td>
+            </tr>
+            <tr>
+                <td class="file-info-td-label">Subject</td>
+                <td class="file-info-td-value">{_escape_html(f.subject)}</td>
+            </tr>
+        </table>
     </div>
 
     <!-- ============================================================

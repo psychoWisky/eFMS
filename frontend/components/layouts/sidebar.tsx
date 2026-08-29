@@ -5,6 +5,7 @@ import { LayoutDashboard, ShieldCheck, ChevronLeft, ChevronRight, Search, Histor
 import { useActiveRole } from "@/stores/auth.store";
 import { guardedNavigate } from "@/hooks/use-unsaved-changes-guard";
 import { cn } from "@/lib/utils";
+import Image from "next/image";
 
 // All non-SUPER_ADMIN roles are equal, ordinary eFMS roles — including any
 // role Super Admin creates through Role Management. Normal eFMS workflow
@@ -37,8 +38,14 @@ export function EFMSSidebar({ collapsed, onToggle }: SidebarProps) {
       style={{ boxShadow: "2px 0 8px rgba(0,0,0,.04)" }}
     >
       <div className="flex items-center gap-3 px-4 h-16 border-b border-gray-200 flex-shrink-0">
-        <div className="w-9 h-9 rounded-xl bg-[#0D6E6E] flex items-center justify-center flex-shrink-0">
-          <span className="text-white font-bold text-sm">e</span>
+        <div className="w-9 h-9 rounded-xl overflow-hidden flex items-center justify-center flex-shrink-0 bg-white">
+          <Image
+            src="/avfu_logo.png"
+            alt="AVFU Logo"
+            width={36}
+            height={36}
+            className="object-contain w-full h-full"
+          />
         </div>
         <AnimatePresence>
           {!collapsed && (
