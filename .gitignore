@@ -7,3 +7,6 @@ __pycache__/
 .env
 backend/.env
 .claude/
+
+# stray root lockfile (real one lives in frontend/)
+/package-lock.json
