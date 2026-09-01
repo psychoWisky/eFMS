@@ -1,13 +1,16 @@
 """GET /efms/files/{file_id}/notesheet/download — exception-to-status-code
-mapping only. Does not invoke a real LibreOffice process: _find_soffice is
-monkeypatched to raise DocConversionUnavailable directly, reproducing the
-live-server 503 deterministically without needing soffice installed."""
+mapping only. Does not invoke a real Chromium or LibreOffice process: the
+notesheet download tries headless Chromium first and falls back to
+LibreOffice, so both are monkeypatched to be "unavailable" here, which is
+what reproduces the live-server 503 deterministically without needing
+either engine installed."""
 import pytest
 
 from app.models.user import SystemRole
 from app.models.efms import EfmsFile
-from app.utils import doc_convert
+from app.utils import doc_convert, html_pdf
 from app.utils.doc_convert import DocConversionUnavailable
+from app.utils.html_pdf import ChromiumUnavailable
 from tests.conftest import auth_headers
 
 
@@ -29,11 +32,16 @@ async def _delete_file(db, file_id):
 
 
 @pytest.mark.asyncio
-async def test_notesheet_download_returns_503_when_soffice_unavailable(client, users, db, monkeypatch):
-    def _raise_unavailable():
+async def test_notesheet_download_returns_503_when_no_engine_available(client, users, db, monkeypatch):
+    def _chromium_unavailable(_html):
+        raise ChromiumUnavailable("Playwright/Chromium is not installed on this server.")
+
+    def _soffice_unavailable():
         raise DocConversionUnavailable("LibreOffice (soffice) is not installed on this server.")
 
-    monkeypatch.setattr(doc_convert, "_find_soffice", _raise_unavailable)
+    # Chromium is tried first, LibreOffice is the fallback — knock out both.
+    monkeypatch.setattr(html_pdf, "render_html_to_pdf", _chromium_unavailable)
+    monkeypatch.setattr(doc_convert, "_find_soffice", _soffice_unavailable)
 
     creator = await users.make(SystemRole.EFMS_OFFICER, first_name="Creator")
     file_id = await _create_file(client, creator)

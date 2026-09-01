@@ -1137,13 +1137,28 @@ async def download_notesheet(
 
     if logo_path.is_file():
         try:
-            logo_b64 = base64.b64encode(logo_path.read_bytes()).decode("ascii")
-            # width is set as a real HTML attribute (not just CSS) —
-            # LibreOffice's HTML import sizes/anchors <img> more reliably
-            # when width is present as an attribute; height is left to the
-            # CSS "height: auto" rule below so the logo's aspect ratio is
-            # preserved regardless of its actual pixel dimensions. The logo
-            # sits centred in the letterhead, above the university name.
+            # The source PNG is very large (multi-thousand px). Embedding
+            # it raw would make every notesheet PDF several MB, so it's
+            # downscaled to a small letterhead mark once here and embedded
+            # as that. Falls back to the raw bytes if Pillow chokes on it.
+            try:
+                from io import BytesIO
+                from PIL import Image
+
+                _img = Image.open(logo_path)
+                _img.thumbnail((320, 320))  # 4x the 64pt display size, for crisp print
+                _buf = BytesIO()
+                _img.save(_buf, format="PNG", optimize=True)
+                _logo_bytes = _buf.getvalue()
+            except Exception:  # noqa: BLE001 - any decode/resize failure
+                _logo_bytes = logo_path.read_bytes()
+
+            logo_b64 = base64.b64encode(_logo_bytes).decode("ascii")
+            # width is set as a real HTML attribute (not just CSS) so the
+            # LibreOffice fallback path sizes the <img> reliably; height is
+            # left to the CSS "height: auto" rule so the aspect ratio is
+            # preserved. The logo sits centred in the letterhead, above the
+            # university name.
             logo_html = (
                 '<img class="logo" '
                 'width="64" '
@@ -1674,29 +1689,56 @@ body {{
 
     # ------------------------------------------------------------------
     # Convert HTML → PDF.
+    #
+    # The notesheet is the one document that needs a modern CSS engine
+    # (letter-spacing, justified text, flex, @page margins), so it renders
+    # in headless Chromium via Playwright. Every other conversion in the
+    # app still uses LibreOffice — and if Chromium isn't installed on this
+    # server yet, we fall back to LibreOffice here too so downloads keep
+    # working (just with the older, boxier layout).
     # ------------------------------------------------------------------
+    from starlette.concurrency import run_in_threadpool
+
+    from app.utils.html_pdf import (
+        render_html_to_pdf,
+        ChromiumUnavailable,
+        ChromiumRenderFailed,
+    )
     from app.utils.doc_convert import (
         convert_html_to_pdf,
         DocConversionUnavailable,
         DocConversionFailed,
     )
 
+    pdf_bytes = None
+
     try:
-        pdf_bytes = convert_html_to_pdf(
-            html.encode("utf-8")
-        )
-
-    except DocConversionUnavailable:
-        raise HTTPException(
-            status_code=503,
-            detail="PDF generation is not available on this server.",
-        )
-
-    except DocConversionFailed:
+        pdf_bytes = await run_in_threadpool(render_html_to_pdf, html)
+    except ChromiumUnavailable:
+        pdf_bytes = None  # fall through to LibreOffice
+    except ChromiumRenderFailed:
         raise HTTPException(
             status_code=422,
             detail="Failed to generate notesheet PDF.",
         )
+
+    if pdf_bytes is None:
+        try:
+            pdf_bytes = convert_html_to_pdf(
+                html.encode("utf-8")
+            )
+
+        except DocConversionUnavailable:
+            raise HTTPException(
+                status_code=503,
+                detail="PDF generation is not available on this server.",
+            )
+
+        except DocConversionFailed:
+            raise HTTPException(
+                status_code=422,
+                detail="Failed to generate notesheet PDF.",
+            )
 
     # ------------------------------------------------------------------
     # Download filename.
