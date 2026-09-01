@@ -1138,14 +1138,15 @@ async def download_notesheet(
     if logo_path.is_file():
         try:
             logo_b64 = base64.b64encode(logo_path.read_bytes()).decode("ascii")
-            # width="70" is set as a real HTML attribute (not just CSS) —
+            # width is set as a real HTML attribute (not just CSS) —
             # LibreOffice's HTML import sizes/anchors <img> more reliably
             # when width is present as an attribute; height is left to the
             # CSS "height: auto" rule below so the logo's aspect ratio is
-            # preserved regardless of its actual pixel dimensions.
+            # preserved regardless of its actual pixel dimensions. The logo
+            # sits centred in the letterhead, above the university name.
             logo_html = (
                 '<img class="logo" '
-                'width="70" '
+                'width="64" '
                 f'src="data:image/png;base64,{logo_b64}" '
                 'alt="AVFU Logo">'
             )
@@ -1323,24 +1324,22 @@ async def download_notesheet(
             )
 
         # --------------------------------------------------------------
-        # Holder Notesheet box
+        # Holder Notesheet entry — a flowing document section (no box).
+        # A thin rule + the contributor's identity block introduces the
+        # entry, then the notesheet prose runs on naturally, the way a
+        # real government notesheet reads. Only the identity block is
+        # kept off a page break; long prose is free to flow over.
         # --------------------------------------------------------------
         holder_sections.append(
             f"""
-            <div class="notesheet-box">
-                <div class="notesheet-meta">
-                    <div class="notesheet-heading">
-                        NOTESHEET {note.sequence} &mdash; HOLDER NOTESHEET
-                    </div>
-                    <div class="identity-line">
-                        <span class="identity-label">Holder:</span>
-                        {_escape_html(holder_name)}
-                    </div>
+            <div class="note-entry">
+                <div class="note-entry-head">
+                    <div class="note-seq">Notesheet {note.sequence}</div>
+                    <div class="contributor-name">{_escape_html(holder_name)}</div>
                     {holder_details_html}
                     {timestamp_html}
                 </div>
-                <div class="notesheet-divider"></div>
-                <div class="notesheet-content">
+                <div class="note-body">
                     {holder_content}
                 </div>
             </div>
@@ -1352,10 +1351,15 @@ async def download_notesheet(
     # ------------------------------------------------------------------
     # Complete PDF HTML.
     #
-    # Structurally simple on purpose: the header, file-information block,
-    # and every Notesheet box are plain <div>s (no outer/wrapping table),
-    # so the document begins rendering immediately on page 1 instead of
-    # LibreOffice needing to lay out a table-based skeleton first.
+    # Laid out to read like a real government notesheet: a centred
+    # letterhead (logo + university name + eFMS line) over a double
+    # rule, a compact file-reference block, then each notesheet as a
+    # flowing document section — a thin rule and the contributor's
+    # identity, then the prose running on naturally. No bordered "cards"
+    # around individual fields.
+    #
+    # Tables are used only where LibreOffice's HTML import needs them
+    # for reliable alignment (the file-reference label/value grid).
     #
     # NOTE:
     # This is an f-string, so ALL CSS curly braces MUST be doubled:
@@ -1375,97 +1379,77 @@ async def download_notesheet(
 
 @page {{
     size: A4;
-    margin: 15mm;
+    margin: 18mm 20mm;
 }}
 
 body {{
     font-family: "Liberation Serif", Georgia, "Times New Roman", serif;
-    font-size: 10.5pt;
-    line-height: 1.45;
-    color: #222222;
+    font-size: 11pt;
+    line-height: 1.5;
+    color: #1a1a1a;
     margin: 0;
     padding: 0;
 }}
 
 /* ================================================================
-   HEADER
-   — Uses a plain <table> for the two-column layout because
-     LibreOffice's HTML import engine does not support
-     display:inline-block reliably; a table is the only layout
-     primitive it honours consistently.
+   LETTERHEAD
+   Centred logo + university name + eFMS line, closed by a double
+   rule — the classic official-letterhead treatment.
    ================================================================ */
 
-.header {{
-    border-bottom: 2px solid #222222;
-    padding-bottom: 8px;
-    margin-bottom: 14px;
-    width: 100%;
-}}
-
-.header-table {{
-    width: 100%;
-    border-collapse: collapse;
-}}
-
-.header-td-logo {{
-    width: 22%;
-    vertical-align: top;
-    padding: 0;
-}}
-
-.header-td-info {{
-    vertical-align: top;
-    padding: 0 0 0 8px;
+.letterhead {{
+    text-align: center;
+    padding-bottom: 10px;
+    border-bottom: 3px double #222222;
+    margin-bottom: 4px;
 }}
 
 .logo {{
     height: auto;
-}}
-
-.download-meta {{
-    margin-top: 6px;
-    font-size: 8pt;
-    color: #555555;
-    line-height: 1.3;
-}}
-
-.download-meta-label {{
-    font-size: 7pt;
-    font-weight: bold;
-    letter-spacing: 0.5px;
-    color: #777777;
+    margin-bottom: 4px;
 }}
 
 .institution {{
-    font-size: 15pt;
+    font-size: 17pt;
     font-weight: bold;
-    margin: 2px 0;
+    letter-spacing: 0.5px;
+    margin: 2px 0 0 0;
+    text-transform: uppercase;
 }}
 
 .subtitle {{
-    font-size: 8.5pt;
-    color: #555555;
+    font-size: 9.5pt;
+    color: #444444;
+    letter-spacing: 1px;
     margin-top: 3px;
+    text-transform: uppercase;
 }}
 
-/* ================================================================
-   FILE INFORMATION
-   ================================================================ */
+.doc-title {{
+    text-align: center;
+    font-size: 12pt;
+    font-weight: bold;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    margin: 14px 0 4px 0;
+}}
 
-.file-info {{
-    border: 1px solid #999999;
-    padding: 8px 10px 10px 10px;
+.download-meta {{
+    text-align: center;
+    font-size: 8pt;
+    color: #777777;
     margin-bottom: 16px;
 }}
 
-.file-info-title {{
-    font-size: 9pt;
-    font-weight: bold;
-    letter-spacing: 0.5px;
-    color: #444444;
-    border-bottom: 1px solid #cccccc;
-    padding-bottom: 4px;
-    margin-bottom: 6px;
+/* ================================================================
+   FILE REFERENCE
+   ================================================================ */
+
+.file-info {{
+    border-top: 1px solid #bbbbbb;
+    border-bottom: 1px solid #bbbbbb;
+    padding: 8px 2px;
+    margin-bottom: 20px;
 }}
 
 .file-info-table {{
@@ -1474,113 +1458,128 @@ body {{
 }}
 
 .file-info-td-label {{
-    width: 110px;
+    width: 120px;
     font-weight: bold;
+    color: #333333;
     vertical-align: top;
-    padding: 2px 0;
+    padding: 3px 0;
+    font-size: 10pt;
 }}
 
 .file-info-td-value {{
     vertical-align: top;
-    padding: 2px 0;
+    padding: 3px 0;
+    font-size: 10.5pt;
 }}
 
 /* ================================================================
-   NOTESHEET BOX
+   NOTESHEET ENTRY  (flowing — no card border)
    ================================================================ */
 
-.notesheet-box {{
-    border: 1px solid #888888;
-    padding: 12px 14px;
-    margin: 0 0 17px 0;
+.note-entry {{
+    margin: 0 0 22px 0;
 }}
 
-.notesheet-meta {{
-    /* Keeps the heading + identity + timestamp together on one page.
-       Deliberately NOT applied to the whole .notesheet-box — the actual
-       content below must be free to continue onto the next page for a
-       long Notesheet instead of being forced onto a single page. */
+.note-entry-head {{
+    /* Keep the rule + identity together on one page; the prose that
+       follows is free to break onto the next page for long entries. */
     page-break-inside: avoid;
+    border-top: 2px solid #333333;
+    padding-top: 7px;
+    margin-bottom: 10px;
 }}
 
-.notesheet-heading {{
+.note-seq {{
+    font-size: 8.5pt;
+    font-weight: bold;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    color: #888888;
+    margin-bottom: 3px;
+}}
+
+.contributor-name {{
     font-size: 12pt;
     font-weight: bold;
-    margin-bottom: 6px;
+    color: #111111;
+    margin-bottom: 2px;
 }}
 
 .identity-line {{
     font-size: 9.5pt;
-    color: #333333;
+    color: #555555;
     margin: 1px 0;
 }}
 
 .identity-label {{
     font-weight: bold;
-    color: #555555;
+    color: #666666;
 }}
 
-.notesheet-divider {{
-    border-top: 1px solid #cccccc;
-    margin: 10px 0;
+.note-body {{
+    font-size: 11pt;
+    line-height: 1.6;
+    text-align: justify;
 }}
 
-.notesheet-content {{
-    font-size: 10.5pt;
-    line-height: 1.55;
+.note-body p {{
+    margin: 0 0 9px 0;
 }}
 
-.notesheet-content p {{
-    margin: 0 0 8px 0;
-}}
-
-.notesheet-content h1 {{
-    font-size: 16pt;
+.note-body h1 {{
+    font-size: 15pt;
     margin: 12px 0 7px 0;
 }}
 
-.notesheet-content h2 {{
-    font-size: 14pt;
+.note-body h2 {{
+    font-size: 13pt;
     margin: 11px 0 6px 0;
 }}
 
-.notesheet-content h3 {{
-    font-size: 12pt;
+.note-body h3 {{
+    font-size: 11.5pt;
     margin: 10px 0 5px 0;
 }}
 
-.notesheet-content ul,
-.notesheet-content ol {{
+.note-body ul,
+.note-body ol {{
     margin-top: 5px;
-    margin-bottom: 8px;
+    margin-bottom: 9px;
+    padding-left: 24px;
 }}
 
-.notesheet-content table {{
+.note-body li {{
+    margin-bottom: 3px;
+}}
+
+.note-body table {{
     width: 100%;
     border-collapse: collapse;
-    margin: 9px 0;
-    font-size: 9.5pt;
+    margin: 10px 0;
+    font-size: 10pt;
 }}
 
-.notesheet-content th,
-.notesheet-content td {{
+.note-body th,
+.note-body td {{
     border: 1px solid #888888;
-    padding: 5px 6px;
+    padding: 5px 7px;
     vertical-align: top;
 }}
 
-.notesheet-content th {{
+.note-body th {{
     font-weight: bold;
+    background: #f2f2f2;
 }}
 
-.notesheet-content blockquote {{
-    margin: 8px 0;
-    padding: 5px 10px;
-    border-left: 3px solid #777777;
+.note-body blockquote {{
+    margin: 9px 0;
+    padding: 4px 12px;
+    border-left: 3px solid #999999;
+    color: #444444;
 }}
 
 .empty-notesheet {{
-    color: #777777;
+    color: #888888;
     font-style: italic;
 }}
 
@@ -1589,12 +1588,13 @@ body {{
    ================================================================ */
 
 .footer {{
-    border-top: 1px solid #999999;
-    margin-top: 18px;
-    padding-top: 6px;
+    border-top: 1px solid #bbbbbb;
+    margin-top: 22px;
+    padding-top: 7px;
     font-size: 7.5pt;
-    color: #666666;
+    color: #888888;
     text-align: center;
+    letter-spacing: 0.5px;
 }}
 
 </style>
@@ -1603,40 +1603,29 @@ body {{
 <body>
 
     <!-- ============================================================
-         AVFU HEADER
-         Uses a table so LibreOffice renders the two columns correctly
-         (logo + download meta on the left, institution name on right).
+         LETTERHEAD
          ============================================================ -->
 
-    <div class="header">
-        <table class="header-table" cellpadding="0" cellspacing="0">
-            <tr>
-                <td class="header-td-logo">
-                    {logo_html}
-                    <div class="download-meta">
-                        <div class="download-meta-label">DOWNLOADED</div>
-                        {_escape_html(download_time_display)} IST
-                    </div>
-                </td>
-                <td class="header-td-info">
-                    <div class="institution">
-                        ASSAM VETERINARY AND FISHERY UNIVERSITY
-                    </div>
-                    <div class="subtitle">
-                        Electronic File Management System (eFMS)
-                    </div>
-                </td>
-            </tr>
-        </table>
+    <div class="letterhead">
+        {logo_html}
+        <div class="institution">
+            Assam Veterinary and Fishery University
+        </div>
+        <div class="subtitle">
+            Electronic File Management System (eFMS)
+        </div>
+    </div>
+
+    <div class="doc-title">Notesheet</div>
+    <div class="download-meta">
+        Downloaded {_escape_html(download_time_display)} IST
     </div>
 
     <!-- ============================================================
-         FILE INFORMATION
-         Uses a table for label/value alignment (same reason as above).
+         FILE REFERENCE
          ============================================================ -->
 
     <div class="file-info">
-        <div class="file-info-title">FILE INFORMATION</div>
         <table class="file-info-table" cellpadding="0" cellspacing="0">
             <tr>
                 <td class="file-info-td-label">File Number</td>
@@ -1653,20 +1642,14 @@ body {{
          INITIAL NOTESHEET — ALWAYS NO. 1
          ============================================================ -->
 
-    <div class="notesheet-box">
-        <div class="notesheet-meta">
-            <div class="notesheet-heading">
-                NOTESHEET 1 &mdash; INITIAL NOTESHEET
-            </div>
-            <div class="identity-line">
-                <span class="identity-label">Author:</span>
-                {_escape_html(creator_name)}
-            </div>
+    <div class="note-entry">
+        <div class="note-entry-head">
+            <div class="note-seq">Notesheet 1 &mdash; Initial</div>
+            <div class="contributor-name">{_escape_html(creator_name)}</div>
             {creator_details_html}
             {initial_timestamp_html}
         </div>
-        <div class="notesheet-divider"></div>
-        <div class="notesheet-content">
+        <div class="note-body">
             {initial_content}
         </div>
     </div>
@@ -1682,7 +1665,7 @@ body {{
          ============================================================ -->
 
     <div class="footer">
-        AVFU eFMS &bull; Electronic Notesheet
+        Assam Veterinary and Fishery University &bull; eFMS Electronic Notesheet
     </div>
 
 </body>
