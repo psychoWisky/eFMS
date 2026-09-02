@@ -13,6 +13,7 @@ import { api } from "@/services/api";
 import { toast } from "sonner";
 import { confirmAction, showSuccess } from "@/lib/alert";
 import { Plus, FolderKanban, CheckCircle2, RotateCcw, UserPlus, Repeat } from "lucide-react";
+import { SearchableSelect } from "@/components/shared/searchable-select";
 
 interface Project {
   id: string;
@@ -189,12 +190,14 @@ export function ProjectManagementSection() {
                 : `A new project-specific profile will be created for the selected person automatically, named "<Their Name> PI${assignTarget.project.project_number}".`}
             </p>
             <label className={LABEL}>Select User *</label>
-            <select value={assignUserId} onChange={(e) => setAssignUserId(e.target.value)} className={INPUT}>
-              <option value="">Choose a user…</option>
-              {candidates.map((u) => (
-                <option key={u.id} value={u.id}>{u.full_name} — {u.email}</option>
-              ))}
-            </select>
+            <SearchableSelect
+              options={candidates.map((u) => ({ value: u.id, label: `${u.full_name} — ${u.email}` }))}
+              value={assignUserId}
+              onChange={setAssignUserId}
+              clearable={false}
+              placeholder="Choose a user…"
+              searchPlaceholder="Search by name or email…"
+            />
             <div className="flex gap-3 mt-5">
               <button onClick={() => setAssignTarget(null)} className="flex-1 px-4 py-2.5 text-sm border border-gray-200 rounded-lg hover:bg-gray-50 font-medium">Cancel</button>
               <button onClick={handleAssignSubmit} disabled={!assignUserId}

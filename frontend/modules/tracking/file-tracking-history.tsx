@@ -10,6 +10,7 @@ import { PersonBadge, type PersonInfo } from "@/components/shared/person-badge";
 import { FileClassificationBadge } from "@/components/shared/file-classification-badge";
 import { Search, Eye, Loader2, History } from "lucide-react";
 import { TimelineModal } from "./timeline-modal";
+import { PageHeader } from "@/components/shared/page-header";
 
 interface TrackingItem {
   file_id: string; ref_number: string; subject: string; status: string; priority: string;
@@ -60,12 +61,13 @@ export function FileTrackingHistoryPage() {
 
   return (
     <div className="min-h-screen bg-[#F5F7FA]">
-      <div className="bg-white border-b border-gray-200 px-8 py-5">
-        <h1 className="text-2xl font-bold text-[#1A1A2E] flex items-center gap-2"><History size={22} className="text-[#0D6E6E]" /> File Tracking History</h1>
-        <p className="text-base text-[#4A5568] mt-0.5">Every file you have ever created, received, or forwarded.</p>
-      </div>
+      <PageHeader
+        title="File Tracking History"
+        subtitle="Every file you have ever created, received, or forwarded."
+        icon={History}
+      />
 
-      <div className="px-8 py-6 space-y-4">
+      <div className="px-6 py-5 space-y-4">
         {/* Date-range filters */}
         <div className="flex flex-wrap items-center gap-2">
           <button onClick={() => setRangeId("all")}
@@ -114,7 +116,7 @@ export function FileTrackingHistoryPage() {
               <thead className="bg-gray-50 border-b border-gray-200">
                 <tr>
                   {["File Number", "Subject", "Status", "Classification", "Current Holder", "From", "To", "Forwarded", "Last Action", "Action"].map((h) => (
-                    <th key={h} className="text-left px-4 py-3 text-sm font-semibold text-gray-600 whitespace-nowrap">{h}</th>
+                    <th key={h} className="text-left px-4 py-3 text-xs font-semibold uppercase tracking-wide text-gray-500 whitespace-nowrap">{h}</th>
                   ))}
                 </tr>
               </thead>

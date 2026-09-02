@@ -6,6 +6,8 @@ import { api } from "@/services/api";
 import { cn, formatDate } from "@/lib/utils";
 import { Search, Loader2, FileText, Eye } from "lucide-react";
 import { FileClassificationBadge } from "@/components/shared/file-classification-badge";
+import { PageHeader } from "@/components/shared/page-header";
+import { SearchableSelect } from "@/components/shared/searchable-select";
 
 interface SearchResult {
   id: string; ref_number: string; subject: string; category: string;
@@ -58,12 +60,13 @@ export function EFMSSearchPage() {
 
   return (
     <div className="min-h-screen bg-[#F5F7FA]">
-      <div className="bg-white border-b border-gray-200 px-8 py-5">
-        <h1 className="text-2xl font-bold text-[#1A1A2E]">Search / Trace Files</h1>
-        <p className="text-base text-[#4A5568] mt-0.5">Multi-parameter search across all files you are authorised to view.</p>
-      </div>
+      <PageHeader
+        title="Search / Trace Files"
+        subtitle="Multi-parameter search across all files you are authorised to view."
+        icon={Search}
+      />
 
-      <div className="px-8 py-6 max-w-5xl">
+      <div className="px-6 py-5 max-w-5xl">
         {/* Filters */}
         <form onSubmit={handleSearch} className="bg-white rounded-2xl border border-gray-200 p-6 shadow-sm mb-6">
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 mb-4">
@@ -78,10 +81,13 @@ export function EFMSSearchPage() {
             </div>
             <div>
               <label className={LABEL}>Status</label>
-              <select value={status} onChange={(e) => setStatus(e.target.value)} className={INPUT}>
-                <option value="">All statuses</option>
-                {STATUSES.map((s) => <option key={s} value={s}>{s.replace("_"," ")}</option>)}
-              </select>
+              <SearchableSelect
+                options={STATUSES.map((s) => ({ value: s, label: s.replace("_", " ") }))}
+                value={status}
+                onChange={setStatus}
+                placeholder="All statuses"
+                searchPlaceholder="Search…"
+              />
             </div>
             <div>
               <label className={LABEL}>Category</label>
@@ -121,7 +127,7 @@ export function EFMSSearchPage() {
                 <thead className="bg-gray-50 border-b border-gray-200">
                   <tr>
                     {["Ref Number","Subject","Category","Status","Priority","Created","Action"].map((h) => (
-                      <th key={h} className="text-left px-5 py-3 text-sm font-semibold text-gray-600">{h}</th>
+                      <th key={h} className="text-left px-4 py-3 text-xs font-semibold uppercase tracking-wide text-gray-500">{h}</th>
                     ))}
                   </tr>
                 </thead>
@@ -130,21 +136,21 @@ export function EFMSSearchPage() {
                     const displayStatus = f.is_released ? "released" : f.status;
                     return (
                     <tr key={f.id} className="hover:bg-gray-50">
-                      <td className="px-5 py-3">
+                      <td className="px-4 py-3">
                         <span className="font-mono text-sm font-bold text-[#0D6E6E] bg-[#E6F4F4] px-2 py-0.5 rounded">{f.ref_number}</span>
                       </td>
-                      <td className="px-5 py-3 max-w-xs">
+                      <td className="px-4 py-3 max-w-xs">
                         <p className="text-sm font-semibold text-gray-900 truncate">{f.subject}</p>
                       </td>
-                      <td className="px-5 py-3 text-sm text-gray-600">{f.category}</td>
-                      <td className="px-5 py-3">
+                      <td className="px-4 py-3 text-sm text-gray-600">{f.category}</td>
+                      <td className="px-4 py-3">
                         <span className={cn("px-2 py-0.5 rounded-full text-xs font-semibold", STATUS_COLOR[displayStatus] ?? "bg-gray-100 text-gray-600")}>
                           {displayStatus}
                         </span>
                       </td>
-                      <td className="px-5 py-3"><FileClassificationBadge priority={f.priority} compact /></td>
-                      <td className="px-5 py-3 text-sm text-gray-500">{formatDate(f.created_at)}</td>
-                      <td className="px-5 py-3">
+                      <td className="px-4 py-3"><FileClassificationBadge priority={f.priority} compact /></td>
+                      <td className="px-4 py-3 text-sm text-gray-500">{formatDate(f.created_at)}</td>
+                      <td className="px-4 py-3">
                         <button onClick={() => router.push(`/files/${f.id}`)}
                           className="flex items-center gap-1 px-3 py-1.5 bg-[#0D6E6E] text-white rounded-lg text-sm font-medium hover:bg-[#178F8F]">
                           <Eye size={13} /> View

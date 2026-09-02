@@ -14,6 +14,7 @@ import { NewFileForm } from "@/modules/files/new-file-page";
 import { ReopenFilePicker } from "@/modules/files/reopen-file-picker";
 import { PersonBadge, type PersonInfo } from "@/components/shared/person-badge";
 import { FileClassificationBadge } from "@/components/shared/file-classification-badge";
+import { PageHeader } from "@/components/shared/page-header";
 
 interface EfmsFile {
   id: string; ref_number: string; subject: string; category: string;
@@ -130,20 +131,19 @@ export function EFMSDashboard() {
 
   return (
     <div className="min-h-screen bg-[#F5F7FA]">
-      {/* Top header */}
-      <div className="bg-white border-b border-gray-200 px-8 py-5">
-        <h1 className="text-2xl font-bold text-[#1A1A2E]">eFMS Workspace</h1>
-        <p className="text-base text-[#4A5568] mt-0.5">{user?.full_name} · {role?.replace("_"," ")}</p>
-      </div>
+      <PageHeader
+        title="eFMS Workspace"
+        subtitle={<>{user?.full_name} · <span className="capitalize">{role?.replace("_", " ")}</span></>}
+      />
 
       {/* Section tabs */}
-      <div className="bg-white border-b border-gray-200 px-8">
+      <div className="bg-white border-b border-gray-200 px-6">
         <div className="flex gap-1">
           {SECTIONS.map((s) => (
             <button key={s.id} onClick={() => guardedNavigate(() => setSection(s.id))}
-              className={cn("flex items-center gap-2 px-6 py-4 text-base font-semibold border-b-2 transition-colors",
+              className={cn("flex items-center gap-2 px-5 py-3 text-sm font-semibold border-b-2 transition-colors",
                 section === s.id ? "border-[#0D6E6E] text-[#0D6E6E]" : "border-transparent text-gray-500 hover:text-gray-700")}>
-              <s.icon size={18} /> {s.label}
+              <s.icon size={16} /> {s.label}
               {s.count !== undefined && s.count > 0 && (
                 <span className={cn("px-2 py-0.5 rounded-full text-xs font-bold",
                   section === s.id ? "bg-[#0D6E6E] text-white" : "bg-gray-100 text-gray-600")}>
@@ -155,14 +155,14 @@ export function EFMSDashboard() {
         </div>
       </div>
 
-      <div className="px-8 py-6">
+      <div className="px-6 py-5">
 
         {/* ── DOCKET SECTION ── */}
         {section === "docket" && (
           <div className="space-y-4">
             <div>
               <h2 className="text-xl font-bold text-[#1A1A2E]">Docket</h2>
-              <p className="text-base text-gray-500 mt-0.5">
+              <p className="text-sm text-gray-500 mt-0.5">
                 Files forwarded to you. If you created the file, you can release it to make it visible to your department.
               </p>
             </div>
@@ -179,11 +179,11 @@ export function EFMSDashboard() {
               <div className="bg-white rounded-2xl border border-gray-200 p-12 text-center">
                 <Inbox size={40} className="mx-auto mb-3 text-gray-200" />
                 <p className="text-lg font-semibold text-gray-600">Your docket is empty</p>
-                <p className="text-base text-gray-400 mt-1">Files forwarded to you will appear here.</p>
+                <p className="text-sm text-gray-400 mt-1">Files forwarded to you will appear here.</p>
               </div>
             ) : filteredDocketItems.length === 0 ? (
               <div className="bg-white rounded-2xl border border-gray-200 p-12 text-center">
-                <p className="text-base text-gray-400">No files match your search.</p>
+                <p className="text-sm text-gray-400">No files match your search.</p>
               </div>
             ) : (
               <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
@@ -195,7 +195,7 @@ export function EFMSDashboard() {
                   <thead className="bg-gray-50 border-b border-gray-200">
                     <tr>
                       {["Ref Number", "Subject", "From", "Priority", "Received", "Action"].map((h) => (
-                        <th key={h} className="text-left px-5 py-4 text-base font-semibold text-gray-600">{h}</th>
+                        <th key={h} className="text-left px-4 py-3 text-xs font-semibold uppercase tracking-wide text-gray-500">{h}</th>
                       ))}
                     </tr>
                   </thead>
@@ -205,20 +205,20 @@ export function EFMSDashboard() {
                       const days = daysAgo(f.updated_at);
                       return (
                         <tr key={f.file_id} className={cn("hover:bg-gray-50 transition-colors", isNew && "bg-blue-50/40")}>
-                          <td className="px-5 py-4">
+                          <td className="px-4 py-3">
                             <span className="font-mono text-sm font-bold text-[#0D6E6E] bg-[#E6F4F4] px-2 py-1 rounded">{f.ref_number}</span>
                             {isNew && <span className="ml-2 text-xs bg-blue-500 text-white px-1.5 py-0.5 rounded-full font-semibold">NEW</span>}
                           </td>
-                          <td className="px-5 py-4 max-w-xs">
-                            <p className="text-base font-semibold text-gray-900 truncate">{f.subject}</p>
+                          <td className="px-4 py-3 max-w-xs">
+                            <p className="text-sm font-semibold text-gray-900 truncate">{f.subject}</p>
                           </td>
-                          <td className="px-5 py-4 text-base text-gray-600"><PersonBadge person={f.from_user_info} compact /></td>
-                          <td className="px-5 py-4"><FileClassificationBadge priority={f.priority} /></td>
-                          <td className="px-5 py-4 text-base text-gray-500">
+                          <td className="px-4 py-3 text-sm text-gray-600"><PersonBadge person={f.from_user_info} compact /></td>
+                          <td className="px-4 py-3"><FileClassificationBadge priority={f.priority} /></td>
+                          <td className="px-4 py-3 text-sm text-gray-500">
                             <span>{formatDate(f.updated_at, "relative")}</span>
                             {days >= 3 && <span className="block text-sm text-red-500 font-semibold">{days}d waiting</span>}
                           </td>
-                          <td className="px-5 py-4">
+                          <td className="px-4 py-3">
                             <div className="flex items-center gap-2 flex-wrap">
                               <button onClick={() => { markRead(f.file_id); router.push(`/files/${f.file_id}`); }}
                                 className="flex items-center gap-1 px-3 py-1.5 bg-[#0D6E6E] text-white rounded-lg text-sm font-medium hover:bg-[#178F8F]">
@@ -263,7 +263,7 @@ export function EFMSDashboard() {
             {/* My created files */}
             <div>
               <h2 className="text-xl font-bold text-[#1A1A2E]">My Files</h2>
-              <p className="text-base text-gray-500 mt-0.5">Files you have created.</p>
+              <p className="text-sm text-gray-500 mt-0.5">Files you have created.</p>
             </div>
 
             <div className="relative max-w-xs">
@@ -282,7 +282,7 @@ export function EFMSDashboard() {
               </div>
             ) : filteredMyFiles.length === 0 ? (
               <div className="bg-white rounded-2xl border border-gray-200 p-10 text-center">
-                <p className="text-base text-gray-400">No files match your search.</p>
+                <p className="text-sm text-gray-400">No files match your search.</p>
               </div>
             ) : (
               <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
@@ -291,7 +291,7 @@ export function EFMSDashboard() {
                   <thead className="bg-gray-50 border-b border-gray-200">
                     <tr>
                       {["Note ID", "Subject", "File Category", "File / Doc Number", "Created At", "Status", "Current Holder", "Action"].map((h) => (
-                        <th key={h} className="text-left px-5 py-4 text-base font-semibold text-gray-600">{h}</th>
+                        <th key={h} className="text-left px-4 py-3 text-xs font-semibold uppercase tracking-wide text-gray-500">{h}</th>
                       ))}
                     </tr>
                   </thead>
@@ -302,19 +302,19 @@ export function EFMSDashboard() {
                       const displayStatus = f.is_released ? "released" : f.status;
                       return (
                       <tr key={f.id} className="hover:bg-gray-50">
-                        <td className="px-5 py-4 text-base text-gray-500 font-mono">{(idx + 1).toString().padStart(4, "0")}</td>
-                        <td className="px-5 py-4 text-base text-gray-900 max-w-xs truncate" title={f.subject}>{truncate(f.subject, 60)}</td>
-                        <td className="px-5 py-4 text-base text-gray-700">{f.category}</td>
-                        <td className="px-5 py-4">
+                        <td className="px-4 py-3 text-sm text-gray-500 font-mono">{(idx + 1).toString().padStart(4, "0")}</td>
+                        <td className="px-4 py-3 text-sm text-gray-900 max-w-xs truncate" title={f.subject}>{truncate(f.subject, 60)}</td>
+                        <td className="px-4 py-3 text-sm text-gray-700">{f.category}</td>
+                        <td className="px-4 py-3">
                           <span className="font-mono text-sm font-bold text-[#0D6E6E] bg-[#E6F4F4] px-2 py-1 rounded">{f.ref_number}</span>
                         </td>
-                        <td className="px-5 py-4 text-base text-gray-500">{formatDate(f.created_at, "relative")}</td>
-                        <td className="px-5 py-4">
+                        <td className="px-4 py-3 text-sm text-gray-500">{formatDate(f.created_at, "relative")}</td>
+                        <td className="px-4 py-3">
                           <span className={cn("px-2 py-1 rounded-full text-sm font-medium", STATUS_COLOR[displayStatus] ?? "bg-gray-100")}>
                             {displayStatus}
                           </span>
                         </td>
-                        <td className="px-5 py-4">
+                        <td className="px-4 py-3">
                           {f.current_holder_id ? (
                             <PersonBadge person={f.current_holder_info} fallback="Unknown" compact />
                           ) : (
@@ -323,7 +323,7 @@ export function EFMSDashboard() {
                             </span>
                           )}
                         </td>
-                        <td className="px-5 py-4">
+                        <td className="px-4 py-3">
                           <div className="flex items-center gap-2">
                             <button onClick={() => { markRead(f.id); router.push(`/files/${f.id}`); }}
                               className="flex items-center gap-1 px-3 py-1.5 bg-[#0D6E6E] text-white rounded-lg text-sm font-medium hover:bg-[#178F8F]">
@@ -348,7 +348,7 @@ export function EFMSDashboard() {
             {(loadReleased || releasedFiles.length > 0) && (
               <div>
                 <h2 className="text-xl font-bold text-[#1A1A2E] mt-2">Released Files</h2>
-                <p className="text-base text-gray-500 mt-0.5">Files you have released.</p>
+                <p className="text-sm text-gray-500 mt-0.5">Files you have released.</p>
 
                 {loadReleased ? (
                   <div className="flex items-center justify-center py-10 gap-3 text-gray-400 mt-3"><Loader2 size={22} className="animate-spin" /> Loading…</div>
@@ -359,24 +359,24 @@ export function EFMSDashboard() {
                       <thead className="bg-gray-50 border-b border-gray-200">
                         <tr>
                           {["Ref Number", "Subject", "Category", "Released", "Status", "Action"].map((h) => (
-                            <th key={h} className="text-left px-5 py-4 text-base font-semibold text-gray-600">{h}</th>
+                            <th key={h} className="text-left px-4 py-3 text-xs font-semibold uppercase tracking-wide text-gray-500">{h}</th>
                           ))}
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-gray-100">
                         {releasedFiles.map((d) => (
                           <tr key={d.docket_id} className="hover:bg-gray-50 bg-green-50/20">
-                            <td className="px-5 py-4">
+                            <td className="px-4 py-3">
                               <span className="font-mono text-sm font-bold text-green-700 bg-green-100 px-2 py-1 rounded">{d.ref_number}</span>
                               <span className="ml-2 text-xs bg-green-500 text-white px-1.5 py-0.5 rounded-full">Released</span>
                             </td>
-                            <td className="px-5 py-4 max-w-xs"><p className="text-base font-semibold text-gray-900 truncate">{d.subject}</p></td>
-                            <td className="px-5 py-4 text-base text-gray-600">{d.category}</td>
-                            <td className="px-5 py-4 text-base text-gray-500">{d.released_at ? formatDate(d.released_at, "relative") : "—"}</td>
-                            <td className="px-5 py-4">
+                            <td className="px-4 py-3 max-w-xs"><p className="text-sm font-semibold text-gray-900 truncate">{d.subject}</p></td>
+                            <td className="px-4 py-3 text-sm text-gray-600">{d.category}</td>
+                            <td className="px-4 py-3 text-sm text-gray-500">{d.released_at ? formatDate(d.released_at, "relative") : "—"}</td>
+                            <td className="px-4 py-3">
                               <span className={cn("px-2 py-1 rounded-full text-sm font-medium", STATUS_COLOR.released)}>released</span>
                             </td>
-                            <td className="px-5 py-4">
+                            <td className="px-4 py-3">
                               <button onClick={() => router.push(`/files/${d.file_id}`)}
                                 className="flex items-center gap-1 px-3 py-1.5 bg-[#0D6E6E] text-white rounded-lg text-sm font-medium hover:bg-[#178F8F]">
                                 <Eye size={14} /> View

@@ -13,6 +13,7 @@ import {
   Plus, Loader2, X, Copy, RefreshCw, Eye, EyeOff, Pencil,
   Power, PowerOff, ShieldAlert, Upload, Download, CheckCircle2, XCircle, ClipboardCopy,
 } from "lucide-react";
+import { SearchableSelect } from "@/components/shared/searchable-select";
 
 interface Establishment { id: string; name: string; code: string | null; is_active: boolean; }
 interface Department { id: string; name: string; code: string | null; establishment_id: string | null; is_active: boolean; }
@@ -146,21 +147,32 @@ function UserFields({
         <input value={form.designation} onChange={(e) => setForm((f) => ({ ...f, designation: e.target.value }))} placeholder="e.g. Assistant Professor" className={INPUT} /></div>
       <div className="grid grid-cols-2 gap-4">
         <div><label className={LABEL}>Establishment</label>
-          <select value={form.establishment_id} onChange={(e) => setForm((f) => ({ ...f, establishment_id: e.target.value, department_id: "" }))} className={INPUT}>
-            <option value="">Select…</option>
-            {establishments.map((e) => <option key={e.id} value={e.id}>{e.name}</option>)}
-          </select></div>
+          <SearchableSelect
+            options={establishments.map((e) => ({ value: e.id, label: e.name }))}
+            value={form.establishment_id}
+            onChange={(v) => setForm((f) => ({ ...f, establishment_id: v, department_id: "" }))}
+            placeholder="Select…"
+            searchPlaceholder="Search establishments…"
+          /></div>
         <div><label className={LABEL}>Department</label>
-          <select value={form.department_id} onChange={(e) => setForm((f) => ({ ...f, department_id: e.target.value }))} className={INPUT}>
-            <option value="">Select…</option>
-            {filteredDepts.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
-          </select></div>
+          <SearchableSelect
+            options={filteredDepts.map((d) => ({ value: d.id, label: d.name }))}
+            value={form.department_id}
+            onChange={(v) => setForm((f) => ({ ...f, department_id: v }))}
+            placeholder="Select…"
+            searchPlaceholder="Search departments…"
+          /></div>
       </div>
       <div className="grid grid-cols-2 gap-4">
         <div><label className={LABEL}>Role *</label>
-          <select value={form.role} onChange={(e) => setForm((f) => ({ ...f, role: e.target.value }))} className={INPUT}>
-            {roleOptions.map((r) => <option key={r.value} value={r.value}>{r.label}</option>)}
-          </select></div>
+          <SearchableSelect
+            options={roleOptions.map((r) => ({ value: r.value, label: r.label }))}
+            value={form.role}
+            onChange={(v) => setForm((f) => ({ ...f, role: v }))}
+            clearable={false}
+            placeholder="Select role…"
+            searchPlaceholder="Search roles…"
+          /></div>
         <div><label className={LABEL}>Status</label>
           <select value={form.is_active ? "active" : "inactive"} onChange={(e) => setForm((f) => ({ ...f, is_active: e.target.value === "active" }))} className={INPUT}>
             <option value="active">Active</option>

@@ -11,6 +11,7 @@ import {
 import { UserManagementSection } from "./user-management";
 import { RoleManagementSection } from "./role-management";
 import { ProjectManagementSection } from "./project-management";
+import { SearchableSelect } from "@/components/shared/searchable-select";
 
 interface Item { id: string; name: string; is_active: boolean; label?: string; designation?: string; email?: string; user_id?: string; code?: string; establishment_id?: string; }
 interface Establishment { id: string; name: string; code: string | null; is_active: boolean; }
@@ -92,10 +93,12 @@ export function AdminPanel() {
   ];
 
   return (
-    <div className="p-6 max-w-5xl mx-auto">
-      <div className="mb-6">
-        <h1 className="text-2xl font-bold text-[#1A1A2E]">Admin Panel</h1>
-        <p className="text-base text-gray-500 mt-1">Manage users and all system dropdown options.</p>
+    <div className="px-6 py-6 max-w-5xl mx-auto">
+      <div className="mb-5">
+        <h1 className="text-xl font-bold text-[#1A1A2E] flex items-center gap-2">
+          <ShieldCheck size={20} className="text-[#0D6E6E] shrink-0" /> Admin Panel
+        </h1>
+        <p className="text-sm text-gray-500 mt-0.5">Manage users and all system dropdown options.</p>
       </div>
 
       {/* Tab bar */}
@@ -147,9 +150,14 @@ export function AdminPanel() {
             </div>
             <div className="flex gap-3 items-end">
               <div className="flex-1"><label className={LABEL}>Establishment *</label>
-                <select value={newDept.establishment_id} onChange={(e) => setNewDept((s) => ({ ...s, establishment_id: e.target.value }))} className={INPUT}>
-                  <option value="">Select…</option>{establishments.map((e) => <option key={e.id} value={e.id}>{e.name}</option>)}
-                </select>
+                <SearchableSelect
+                  options={establishments.map((e) => ({ value: e.id, label: e.name }))}
+                  value={newDept.establishment_id}
+                  onChange={(v) => setNewDept((s) => ({ ...s, establishment_id: v }))}
+                  clearable={false}
+                  placeholder="Select…"
+                  searchPlaceholder="Search establishments…"
+                />
               </div>
               <button onClick={() => act(["admin-departments-all","departments"], async () => { await api.post("/admin/departments", newDept); setNewDept({ name: "", code: "", establishment_id: "" }); })} disabled={!newDept.name}
                 className="flex items-center gap-1 px-4 py-2.5 bg-[#0D6E6E] text-white rounded-lg text-sm font-semibold hover:bg-[#178F8F] disabled:opacity-50 whitespace-nowrap">
@@ -206,20 +214,19 @@ export function AdminPanel() {
             <div className="flex gap-3 items-end">
               <div className="flex-1">
                 <label className={LABEL}>Select User *</label>
-                <select
-                  value={signGrantUserId}
-                  onChange={(e) => setSignGrantUserId(e.target.value)}
-                  className={INPUT}
-                >
-                  <option value="">Choose a user…</option>
-                  {adminUsers
+                <SearchableSelect
+                  options={adminUsers
                     .filter((u) => !signUsers.some((s) => s.id === u.id))
-                    .map((u) => (
-                      <option key={u.id} value={u.id}>
-                        {u.full_name} — {u.designation ?? u.active_role ?? "No role"} · {u.email}
-                      </option>
-                    ))}
-                </select>
+                    .map((u) => ({
+                      value: u.id,
+                      label: `${u.full_name} — ${u.designation ?? u.active_role ?? "No role"} · ${u.email}`,
+                    }))}
+                  value={signGrantUserId}
+                  onChange={setSignGrantUserId}
+                  clearable={false}
+                  placeholder="Choose a user…"
+                  searchPlaceholder="Search by name, role or email…"
+                />
               </div>
               <button
                 onClick={() => act("sign-permissions", async () => {

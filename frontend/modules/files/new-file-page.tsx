@@ -256,7 +256,7 @@ export function NewFileForm({ onSuccess }: NewFileFormProps) {
   const selectedRecipient = allUsers.find((u) => u.id === recipientId);
 
   return (
-    <form onSubmit={handleSubmit} className="space-y-5 max-w-none">
+    <form onSubmit={handleSubmit} className="space-y-5 max-w-[1080px]">
       {draftRestored && (
         <div className="flex items-center justify-between px-4 py-3 bg-amber-50 border border-amber-200 rounded-xl text-amber-800 text-sm">
           <span>Draft restored from your last session.</span>
@@ -266,7 +266,7 @@ export function NewFileForm({ onSuccess }: NewFileFormProps) {
       )}
       {/* Row 1: Subject (2 cols) + Category + Priority + Recipient */}
       <div className="bg-white rounded-2xl border border-gray-200 p-6 shadow-sm">
-        <h3 className="text-lg font-bold text-gray-800 mb-5">File Details</h3>
+        <h3 className="text-base font-bold text-gray-800 mb-4">File Details</h3>
         <div className="grid grid-cols-1 lg:grid-cols-4 gap-5">
           <div className="lg:col-span-2">
             <label className="block text-base font-semibold text-gray-700 mb-2">Subject *</label>
@@ -275,11 +275,14 @@ export function NewFileForm({ onSuccess }: NewFileFormProps) {
           </div>
           <div>
             <label className="block text-base font-semibold text-gray-700 mb-2">Category *</label>
-            <select value={category} onChange={(e) => setCategory(e.target.value)}
-              className="w-full border border-gray-300 rounded-xl px-4 py-3 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]">
-              <option value="">Select…</option>
-              {activeCategories.map((c) => <option key={c.id} value={c.name}>{c.name}</option>)}
-            </select>
+            <SearchableSelect
+              options={activeCategories.map((c) => ({ value: c.name, label: c.name }))}
+              value={category}
+              onChange={setCategory}
+              clearable={false}
+              placeholder="Select…"
+              searchPlaceholder="Search categories…"
+            />
           </div>
           <div>
             <label className="block text-base font-semibold text-gray-700 mb-2">Priority *</label>
@@ -368,7 +371,7 @@ export function NewFileForm({ onSuccess }: NewFileFormProps) {
 
       {/* Row 2: Annexure Uploads (BEFORE notesheet) */}
       <div className="bg-white rounded-2xl border border-gray-200 p-6 shadow-sm">
-        <h3 className="text-lg font-bold text-gray-800 mb-2">Attachments / Annexures</h3>
+        <h3 className="text-base font-bold text-gray-800 mb-1">Attachments / Annexures</h3>
         <p className="text-sm text-gray-500 mb-4">Upload supporting documents first. Name and tag each file as Annexure 1, 2, etc. All files will be available as PDF to recipients.</p>
         <div onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }} onDragLeave={() => setIsDragging(false)} onDrop={handleDrop}
           className={`border-2 border-dashed rounded-xl p-6 text-center transition-colors mb-4 ${isDragging ? "border-[#0D6E6E] bg-[#E6F4F4]" : "border-gray-200 hover:border-gray-300"}`}>
@@ -418,7 +421,7 @@ export function NewFileForm({ onSuccess }: NewFileFormProps) {
       {/* Row 3: WYSIWYG Notesheet */}
       <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
         <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200">
-          <h3 className="text-lg font-bold text-gray-800">Official Notesheet *</h3>
+          <h3 className="text-base font-bold text-gray-800">Official Notesheet *</h3>
           <p className="text-sm text-gray-400">Paste from Word/PDF — formatting is preserved</p>
         </div>
 

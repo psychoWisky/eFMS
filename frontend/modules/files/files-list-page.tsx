@@ -8,6 +8,7 @@ import { api } from "@/services/api";
 import { cn, formatDate, fileStatusBadgeClass, fileStatusLabel } from "@/lib/utils";
 import { EmptyState } from "@/components/feedback/empty-state";
 import { FileClassificationBadge } from "@/components/shared/file-classification-badge";
+import { SearchableSelect } from "@/components/shared/searchable-select";
 
 interface EfmsFile {
   id: string;
@@ -63,9 +64,15 @@ export function FilesListPage() {
           <Search size={16} className="absolute left-4 top-1/2 -translate-y-1/2 text-[#9CA3AF]" />
           <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search files…" className="form-input pl-10 h-11" />
         </div>
-        <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} className="form-input h-11 min-w-[140px]">
-          {STATUSES.map((s) => <option key={s} value={s}>{s === "All" ? "All Statuses" : fileStatusLabel(s)}</option>)}
-        </select>
+        <div className="min-w-[170px]">
+          <SearchableSelect
+            options={STATUSES.map((s) => ({ value: s, label: s === "All" ? "All Statuses" : fileStatusLabel(s) }))}
+            value={statusFilter}
+            onChange={setStatusFilter}
+            clearable={false}
+            searchPlaceholder="Search…"
+          />
+        </div>
         <span className="text-[14px] text-[#4A5568] ml-auto">
           {isLoading ? "Loading…" : `${filtered.length} file${filtered.length !== 1 ? "s" : ""}`}
         </span>

@@ -1276,25 +1276,35 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                     </div>
                     <div>
                       <label className="block text-sm font-semibold text-gray-700 mb-1.5">Department</label>
-                      <select value={draftDepartmentId} onChange={(e) => setDraftDepartmentId(e.target.value)}
-                        className="w-full border border-gray-300 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]">
-                        <option value="">None</option>
-                        {departments.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
-                      </select>
+                      <SearchableSelect
+                        options={departments.map((d) => ({ value: d.id, label: d.name }))}
+                        value={draftDepartmentId}
+                        onChange={setDraftDepartmentId}
+                        placeholder="None"
+                        searchPlaceholder="Search departments…"
+                      />
                     </div>
                     <div>
                       <label className="block text-sm font-semibold text-gray-700 mb-1.5">Category</label>
-                      <select value={draftCategory} onChange={(e) => setDraftCategory(e.target.value)}
-                        className="w-full border border-gray-300 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]">
-                        {categories.filter((c) => c.is_active !== false).map((c) => <option key={c.id} value={c.name}>{c.name}</option>)}
-                      </select>
+                      <SearchableSelect
+                        options={categories.filter((c) => c.is_active !== false).map((c) => ({ value: c.name, label: c.name }))}
+                        value={draftCategory}
+                        onChange={setDraftCategory}
+                        clearable={false}
+                        placeholder="Select category…"
+                        searchPlaceholder="Search categories…"
+                      />
                     </div>
                     <div>
                       <label className="block text-sm font-semibold text-gray-700 mb-1.5">Priority</label>
-                      <select value={draftPriority} onChange={(e) => setDraftPriority(e.target.value)}
-                        className="w-full border border-gray-300 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]">
-                        {priorities.filter((p) => p.is_active !== false).map((p) => <option key={p.id} value={p.name}>{p.label ?? p.name}</option>)}
-                      </select>
+                      <SearchableSelect
+                        options={priorities.filter((p) => p.is_active !== false).map((p) => ({ value: p.name, label: p.label ?? p.name }))}
+                        value={draftPriority}
+                        onChange={setDraftPriority}
+                        clearable={false}
+                        placeholder="Select priority…"
+                        searchPlaceholder="Search priorities…"
+                      />
                     </div>
                     <OfficeSectionFilter
                       officeId={officeId}
