@@ -7,7 +7,7 @@ import { api, FILES_BASE_URL, API_URL } from "@/services/api";
 import { toast } from "sonner";
 import { confirmAction, showSuccess, escapeHtml } from "@/lib/alert";
 import { useUser, useActiveRole } from "@/stores/auth.store";
-import { cn, formatDate, getAttachmentPreviewKind, isNotesheetEmpty } from "@/lib/utils";
+import { cn, formatDate, getAttachmentPreviewKind, isNotesheetEmpty, hasRealNotesheetContent } from "@/lib/utils";
 import {
   ChevronLeft, ChevronRight, ChevronDown, FileText, Download, ArrowRight,
   Loader2, Lock, Clock, MessageSquare, Upload, X, PenLine,
@@ -858,9 +858,11 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
   const railExpanded = railManual === true;
 
   // The single most recent prior holder note — the one written by whoever
-  // forwarded this file to the current holder. Older notes are not shown.
+  // forwarded this file to the current holder. Excludes the current
+  // holder's own row (is_current) and any prior row that was left blank /
+  // untouched-placeholder — an empty note is never worth surfacing.
   const latestHolderNote = holderNotesheets
-    .filter((n) => !n.is_current)
+    .filter((n) => !n.is_current && (n.accessible === false || hasRealNotesheetContent(n.content)))
     .slice()
     .sort((a, b) => b.sequence - a.sequence)[0] ?? null;
 
@@ -1209,7 +1211,7 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                     are no prior holder notes (first hop from the creator). */}
                 {(() => {
                   const historyNotes = holderNotesheets
-                    .filter((n) => !n.is_current)
+                    .filter((n) => !n.is_current && (n.accessible === false || hasRealNotesheetContent(n.content)))
                     .slice()
                     .sort((a, b) => b.sequence - a.sequence); // newest first
                   if (historyNotes.length === 0) return null;

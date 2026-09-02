@@ -19,11 +19,13 @@
 // "you don't have access to read this" instead of silently rendering
 // nothing, so it's never ambiguous whether something is being withheld.
 import { useQuery } from "@tanstack/react-query";
+import { toast } from "sonner";
 import { api } from "@/services/api";
-import { cn, formatDate } from "@/lib/utils";
+import { cn, formatDate, hasRealNotesheetContent } from "@/lib/utils";
 import { toSafeNotesheetHtml, NOTESHEET_PROSE_CLASS } from "@/lib/notesheet-html";
+import { printTimelinePdf } from "@/lib/timeline-pdf";
 import { PersonBadge, type PersonInfo } from "@/components/shared/person-badge";
-import { X, FileText, ArrowRight, PenLine, Unlock, Loader2, Lock } from "lucide-react";
+import { X, FileText, ArrowRight, PenLine, Unlock, Loader2, Lock, Download } from "lucide-react";
 
 interface TrackingItem {
   file_id: string; ref_number: string; subject: string; status: string; priority: string;
@@ -75,13 +77,23 @@ function buildTimeline(item: TrackingItem, trackEntries: TrackEntry[], initialNo
     !!firstEntry && firstEntry.type !== "sign" && firstEntry.action === "forward" &&
     !!item.creator_info?.id && firstEntry.from_user_id === item.creator_info.id;
 
+  // Content that isn't actually written by anyone (blank / untouched
+  // placeholder) is dropped to null so it renders as nothing — never a
+  // blank box and never a misleading "no access" line. `hasContent` now
+  // means strictly "a note exists but is withheld from this viewer".
+  const initialContent =
+    initialNotesheet?.accessible && hasRealNotesheetContent(initialNotesheet.content)
+      ? initialNotesheet.content
+      : null;
+  const initialWithheld = !!initialNotesheet?.has_notesheet && !initialNotesheet?.accessible;
+
   const events: (TimelineEvent & { created_at: string })[] = [
     firstIsCreatorForward
       ? {
           key: "created", type: "created", label: "Created and forwarded",
           fromPerson: item.creator_info, toPerson: firstEntry.to_user_info,
-          hasContent: !!initialNotesheet?.has_notesheet,
-          content: initialNotesheet?.accessible ? initialNotesheet.content : null,
+          hasContent: initialWithheld,
+          content: initialContent,
           // The combined entry is dated by when the forward actually
           // happened (when the file left the creator), not by the file's
           // own created_at, which may predate it by any amount of time.
@@ -89,20 +101,25 @@ function buildTimeline(item: TrackingItem, trackEntries: TrackEntry[], initialNo
         }
       : {
           key: "created", type: "created", label: "Created", person: item.creator_info,
-          hasContent: !!initialNotesheet?.has_notesheet,
-          content: initialNotesheet?.accessible ? initialNotesheet.content : null,
+          hasContent: initialWithheld,
+          content: initialContent,
           created_at: item.created_at,
         },
   ];
 
   for (const e of trackEntries) {
     if (firstIsCreatorForward && e === firstEntry) continue; // already folded into the "created" event above
+    const realRemark = hasRealNotesheetContent(e.remarks) ? e.remarks : null;
+    // Withheld = the backend knows a remark exists but redacted it (sent
+    // null). A remark that came through blank/placeholder is not withheld,
+    // it's just nothing to show.
+    const withheld = !!e.has_remark && e.remarks == null;
     if (e.type === "sign") {
-      events.push({ key: e.id, type: "sign", label: "Signed", person: e.from_user_info, hasContent: !!e.has_remark, content: e.remarks, created_at: e.created_at });
+      events.push({ key: e.id, type: "sign", label: "Signed", person: e.from_user_info, hasContent: withheld, content: realRemark, created_at: e.created_at });
     } else {
       events.push({
         key: e.id, type: "route", label: e.action === "dispatch" ? "Dispatched" : "Forwarded",
-        fromPerson: e.from_user_info, toPerson: e.to_user_info, hasContent: !!e.has_remark, content: e.remarks, created_at: e.created_at,
+        fromPerson: e.from_user_info, toPerson: e.to_user_info, hasContent: withheld, content: realRemark, created_at: e.created_at,
       });
     }
   }
@@ -144,9 +161,22 @@ export function TimelineModal({ item, onClose }: { item: TrackingItem; onClose: 
         onClick={(e) => e.stopPropagation()}
       >
         <div className="px-6 py-5 border-b border-gray-200 shrink-0">
-          <div className="flex items-center justify-between">
+          <div className="flex items-center justify-between gap-3">
             <h3 className="text-xl font-bold text-gray-900">File Timeline</h3>
-            <button onClick={onClose} className="text-gray-400 hover:text-gray-600"><X size={20} /></button>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  const ok = printTimelinePdf(item, events);
+                  if (!ok) toast.error("Please allow pop-ups for this site to download the timeline.");
+                }}
+                disabled={isLoading || events.length === 0}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-semibold text-[#0D6E6E] border border-[#0D6E6E]/30 rounded-lg hover:bg-[#F0F7F7] disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <Download size={15} /> Download PDF
+              </button>
+              <button onClick={onClose} className="text-gray-400 hover:text-gray-600"><X size={20} /></button>
+            </div>
           </div>
           <div className="mt-3 grid grid-cols-2 gap-x-6 gap-y-2 text-sm">
             <div><span className="text-gray-400 uppercase text-xs font-semibold">File Number</span><p className="font-mono font-bold text-[#0D6E6E]">{item.ref_number}</p></div>
@@ -166,10 +196,10 @@ export function TimelineModal({ item, onClose }: { item: TrackingItem; onClose: 
               {events.map((ev, i) => {
                 const style = EVENT_STYLE[ev.type];
                 const Icon = style.icon;
-                // Something exists for this event (hasContent) but the
-                // backend didn't send it (content is null) — i.e. it's
-                // genuinely being withheld, not just absent.
-                const showNoAccess = ev.hasContent && !ev.content;
+                // `hasContent` now means strictly "a note exists for this
+                // event but the backend withheld it". A blank / never-
+                // written note is neither shown nor flagged.
+                const showNoAccess = ev.hasContent;
                 return (
                   <div key={ev.key} className="flex items-start gap-4">
                     <div className="flex flex-col items-center">

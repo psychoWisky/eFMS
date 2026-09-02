@@ -55,6 +55,22 @@ export function isNotesheetEmpty(html: string | null | undefined): boolean {
   return html.replace(/<[^>]*>/g, "").trim().length === 0;
 }
 
+// True only when a notesheet/remark actually contains something the holder
+// wrote — blank content AND the untouched "Write your official notesheet
+// here…" placeholder both count as nothing. Use this before rendering a
+// prior note anywhere (timeline, history, PDF) so an empty entry never
+// shows up as a blank box or a misleading "no access" line.
+export function hasRealNotesheetContent(html: string | null | undefined): boolean {
+  if (isNotesheetEmpty(html)) return false;
+  const text = (html ?? "")
+    .replace(/<[^>]*>/g, "")
+    .replace(/&nbsp;|&#160;/g, " ")
+    .replace(/[.…\s]+$/g, "")
+    .trim()
+    .toLowerCase();
+  return text.length > 0 && text !== "write your official notesheet here";
+}
+
 const PREVIEWABLE_MIME_TYPES = new Set([
   "application/pdf",
   "image/png", "image/jpeg", "image/gif", "image/webp", "image/svg+xml",
