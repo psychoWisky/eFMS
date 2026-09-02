@@ -96,14 +96,9 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
   // Attached Files rail: show a few by default, open the rest in a
   // z-indexed dropdown-style overlay ("Expand" / "Close").
   const [attachExpanded, setAttachExpanded] = useState(false);
-  // The whole rail collapses to a thin "Expand" strip (like the app
-  // sidebar). null = automatic — expanded only when the file actually
-  // has attachments; a manual toggle overrides that either way.
+  // The whole rail starts collapsed to a thin "Expand" strip (like the
+  // app sidebar) and only opens when the user explicitly expands it.
   const [railManual, setRailManual] = useState<boolean | null>(null);
-  // Notesheet History: with more than one prior note, show only the most
-  // recent by default (the note from whoever forwarded the file to you);
-  // the rest is one click away.
-  const [historyExpanded, setHistoryExpanded] = useState(false);
   const { toggleFavorite, buildGroups } = useFavoriteRecipients();
   // Draft editing (30-minute window)
   const [editingDraft, setEditingDraft] = useState(false);
@@ -859,9 +854,15 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
 
   const ATTACH_PEEK = 3;
   const hasMoreAttachments = file.attachments.length > ATTACH_PEEK;
-  // Expanded only when the file has attachments, unless the user has
-  // manually toggled the rail. Collapsed = a thin "Expand" strip.
-  const railExpanded = railManual ?? file.attachments.length > 0;
+  // Always collapsed unless the user explicitly clicked "Expand".
+  const railExpanded = railManual === true;
+
+  // The single most recent prior holder note — the one written by whoever
+  // forwarded this file to the current holder. Older notes are not shown.
+  const latestHolderNote = holderNotesheets
+    .filter((n) => !n.is_current)
+    .slice()
+    .sort((a, b) => b.sequence - a.sequence)[0] ?? null;
 
   return (
     <div className="flex h-[calc(100vh-4rem)] bg-[#F5F7FA] overflow-hidden">
@@ -1146,7 +1147,7 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                 {/* When there are prior entries to read AND the viewer can
                     add their own, a slim jump-link points to the editor at
                     the bottom so it isn't missed. */}
-                {canEditHolderNotesheet && holderNotesheets.some((n) => !n.is_current) && (
+                {canEditHolderNotesheet && latestHolderNote && (
                   <a href="#my-notesheet"
                     className="order-first flex items-center justify-between gap-3 rounded-xl border border-[#0D6E6E]/25 bg-[#F0F7F7] px-4 py-2.5 text-sm text-[#0A5757] hover:bg-[#E6F4F4] transition-colors">
                     <span>Read the notesheet below, then add yours.</span>
@@ -1201,104 +1202,40 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                     (still-editable) row is excluded here (shown above in
                     "My Notesheet" instead); every row here is is_current
                     === false and permanently read-only. */}
-                <div className="order-2 bg-white rounded-2xl border border-gray-200 shadow-sm">
-                  {(() => {
-                    // Sorted newest-first so the most recent note (from
-                    // whoever forwarded the file to you) is always on top.
-                    const allHistory = holderNotesheets
-                      .filter((n) => !n.is_current)
-                      .slice()
-                      .sort((a, b) => b.sequence - a.sequence);
-                    const collapsible = allHistory.length > 1;
-                    const historyNotes = collapsible && !historyExpanded
-                      ? allHistory.slice(0, 1)   // latest only
-                      : allHistory;
-                    const hiddenCount = allHistory.length - historyNotes.length;
-                    return (
-                      <>
-                        <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
-                          <div>
-                            <h2 className="text-lg font-bold text-gray-800">
-                              {collapsible && !historyExpanded ? "Latest Notesheet" : "Notesheet History"}
-                            </h2>
-                            <p className="text-sm text-gray-500 mt-0.5">
-                              {collapsible && !historyExpanded
-                                ? "Most recent note from the previous holder — read-only"
-                                : "Every holding period’s own Notesheet, newest first — read-only"}
-                            </p>
-                          </div>
-                          <div className="flex items-center gap-2 shrink-0">
-                            {allHistory.length > 0 && (
-                              <span className="text-xs font-semibold bg-gray-100 text-gray-600 px-2.5 py-1 rounded-full">
-                                {allHistory.length} entr{allHistory.length === 1 ? "y" : "ies"}
-                              </span>
-                            )}
-                            {collapsible && (
-                              <button
-                                type="button"
-                                onClick={() => setHistoryExpanded((v) => !v)}
-                                className="flex items-center gap-1 text-xs font-semibold text-[#0D6E6E] border border-[#0D6E6E]/30 rounded-lg px-2.5 py-1 hover:bg-[#F0F7F7]"
-                              >
-                                {historyExpanded
-                                  ? <>Show latest only <ChevronDown size={13} className="rotate-180" /></>
-                                  : <>Show {hiddenCount} earlier <ChevronDown size={13} /></>}
-                              </button>
-                            )}
-                          </div>
+                {/* Latest Notesheet — ONLY the most recent prior holder
+                    note (the one written when the file was forwarded to
+                    the current holder). Older holder notes are never
+                    shown here. Hidden entirely when there is no prior
+                    holder note (e.g. first hop straight from the creator). */}
+                {latestHolderNote && (
+                  <div className="order-2 bg-white rounded-2xl border border-gray-200 shadow-sm">
+                    <div className="px-6 py-4 border-b border-gray-100">
+                      <h2 className="text-lg font-bold text-gray-800">Latest Notesheet</h2>
+                      <p className="text-sm text-gray-500 mt-0.5">The note written by the previous holder when forwarding this file to you — read-only</p>
+                    </div>
+                    <div className="px-6 py-5">
+                      <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
+                        <div className="flex items-center gap-1.5">
+                          <PersonBadge person={latestHolderNote.user_info} fallback="Unknown" compact />
+                          {latestHolderNote.user_id === user?.id && (
+                            <span className="text-xs text-[#0D6E6E] font-medium">(You)</span>
+                          )}
                         </div>
-                        {allHistory.length === 0 ? (
-                          <div className="px-6 py-10 text-center text-gray-400">
-                            <p className="text-base">No previous holder Notesheets recorded yet.</p>
-                          </div>
-                        ) : (
-                          <div className="px-6 py-5">
-                            {historyNotes.map((n, idx, arr) => (
-                              <div key={n.id} className="flex items-start gap-4">
-                                {/* Numbered marker + connecting line — same timeline
-                                    language as the Track Status tab's icon + line.
-                                    The number itself (n.sequence) is stable and
-                                    chronological regardless of this reversed
-                                    display order. */}
-                                <div className="flex flex-col items-center">
-                                  <div className="w-9 h-9 rounded-full flex items-center justify-center shrink-0 border-2 bg-[#0D6E6E] border-[#0D6E6E]">
-                                    <span className="text-xs font-bold text-white">{n.sequence}</span>
-                                  </div>
-                                  {idx < arr.length - 1 && <div className="w-0.5 flex-1 min-h-[24px] mt-1 bg-gray-200" />}
-                                </div>
-                                <div className="flex-1 min-w-0 pb-6">
-                                  <div className="flex items-center justify-between mb-2">
-                                    <div className="flex items-center gap-1.5">
-                                      <PersonBadge person={n.user_info} fallback="Unknown" compact />
-                                      {n.user_id === user?.id && (
-                                        <span className="text-xs text-[#0D6E6E] font-medium">(You)</span>
-                                      )}
-                                    </div>
-                                    <span className="flex items-center gap-1.5 text-xs font-medium text-gray-500">
-                                      <Clock size={12} className="text-gray-400" />{formatDate(n.updated_at, "datetime")}
-                                    </span>
-                                  </div>
-                                  {/* Notesheet content — same prose rendering as the Initial Notesheet card.
-                                      A restricted creator's view gets every holding period back so the
-                                      history/timeline stays visible, but content for holders other than
-                                      themselves is withheld (accessible === false) — same presentation
-                                      convention as Tracking History's "You don't have access to read this". */}
-                                  {n.accessible === false ? (
-                                    <p className="text-sm text-gray-400 flex items-center gap-1.5 bg-gray-50 border border-gray-200 rounded-xl px-4 py-3">
-                                      <Lock size={12} /> You don&apos;t have access to read this
-                                    </p>
-                                  ) : (
-                                    <div className={cn("bg-gray-50 border border-gray-200 rounded-xl px-4 py-3", NOTESHEET_PROSE_CLASS)}
-                                      dangerouslySetInnerHTML={{ __html: toSafeNotesheetHtml(n.content) }} />
-                                  )}
-                                </div>
-                              </div>
-                            ))}
-                          </div>
-                        )}
-                      </>
-                    );
-                  })()}
-                </div>
+                        <span className="flex items-center gap-1.5 text-xs font-medium text-gray-500">
+                          <Clock size={12} className="text-gray-400" />{formatDate(latestHolderNote.updated_at, "datetime")}
+                        </span>
+                      </div>
+                      {latestHolderNote.accessible === false ? (
+                        <p className="text-sm text-gray-400 flex items-center gap-1.5 bg-gray-50 border border-gray-200 rounded-xl px-4 py-3">
+                          <Lock size={12} /> You don&apos;t have access to read this
+                        </p>
+                      ) : (
+                        <div className={cn("bg-gray-50 border border-gray-200 rounded-xl px-4 py-3", NOTESHEET_PROSE_CLASS)}
+                          dangerouslySetInnerHTML={{ __html: toSafeNotesheetHtml(latestHolderNote.content) }} />
+                      )}
+                    </div>
+                  </div>
+                )}
 
                 {/* Initial Notesheet — the creator's original document,
                     always conceptually numbered 1 (it precedes every
