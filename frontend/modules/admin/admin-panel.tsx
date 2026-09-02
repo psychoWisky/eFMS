@@ -93,7 +93,7 @@ export function AdminPanel() {
   ];
 
   return (
-    <div className="px-6 py-6 max-w-5xl mx-auto">
+    <div className="px-[15px] py-6">
       <div className="mb-5">
         <h1 className="text-xl font-bold text-[#1A1A2E] flex items-center gap-2">
           <ShieldCheck size={20} className="text-[#0D6E6E] shrink-0" /> Admin Panel

@@ -938,7 +938,7 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
       {/* Main panel */}
       <div className="flex-1 flex flex-col overflow-hidden">
         {/* File header */}
-        <div className="bg-white border-b border-gray-200 px-6 py-4">
+        <div className="bg-white border-b border-gray-200 px-[15px] py-4">
           {(file.priority === "secret" || file.priority === "urgent") && (
             <div className="mb-3"><FileClassificationBanner priority={file.priority} /></div>
           )}
@@ -1073,7 +1073,7 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
         {/* Tab content */}
         <div className="flex-1 overflow-y-auto">
           {activeTab === "notesheet" && (
-            <div className="mx-auto w-full max-w-[1180px] p-6 flex flex-col lg:flex-row gap-6 items-start">
+            <div className="w-full p-[15px] flex flex-col lg:flex-row gap-4 items-start">
               {/* MAIN (wide, centred): My Notesheet (top, if current holder)
                   -> Notesheet History (newest holding-period first) ->
                   Initial Notesheet (always last, numbered 1). Numbering
@@ -1082,7 +1082,23 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                   row is created) — never recalculated from this array's
                   display order, which is intentionally the reverse of
                   creation order. */}
-              <div className="flex-1 min-w-0 w-full space-y-5">
+              {/* A file notesheet reads top-to-bottom in chronological order —
+                  Notesheet 1 (Initial) first, then each holder's note, and
+                  the current holder's own editor LAST — so you always read
+                  what came before you add your entry. CSS `order` places the
+                  editor last without moving it in the DOM. */}
+              <div className="flex-1 min-w-0 w-full flex flex-col gap-5">
+                {/* When there are prior entries to read AND the viewer can
+                    add their own, a slim jump-link points to the editor at
+                    the bottom so it isn't missed. */}
+                {canEditHolderNotesheet && holderNotesheets.some((n) => !n.is_current) && (
+                  <a href="#my-notesheet"
+                    className="order-first flex items-center justify-between gap-3 rounded-xl border border-[#0D6E6E]/25 bg-[#F0F7F7] px-4 py-2.5 text-sm text-[#0A5757] hover:bg-[#E6F4F4] transition-colors">
+                    <span>Read the notesheet below, then add yours.</span>
+                    <span className="flex items-center gap-1 font-semibold shrink-0">Go to your note <ChevronDown size={14} /></span>
+                  </a>
+                )}
+
                 {/* My Notesheet — the current holder's OWN, server-persisted
                     Notesheet (HolderNote), only ever shown/editable while
                     they are the file's current holder on an Active file.
@@ -1094,18 +1110,18 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                     from this content (see handleSubmitAction) rather than
                     asked for separately. Saving here never forwards the file. */}
                 {canEditHolderNotesheet && (
-                  <div className="bg-white rounded-2xl border border-gray-200 shadow-sm">
-                    <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+                  <div id="my-notesheet" className="order-3 bg-white rounded-2xl border-2 border-[#0D6E6E] shadow-sm scroll-mt-4">
+                    <div className="flex items-center justify-between px-6 py-4 border-b border-[#0D6E6E]/20 bg-[#F0F7F7] rounded-t-2xl">
                       <div>
-                        <h2 className="text-lg font-bold text-gray-800">My Notesheet</h2>
-                        <p className="text-sm text-gray-500 mt-0.5">Your own Notesheet while you hold this file.</p>
+                        <h2 className="text-lg font-bold text-[#0A5757]">Your Notesheet</h2>
+                        <p className="text-sm text-gray-500 mt-0.5">Add your note here after reading the entries above.</p>
                       </div>
                       <span className="flex items-center gap-1.5 text-sm text-[#0D6E6E] font-semibold"><Pencil size={13} /> Editable</span>
                     </div>
                     <div className="px-6 py-5 space-y-3">
                       <div className="border border-gray-200 rounded-xl overflow-hidden">
                         <RichTextToolbar editor={myNoteEditor} />
-                        <EditorContent editor={myNoteEditor} className="min-h-[420px] text-sm" />
+                        <EditorContent editor={myNoteEditor} className="min-h-[520px] text-sm" />
                       </div>
                       <div className="flex justify-end">
                         <button type="button" onClick={saveMyNotesheet} disabled={saveHolderNotesheetMutation.isPending || !myNoteDirty}
@@ -1130,18 +1146,18 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                     (still-editable) row is excluded here (shown above in
                     "My Notesheet" instead); every row here is is_current
                     === false and permanently read-only. */}
-                <div className="bg-white rounded-2xl border border-gray-200 shadow-sm">
+                <div className="order-2 bg-white rounded-2xl border border-gray-200 shadow-sm">
                   {(() => {
                     const historyNotes = holderNotesheets
                       .filter((n) => !n.is_current)
                       .slice()
-                      .sort((a, b) => b.sequence - a.sequence); // newest holding-period first
+                      .sort((a, b) => a.sequence - b.sequence); // chronological — oldest holding-period first
                     return (
                       <>
                         <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
                           <div>
                             <h2 className="text-lg font-bold text-gray-800">Notesheet History</h2>
-                            <p className="text-sm text-gray-500 mt-0.5">Each holding period&apos;s own Notesheet, newest first — read-only</p>
+                            <p className="text-sm text-gray-500 mt-0.5">Each holding period&apos;s own Notesheet, in order — read-only</p>
                           </div>
                           {historyNotes.length > 0 && (
                             <span className="text-xs font-semibold bg-gray-100 text-gray-600 px-2.5 py-1 rounded-full">
@@ -1208,10 +1224,10 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                     HolderNote holding-period, which start numbering at 2).
                     Immutable once created — never editable by whoever
                     currently holds the file; the current holder's own
-                    contribution is the separate, editable "My Notesheet"
-                    card above. Always rendered last, matching the
-                    oldest-at-the-bottom display order used above. */}
-                <div className="bg-white rounded-2xl border border-gray-200 shadow-sm">
+                    contribution is the separate, editable "Your Notesheet"
+                    card. `order-1` puts it first — the notesheet reads
+                    chronologically, editor last. */}
+                <div className="order-1 bg-white rounded-2xl border border-gray-200 shadow-sm">
                   <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
                     <div className="flex items-center gap-2.5">
                       <div className="w-9 h-9 rounded-full flex items-center justify-center shrink-0 border-2 bg-gray-400 border-gray-400">
@@ -1511,7 +1527,7 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
           )}
 
           {activeTab === "track" && (
-            <div className="mx-auto w-full max-w-[1180px] p-6">
+            <div className="w-full p-[15px]">
               <div className="bg-white rounded-2xl border border-gray-200 shadow-sm">
                 <div className="px-6 py-4 border-b border-gray-100">
                   <h2 className="text-lg font-bold text-gray-800">File Tracking</h2>
@@ -1568,7 +1584,7 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
 
           {/* ── SIGN DOCUMENT TAB ── */}
           {activeTab === "sign" && (
-            <div className="mx-auto w-full max-w-[1180px] p-6 space-y-5">
+            <div className="w-full p-[15px] space-y-5">
               <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
                 <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
                   <div>

@@ -137,7 +137,7 @@ export function EFMSDashboard() {
       />
 
       {/* Section tabs */}
-      <div className="bg-white border-b border-gray-200 px-6">
+      <div className="bg-white border-b border-gray-200 px-[15px]">
         <div className="flex gap-1">
           {SECTIONS.map((s) => (
             <button key={s.id} onClick={() => guardedNavigate(() => setSection(s.id))}
@@ -155,7 +155,7 @@ export function EFMSDashboard() {
         </div>
       </div>
 
-      <div className="px-6 py-5">
+      <div className="px-[15px] py-5">
 
         {/* ── DOCKET SECTION ── */}
         {section === "docket" && (
@@ -423,10 +423,10 @@ export function EFMSDashboard() {
             )}
 
             {newFileMode === "create" && (
-              <div>
-                <button onClick={() => guardedNavigate(() => setNewFileMode("choice"))} className="text-sm text-[#0D6E6E] hover:underline mb-4">← Back</button>
+              <div className="w-full">
+                <button onClick={() => guardedNavigate(() => setNewFileMode("choice"))} className="text-sm text-[#0D6E6E] hover:underline mb-3">← Back</button>
                 <h2 className="text-xl font-bold text-[#1A1A2E] mb-1">Create New File</h2>
-                <p className="text-base text-gray-500 mb-5">Fill in the details and submit your file for routing.</p>
+                <p className="text-sm text-gray-500 mb-5">Fill in the details and submit your file for routing.</p>
                 <NewFileForm onSuccess={() => { qc.invalidateQueries({ queryKey: ["efms-files-outbox"] }); setNewFileMode("choice"); setSection("files"); }} />
               </div>
             )}

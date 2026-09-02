@@ -6,7 +6,7 @@ import { toast } from "sonner";
 import { showSuccess } from "@/lib/alert";
 import { isNotesheetEmpty } from "@/lib/utils";
 import { EditorContent } from "@tiptap/react";
-import { Loader2, Upload, X, FileText, Send, AlertTriangle, CheckCircle2, Save } from "lucide-react";
+import { Loader2, Upload, X, FileText, Send, AlertTriangle, CheckCircle2, Save, Paperclip, UserCheck } from "lucide-react";
 import { PersonBadge } from "@/components/shared/person-badge";
 import { SearchableSelect } from "@/components/shared/searchable-select";
 import { useRichTextEditor, RichTextToolbar } from "@/components/shared/rich-text-editor";
@@ -255,143 +255,181 @@ export function NewFileForm({ onSuccess }: NewFileFormProps) {
 
   const selectedRecipient = allUsers.find((u) => u.id === recipientId);
 
+  const fieldLabel = "block text-sm font-semibold text-gray-700 mb-1.5";
+  const fieldHint = "text-xs text-gray-400 mb-1.5";
+  const textInput = "w-full border border-gray-300 rounded-xl px-3.5 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]";
+  const cardCls = "bg-white rounded-2xl border border-gray-200 shadow-sm";
+
   return (
-    <form onSubmit={handleSubmit} className="space-y-5 max-w-[1080px]">
+    <form onSubmit={handleSubmit} className="w-full space-y-4">
       {draftRestored && (
-        <div className="flex items-center justify-between px-4 py-3 bg-amber-50 border border-amber-200 rounded-xl text-amber-800 text-sm">
+        <div className="flex items-center justify-between gap-3 px-4 py-2.5 bg-amber-50 border border-amber-200 rounded-xl text-amber-800 text-sm">
           <span>Draft restored from your last session.</span>
           <button type="button" onClick={() => { localStorage.removeItem(DRAFT_KEY); editor?.commands.setContent(DEFAULT_NOTESHEET_HTML); setNotesheetDirty(false); setSubject(""); setCategory(""); setPriority(""); setDraftRestored(false); }}
-            className="ml-4 text-xs font-semibold underline hover:no-underline">Clear draft</button>
+            className="text-xs font-semibold underline hover:no-underline shrink-0">Clear draft</button>
         </div>
       )}
-      {/* Row 1: Subject (2 cols) + Category + Priority + Recipient */}
-      <div className="bg-white rounded-2xl border border-gray-200 p-6 shadow-sm">
-        <h3 className="text-base font-bold text-gray-800 mb-4">File Details</h3>
-        <div className="grid grid-cols-1 lg:grid-cols-4 gap-5">
-          <div className="lg:col-span-2">
-            <label className="block text-base font-semibold text-gray-700 mb-2">Subject *</label>
-            <input value={subject} onChange={(e) => setSubject(e.target.value)} placeholder="Describe the purpose of this file…"
-              className="w-full border border-gray-300 rounded-xl px-4 py-3 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]" />
+
+      {/* ── TOP: form fields (left) + attachments (right) ── */}
+      <div className="flex flex-col lg:flex-row gap-4 items-start">
+        <div className="flex-1 min-w-0 w-full space-y-4">
+        {/* ── File Details ── */}
+        <section className={`${cardCls} p-5`}>
+          <h3 className="text-base font-bold text-gray-900">File Details</h3>
+          <p className="text-xs text-gray-400 mt-0.5 mb-4">Basic information about the file. All three fields are required.</p>
+
+          <div className="space-y-4">
+            <div>
+              <label className={fieldLabel}>Subject *</label>
+              <input value={subject} onChange={(e) => setSubject(e.target.value)} placeholder="Describe the purpose of this file…"
+                className={textInput} />
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <label className={fieldLabel}>Category *</label>
+                <SearchableSelect
+                  options={activeCategories.map((c) => ({ value: c.name, label: c.name }))}
+                  value={category}
+                  onChange={setCategory}
+                  clearable={false}
+                  placeholder="Select a category…"
+                  searchPlaceholder="Search categories…"
+                />
+              </div>
+              <div>
+                <label className={fieldLabel}>Priority *</label>
+                <div className="grid grid-cols-3 gap-2">
+                  {activePriorities.map((p) => {
+                    const isUrgent = p.name.toLowerCase() === "urgent";
+                    const isSecret = p.name.toLowerCase() === "secret";
+                    const isSelected = priority === p.name;
+                    return (
+                      <button key={p.id} type="button" onClick={() => setPriority(p.name)}
+                        className={`w-full py-2.5 px-1 rounded-xl text-xs font-semibold border-2 transition-all leading-tight ${
+                          isSelected
+                            ? isUrgent ? "border-red-600 bg-red-600 text-white"
+                              : isSecret ? "border-purple-700 bg-purple-700 text-white"
+                              : "border-[#0D6E6E] bg-[#0D6E6E] text-white"
+                            : "border-gray-200 text-gray-600 hover:border-[#0D6E6E] hover:text-[#0D6E6E]"
+                        }`}>
+                        {p.label ?? p.name}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+
+            {isConfidential && (
+              <p className="text-sm text-purple-700 bg-purple-50 border border-purple-200 rounded-xl px-3.5 py-2.5">
+                Secret / Confidential priority restricts this file&apos;s movement to only the original sender and recipient.
+              </p>
+            )}
           </div>
-          <div>
-            <label className="block text-base font-semibold text-gray-700 mb-2">Category *</label>
-            <SearchableSelect
-              options={activeCategories.map((c) => ({ value: c.name, label: c.name }))}
-              value={category}
-              onChange={setCategory}
-              clearable={false}
-              placeholder="Select…"
-              searchPlaceholder="Search categories…"
-            />
-          </div>
-          <div>
-            <label className="block text-base font-semibold text-gray-700 mb-2">Priority *</label>
-            <div className="flex gap-2">
-              {activePriorities.map((p) => {
-                const isUrgent = p.name.toLowerCase() === "urgent";
-                const isSecret = p.name.toLowerCase() === "secret";
-                const isSelected = priority === p.name;
-                return (
-                  <button key={p.id} type="button" onClick={() => setPriority(p.name)}
-                    className={`flex-1 py-2.5 px-2 rounded-xl text-sm font-semibold border-2 transition-all capitalize ${
-                      isSelected
-                        ? isUrgent ? "border-red-600 bg-red-600 text-white"
-                          : isSecret ? "border-purple-700 bg-purple-700 text-white"
-                          : "border-[#0D6E6E] bg-[#0D6E6E] text-white"
-                        : "border-gray-200 text-gray-600 hover:border-[#0D6E6E] hover:text-[#0D6E6E]"
-                    }`}>
-                    {p.label ?? p.name}
-                  </button>
-                );
-              })}
+        </section>
+
+        {/* ── Select Recipient ── */}
+        <section className={`${cardCls} p-5`}>
+          <h3 className="text-base font-bold text-gray-900 flex items-center gap-2">
+            <UserCheck size={17} className="text-[#0D6E6E]" /> Select Recipient
+          </h3>
+          <p className="text-xs text-gray-400 mt-0.5 mb-4">
+            Optional now. Saving only creates a Draft — <span className="font-semibold text-gray-500">Forward</span> is what actually sends the file.
+          </p>
+
+          <div className="space-y-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <label className={fieldLabel}>Office</label>
+                <p className={fieldHint}>Narrows the recipient list below.</p>
+                <SearchableSelect
+                  options={offices.map((o) => ({ value: o.id, label: o.name }))}
+                  value={officeId}
+                  onChange={setOfficeId}
+                  placeholder="All offices…"
+                  searchPlaceholder="Search offices…"
+                />
+              </div>
+              <div>
+                <label className={fieldLabel}>Section</label>
+                <p className={fieldHint}>Requires an Office first.</p>
+                <SearchableSelect
+                  options={sections.map((s) => ({ value: s.id, label: s.name }))}
+                  value={sectionId}
+                  onChange={setSectionId}
+                  placeholder={officeId ? "All sections…" : "Select an Office first"}
+                  searchPlaceholder="Search sections…"
+                  disabled={!officeId}
+                />
+              </div>
+            </div>
+
+            <div>
+              <label className={fieldLabel}>Recipient</label>
+              <p className={fieldHint}>Choose a person now, or leave it and pick one when you Forward.</p>
+              {!loadingUsers && allUsers.length === 0 ? (
+                <p className="text-sm text-amber-600 bg-amber-50 rounded-xl p-3">
+                  {officeId || sectionId ? "No users found for this filter." : "No eligible recipients are currently available."}
+                </p>
+              ) : (
+                <SearchableSelect
+                  groups={buildGroups(allUsers, personLabel)}
+                  value={recipientId}
+                  onChange={setRecipientId}
+                  isFavorite={(id) => !!allUsers.find((u) => u.id === id)?.is_favorite}
+                  onToggleFavorite={(id) => {
+                    const u = allUsers.find((u) => u.id === id);
+                    if (u) toggleFavorite(id, !!u.is_favorite);
+                  }}
+                  placeholder="No recipient yet…"
+                  searchPlaceholder="Search by name or employee code…"
+                  disabled={loadingUsers}
+                />
+              )}
+              {selectedRecipient && (
+                <div className="mt-2 flex items-center gap-2 text-sm text-[#0D6E6E] bg-[#E6F4F4] border border-[#0D6E6E]/20 rounded-xl px-3 py-2">
+                  <CheckCircle2 size={14} className="shrink-0" />
+                  <span className="text-gray-500">Intended recipient:</span>
+                  <PersonBadge person={selectedRecipient} compact />
+                </div>
+              )}
             </div>
           </div>
+        </section>
         </div>
 
-        {isConfidential && (
-          <p className="mt-4 text-sm text-purple-700 bg-purple-50 border border-purple-200 rounded-xl px-4 py-2.5">
-            Secret/Confidential priority restricts this file's movement to only the original sender and recipient.
-          </p>
-        )}
+        {/* ── Attachments — right column ── */}
+        <div className="w-full lg:w-[380px] shrink-0">
+          <section className={`${cardCls} p-5`}>
+            <h3 className="text-base font-bold text-gray-900 flex items-center gap-2">
+              <Paperclip size={16} className="text-[#0D6E6E]" /> Attachments / Annexures
+              {annexures.length > 0 && (
+                <span className="text-xs font-bold bg-gray-100 text-gray-600 px-2 py-0.5 rounded-full">{annexures.length}</span>
+              )}
+            </h3>
+            <p className="text-xs text-gray-400 mt-0.5 mb-4">Supporting documents. Name and tag each as Annexure 1, 2, … — all are shared as PDF with recipients.</p>
 
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-5 mt-5">
-          <div>
-            <label className="block text-base font-semibold text-gray-700 mb-2">Office</label>
-            <p className="text-sm text-gray-400 mb-2">Optional — narrows the recipient list below.</p>
-            <SearchableSelect
-              options={offices.map((o) => ({ value: o.id, label: o.name }))}
-              value={officeId}
-              onChange={setOfficeId}
-              placeholder="All offices…"
-              searchPlaceholder="Search offices…"
-            />
-          </div>
-          <div>
-            <label className="block text-base font-semibold text-gray-700 mb-2">Section</label>
-            <p className="text-sm text-gray-400 mb-2">Optional — requires an Office first.</p>
-            <SearchableSelect
-              options={sections.map((s) => ({ value: s.id, label: s.name }))}
-              value={sectionId}
-              onChange={setSectionId}
-              placeholder={officeId ? "All sections…" : "Select an Office first"}
-              searchPlaceholder="Search sections…"
-              disabled={!officeId}
-            />
-          </div>
-          <div>
-            <label className="block text-base font-semibold text-gray-700 mb-2">Recipient (optional)</label>
-            <p className="text-sm text-gray-400 mb-2">The file is saved as a Draft. You can choose a recipient now or leave it for later — Forward is what actually sends it.</p>
-            {!loadingUsers && allUsers.length === 0 ? (
-              <p className="text-sm text-amber-600 bg-amber-50 rounded-xl p-3">
-                {officeId || sectionId ? "No users found for this filter." : "No eligible recipients are currently available."}
-              </p>
-            ) : (
-              <SearchableSelect
-                groups={buildGroups(allUsers, personLabel)}
-                value={recipientId}
-                onChange={setRecipientId}
-                isFavorite={(id) => !!allUsers.find((u) => u.id === id)?.is_favorite}
-                onToggleFavorite={(id) => {
-                  const u = allUsers.find((u) => u.id === id);
-                  if (u) toggleFavorite(id, !!u.is_favorite);
-                }}
-                placeholder="No recipient yet…"
-                searchPlaceholder="Search by name or employee code…"
-                disabled={loadingUsers}
-              />
-            )}
-            {selectedRecipient && (
-              <p className="text-sm text-[#0D6E6E] mt-1.5 flex items-center gap-2">
-                <CheckCircle2 size={13} className="shrink-0" /> Intended recipient: <PersonBadge person={selectedRecipient} compact />
-              </p>
-            )}
-          </div>
-        </div>
-      </div>
+            <div onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }} onDragLeave={() => setIsDragging(false)} onDrop={handleDrop}
+              className={`border-2 border-dashed rounded-xl p-5 text-center transition-colors ${isDragging ? "border-[#0D6E6E] bg-[#E6F4F4]" : "border-gray-200 hover:border-gray-300"}`}>
+              <Upload className="w-7 h-7 mx-auto mb-2 text-gray-300" />
+              <p className="text-sm text-gray-500">Drag files here or <label className="text-[#0D6E6E] cursor-pointer hover:underline font-semibold">browse<input type="file" multiple accept={ALLOWED_ATTACHMENT_ACCEPT} className="sr-only" onChange={(e) => { attachmentQueue.addFiles(e.target.files); e.target.value = ""; }} /></label></p>
+              <p className="text-xs text-gray-400 mt-1">{ALLOWED_ATTACHMENT_HELP_TEXT} · Max 10 MB each · Up to 10 files</p>
+            </div>
 
-      {/* Row 2: Annexure Uploads (BEFORE notesheet) */}
-      <div className="bg-white rounded-2xl border border-gray-200 p-6 shadow-sm">
-        <h3 className="text-base font-bold text-gray-800 mb-1">Attachments / Annexures</h3>
-        <p className="text-sm text-gray-500 mb-4">Upload supporting documents first. Name and tag each file as Annexure 1, 2, etc. All files will be available as PDF to recipients.</p>
-        <div onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }} onDragLeave={() => setIsDragging(false)} onDrop={handleDrop}
-          className={`border-2 border-dashed rounded-xl p-6 text-center transition-colors mb-4 ${isDragging ? "border-[#0D6E6E] bg-[#E6F4F4]" : "border-gray-200 hover:border-gray-300"}`}>
-          <Upload className="w-8 h-8 mx-auto mb-2 text-gray-300" />
-          <p className="text-base text-gray-500">Drag files here or <label className="text-[#0D6E6E] cursor-pointer hover:underline font-medium">browse<input type="file" multiple accept={ALLOWED_ATTACHMENT_ACCEPT} className="sr-only" onChange={(e) => { attachmentQueue.addFiles(e.target.files); e.target.value = ""; }} /></label></p>
-          <p className="text-sm text-gray-400 mt-1">{ALLOWED_ATTACHMENT_HELP_TEXT} · Max 10 MB each · Up to 10 files</p>
-        </div>
-        {annexures.length > 0 && (
-          <div className="space-y-2">
-            {annexures.map((ann, i) => (
-              <div key={i} className="flex items-center gap-3 p-3 bg-gray-50 rounded-xl border border-gray-100">
-                <FileText className="w-5 h-5 text-[#0D6E6E] shrink-0" />
-                <div className="flex-1 grid grid-cols-2 gap-3">
-                  <div>
-                    <label className="block text-xs font-medium text-gray-500 mb-1">File Name</label>
+            {annexures.length > 0 && (
+              <div className="space-y-2 mt-3">
+                {annexures.map((ann, i) => (
+                  <div key={i} className="p-3 bg-gray-50 rounded-xl border border-gray-100">
+                    <div className="flex items-center gap-2 mb-2">
+                      <FileText className="w-4 h-4 text-[#0D6E6E] shrink-0" />
+                      <span className="text-xs text-gray-400 ml-auto shrink-0">{(ann.file.size / 1024).toFixed(0)} KB</span>
+                      <button type="button" onClick={() => attachmentQueue.removeItem(i)} className="text-red-400 hover:text-red-600 shrink-0"><X size={14} /></button>
+                    </div>
+                    <label className="block text-[11px] font-medium text-gray-500 mb-1">File Name</label>
                     <input value={ann.name} onChange={(e) => attachmentQueue.renameItem(i, e.target.value)}
                       className="w-full border border-gray-200 rounded-lg px-2.5 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-[#0D6E6E]" />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-medium text-gray-500 mb-1">Tag</label>
+                    <label className="block text-[11px] font-medium text-gray-500 mt-2 mb-1">Tag</label>
                     <select value={ann.tag} onChange={(e) => attachmentQueue.setTag(i, e.target.value)}
                       className="w-full border border-gray-200 rounded-lg px-2.5 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-[#0D6E6E]">
                       {ATTACHMENT_TAGS.map((opt) => (
@@ -409,40 +447,37 @@ export function NewFileForm({ onSuccess }: NewFileFormProps) {
                       />
                     )}
                   </div>
-                </div>
-                <span className="text-sm text-gray-400 shrink-0">{(ann.file.size / 1024).toFixed(0)} KB</span>
-                <button type="button" onClick={() => attachmentQueue.removeItem(i)} className="text-red-400 hover:text-red-600 shrink-0"><X size={16} /></button>
+                ))}
               </div>
-            ))}
-          </div>
-        )}
+            )}
+          </section>
+        </div>
       </div>
 
-      {/* Row 3: WYSIWYG Notesheet */}
-      <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
-        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200">
-          <h3 className="text-base font-bold text-gray-800">Official Notesheet *</h3>
-          <p className="text-sm text-gray-400">Paste from Word/PDF — formatting is preserved</p>
+      {/* ── Notesheet — full page width ── */}
+      <section className={`${cardCls} overflow-hidden`}>
+        <div className="flex items-center justify-between px-5 py-3.5 border-b border-gray-200">
+          <h3 className="text-base font-bold text-gray-900">Official Notesheet *</h3>
+          <p className="text-xs text-gray-400">Paste from Word / PDF — formatting is preserved</p>
         </div>
-
         <RichTextToolbar editor={editor} />
-        <EditorContent editor={editor} className="min-h-[400px]" />
+        <EditorContent editor={editor} className="min-h-[560px]" />
         {editor && (
           <div className="px-5 py-2 border-t border-gray-100 text-xs text-gray-400 text-right">
             Words: {editor.getText().split(/\s+/).filter(Boolean).length}
           </div>
         )}
-      </div>
+      </section>
 
-      {/* Submit */}
-      <div className="flex justify-end gap-3 pb-4">
+      {/* ── Actions — full page width ── */}
+      <div className="flex flex-wrap justify-end gap-3 pb-4">
         <button type="button" onClick={handleSaveChanges} disabled={createFile.isPending || !isDirty}
-          className="flex items-center gap-2 px-6 py-3.5 border-2 border-[#0D6E6E] text-[#0D6E6E] text-base font-bold rounded-xl hover:bg-[#E6F4F4] disabled:opacity-50 disabled:cursor-not-allowed">
-          {createFile.isPending ? <Loader2 size={18} className="animate-spin" /> : <Save size={18} />}
+          className="flex items-center gap-2 px-6 py-3 border-2 border-[#0D6E6E] text-[#0D6E6E] text-sm font-bold rounded-xl hover:bg-[#E6F4F4] disabled:opacity-50 disabled:cursor-not-allowed">
+          {createFile.isPending ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />}
           {createFile.isPending ? "Saving…" : "Save Changes"}
         </button>
-        <button type="submit" className="flex items-center gap-2 px-8 py-3.5 bg-[#0D6E6E] text-white text-base font-bold rounded-xl hover:bg-[#178F8F]">
-          <Send size={18} /> Review & Submit
+        <button type="submit" className="flex items-center gap-2 px-7 py-3 bg-[#0D6E6E] text-white text-sm font-bold rounded-xl hover:bg-[#178F8F]">
+          <Send size={16} /> Review &amp; Submit
         </button>
       </div>
 

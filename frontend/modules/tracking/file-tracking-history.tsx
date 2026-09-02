@@ -67,7 +67,7 @@ export function FileTrackingHistoryPage() {
         icon={History}
       />
 
-      <div className="px-6 py-5 space-y-4">
+      <div className="px-[15px] py-5 space-y-4">
         {/* Date-range filters */}
         <div className="flex flex-wrap items-center gap-2">
           <button onClick={() => setRangeId("all")}

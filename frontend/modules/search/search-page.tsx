@@ -66,7 +66,7 @@ export function EFMSSearchPage() {
         icon={Search}
       />
 
-      <div className="px-6 py-5 max-w-5xl">
+      <div className="px-[15px] py-5">
         {/* Filters */}
         <form onSubmit={handleSearch} className="bg-white rounded-2xl border border-gray-200 p-6 shadow-sm mb-6">
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 mb-4">
