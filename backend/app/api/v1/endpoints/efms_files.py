@@ -1,7 +1,6 @@
 """eFMS file, notesheet, routing, and dispatch endpoints."""
 import uuid as _uuid
 import re
-import logging
 import smtplib
 import urllib.parse
 import io
@@ -38,13 +37,6 @@ def _send_email(to: str, subject: str, body: str) -> None:
             s.sendmail(settings.SMTP_FROM, [to], msg.as_string())
     except Exception:
         pass  # Don't fail the request if email fails
-
-_nslog = logging.getLogger("efms.notesheet_pdf")
-
-# Bump this string whenever the notesheet PDF template/pipeline changes. It
-# is logged on every download so the server logs prove which build is
-# actually running (a stale process / un-pulled deploy shows the old tag).
-NOTESHEET_PDF_BUILD = "2026-09-02-chromium-letterhead-v1"
 
 from app.db.base import get_db
 from app.core.dependencies import get_current_verified_user
@@ -1079,11 +1071,6 @@ async def download_notesheet(
     records.
     """
 
-    _nslog.warning(
-        "notesheet_pdf: ENTER build=%s file_id=%s user=%s",
-        NOTESHEET_PDF_BUILD, file_id, getattr(user, "id", "?"),
-    )
-
     # ------------------------------------------------------------------
     # Load file and enforce existing full-access rules.
     # ------------------------------------------------------------------
@@ -1134,32 +1121,34 @@ async def download_notesheet(
         creator_department = ""
 
     # ------------------------------------------------------------------
-    # AVFU logo.
+    # AVFU letterhead logo.
     #
     # efms_files.py:
     #   <project>/backend/app/api/v1/endpoints/efms_files.py
+    #   parents[5] => <project>/
     #
-    # parents[4] => <project>/
-    #
-    # Expected:
-    #   <project>/avfu_logo.png
+    # Preferred: <project>/avfu_letterhead_logo.png — the crest supplied in
+    # the university's official AVFU_Blank_Letterhead.docx. Falls back to
+    # the older <project>/avfu_logo.png if the letterhead crest is absent.
     # ------------------------------------------------------------------
-    logo_path = Path(__file__).resolve().parents[5] / "avfu_logo.png"
+    _project_root = Path(__file__).resolve().parents[5]
+    logo_path = _project_root / "avfu_letterhead_logo.png"
+    if not logo_path.is_file():
+        logo_path = _project_root / "avfu_logo.png"
 
     logo_html = ""
 
     if logo_path.is_file():
         try:
-            # The source PNG is very large (multi-thousand px). Embedding
-            # it raw would make every notesheet PDF several MB, so it's
-            # downscaled to a small letterhead mark once here and embedded
-            # as that. Falls back to the raw bytes if Pillow chokes on it.
+            # Downscale once so the embedded data URI stays small (the raw
+            # crest can be multiple MB). Falls back to the raw bytes if
+            # Pillow can't decode/resize it.
             try:
                 from io import BytesIO
                 from PIL import Image
 
                 _img = Image.open(logo_path)
-                _img.thumbnail((320, 320))  # 4x the 64pt display size, for crisp print
+                _img.thumbnail((360, 360))  # ~3x the display size, crisp in print
                 _buf = BytesIO()
                 _img.save(_buf, format="PNG", optimize=True)
                 _logo_bytes = _buf.getvalue()
@@ -1167,16 +1156,14 @@ async def download_notesheet(
                 _logo_bytes = logo_path.read_bytes()
 
             logo_b64 = base64.b64encode(_logo_bytes).decode("ascii")
-            # width is set as a real HTML attribute (not just CSS) so the
+            # width is a real HTML attribute (not only CSS) so the
             # LibreOffice fallback path sizes the <img> reliably; height is
-            # left to the CSS "height: auto" rule so the aspect ratio is
-            # preserved. The logo sits centred in the letterhead, above the
-            # university name.
+            # left to CSS "height: auto" so the crest keeps its aspect ratio.
             logo_html = (
-                '<img class="logo" '
-                'width="64" '
+                '<img class="lh-logo" '
+                'width="88" '
                 f'src="data:image/png;base64,{logo_b64}" '
-                'alt="AVFU Logo">'
+                'alt="AVFU">'
             )
         except OSError:
             logo_html = ""
@@ -1379,94 +1366,137 @@ async def download_notesheet(
     # ------------------------------------------------------------------
     # Complete PDF HTML.
     #
-    # Laid out to read like a real government notesheet: a centred
-    # letterhead (logo + university name + eFMS line) over a double
-    # rule, a compact file-reference block, then each notesheet as a
-    # flowing document section — a thin rule and the contributor's
-    # identity, then the prose running on naturally. No bordered "cards"
-    # around individual fields.
+    # The header reproduces the university's official
+    # AVFU_Blank_Letterhead.docx: the crest on the left, three centred
+    # title lines (Assamese name, English name, address) beside it, closed
+    # by a full-width hairline rule.
     #
-    # Tables are used only where LibreOffice's HTML import needs them
-    # for reliable alignment (the file-reference label/value grid).
+    # Everything below the letterhead is a flowing document — no bordered
+    # "cards" around individual fields. Body type is Arial ~14px with
+    # deliberately open letter- and line-spacing for a clean, official
+    # look. Page padding is a uniform 15px on all four sides.
     #
     # NOTE:
-    # This is an f-string, so ALL CSS curly braces MUST be doubled:
-    # {{
-    # }}
+    # This is an f-string, so ALL literal CSS curly braces MUST be doubled:
+    # {{  }}
     # ------------------------------------------------------------------
     html = f"""<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
 
-<title>
-    {_escape_html(f.subject)}
-</title>
+<title>{_escape_html(f.subject)}</title>
 
 <style>
 
 @page {{
     size: A4;
-    margin: 18mm 20mm;
+    /* Uniform 15px on all four sides — the page's own padding, no extra
+       whitespace from the print engine. */
+    margin: 15px;
 }}
 
-body {{
-    font-family: "Liberation Serif", Georgia, "Times New Roman", serif;
-    font-size: 11pt;
-    line-height: 1.5;
-    color: #1a1a1a;
+* {{
+    box-sizing: border-box;
+}}
+
+html, body {{
     margin: 0;
     padding: 0;
 }}
 
+body {{
+    font-family: Arial, "Helvetica Neue", Helvetica, "Liberation Sans", sans-serif;
+    font-size: 14px;
+    line-height: 1.7;
+    letter-spacing: 0.2px;
+    color: #1a1a1a;
+    /* @page already gives the 15px frame; this keeps a matching inset for
+       the LibreOffice fallback path, which ignores small @page margins. */
+    padding: 0;
+}}
+
 /* ================================================================
-   LETTERHEAD
-   Centred logo + university name + eFMS line, closed by a double
-   rule — the classic official-letterhead treatment.
+   LETTERHEAD  — mirrors AVFU_Blank_Letterhead.docx
    ================================================================ */
 
 .letterhead {{
-    text-align: center;
-    padding-bottom: 10px;
-    border-bottom: 3px double #222222;
-    margin-bottom: 4px;
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 6px;
 }}
 
-.logo {{
+.lh-logo-cell {{
+    width: 96px;
+    vertical-align: middle;
+    padding: 0;
+}}
+
+.lh-logo {{
     height: auto;
-    margin-bottom: 4px;
+    display: block;
 }}
 
-.institution {{
-    font-size: 17pt;
+.lh-titles {{
+    vertical-align: middle;
+    text-align: center;
+    padding: 0 12px 0 4px;
+}}
+
+.lh-name-as {{
+    /* Assamese (Bengali script) title line from the official letterhead.
+       Needs an Indic font on the host; the stack below picks up the
+       common Linux packages (Lohit / Noto Sans Bengali) and Windows
+       "Nirmala UI", then falls back to Arial. */
+    font-family: "Noto Sans Bengali", "Lohit Assamese", "Lohit Bengali",
+                 "Nirmala UI", "Mukti Narrow", Arial, sans-serif;
+    font-size: 19px;
     font-weight: bold;
-    letter-spacing: 0.5px;
-    margin: 2px 0 0 0;
-    text-transform: uppercase;
+    letter-spacing: 0.3px;
+    line-height: 1.4;
+    margin: 0;
 }}
 
-.subtitle {{
-    font-size: 9.5pt;
-    color: #444444;
-    letter-spacing: 1px;
-    margin-top: 3px;
-    text-transform: uppercase;
+.lh-name-en {{
+    font-size: 17px;
+    font-weight: bold;
+    letter-spacing: 1.2px;
+    line-height: 1.4;
+    margin: 2px 0 0 0;
 }}
+
+.lh-addr {{
+    font-size: 12px;
+    font-weight: bold;
+    letter-spacing: 1px;
+    margin: 3px 0 0 0;
+}}
+
+.lh-rule {{
+    border: none;
+    border-top: 1.5px solid #000000;
+    margin: 8px 0 0 0;
+}}
+
+/* ================================================================
+   DOCUMENT TITLE + META
+   ================================================================ */
 
 .doc-title {{
     text-align: center;
-    font-size: 12pt;
+    font-size: 15px;
     font-weight: bold;
-    letter-spacing: 2px;
+    letter-spacing: 1.5px;
     text-transform: uppercase;
-    margin: 14px 0 4px 0;
+    margin: 16px 0 3px 0;
 }}
 
 .download-meta {{
     text-align: center;
-    font-size: 8pt;
-    color: #777777;
-    margin-bottom: 16px;
+    font-size: 11px;
+    letter-spacing: 0.4px;
+    color: #666666;
+    margin-bottom: 18px;
 }}
 
 /* ================================================================
@@ -1474,10 +1504,10 @@ body {{
    ================================================================ */
 
 .file-info {{
-    border-top: 1px solid #bbbbbb;
-    border-bottom: 1px solid #bbbbbb;
-    padding: 8px 2px;
-    margin-bottom: 20px;
+    border-top: 1px solid #b8b8b8;
+    border-bottom: 1px solid #b8b8b8;
+    padding: 10px 2px;
+    margin-bottom: 22px;
 }}
 
 .file-info-table {{
@@ -1486,18 +1516,19 @@ body {{
 }}
 
 .file-info-td-label {{
-    width: 120px;
+    width: 130px;
     font-weight: bold;
+    letter-spacing: 0.5px;
     color: #333333;
     vertical-align: top;
-    padding: 3px 0;
-    font-size: 10pt;
+    padding: 4px 0;
+    font-size: 13px;
 }}
 
 .file-info-td-value {{
     vertical-align: top;
-    padding: 3px 0;
-    font-size: 10.5pt;
+    padding: 4px 0;
+    font-size: 14px;
 }}
 
 /* ================================================================
@@ -1505,92 +1536,95 @@ body {{
    ================================================================ */
 
 .note-entry {{
-    margin: 0 0 22px 0;
+    margin: 0 0 26px 0;
 }}
 
 .note-entry-head {{
     /* Keep the rule + identity together on one page; the prose that
-       follows is free to break onto the next page for long entries. */
+       follows may break onto the next page for long entries. */
     page-break-inside: avoid;
-    border-top: 2px solid #333333;
-    padding-top: 7px;
-    margin-bottom: 10px;
+    border-top: 2px solid #2a2a2a;
+    padding-top: 9px;
+    margin-bottom: 12px;
 }}
 
 .note-seq {{
-    font-size: 8.5pt;
+    font-size: 11px;
     font-weight: bold;
-    letter-spacing: 1.5px;
+    letter-spacing: 0.8px;
     text-transform: uppercase;
-    color: #888888;
-    margin-bottom: 3px;
+    color: #7a7a7a;
+    margin-bottom: 4px;
 }}
 
 .contributor-name {{
-    font-size: 12pt;
+    font-size: 15px;
     font-weight: bold;
+    letter-spacing: 0.3px;
     color: #111111;
-    margin-bottom: 2px;
+    margin-bottom: 3px;
 }}
 
 .identity-line {{
-    font-size: 9.5pt;
-    color: #555555;
-    margin: 1px 0;
+    font-size: 12.5px;
+    letter-spacing: 0.3px;
+    color: #4a4a4a;
+    margin: 2px 0;
 }}
 
 .identity-label {{
     font-weight: bold;
-    color: #666666;
+    color: #5a5a5a;
 }}
 
 .note-body {{
-    font-size: 11pt;
-    line-height: 1.6;
+    font-size: 14px;
+    line-height: 1.8;
+    letter-spacing: 0.2px;
     text-align: justify;
 }}
 
 .note-body p {{
-    margin: 0 0 9px 0;
+    margin: 0 0 11px 0;
 }}
 
 .note-body h1 {{
-    font-size: 15pt;
-    margin: 12px 0 7px 0;
+    font-size: 18px;
+    margin: 14px 0 8px 0;
 }}
 
 .note-body h2 {{
-    font-size: 13pt;
-    margin: 11px 0 6px 0;
+    font-size: 16px;
+    margin: 13px 0 7px 0;
 }}
 
 .note-body h3 {{
-    font-size: 11.5pt;
-    margin: 10px 0 5px 0;
+    font-size: 15px;
+    margin: 12px 0 6px 0;
 }}
 
 .note-body ul,
 .note-body ol {{
-    margin-top: 5px;
-    margin-bottom: 9px;
-    padding-left: 24px;
+    margin-top: 6px;
+    margin-bottom: 11px;
+    padding-left: 26px;
 }}
 
 .note-body li {{
-    margin-bottom: 3px;
+    margin-bottom: 4px;
 }}
 
 .note-body table {{
     width: 100%;
     border-collapse: collapse;
-    margin: 10px 0;
-    font-size: 10pt;
+    margin: 12px 0;
+    font-size: 13px;
 }}
 
 .note-body th,
 .note-body td {{
-    border: 1px solid #888888;
-    padding: 5px 7px;
+    border: 1px solid #8a8a8a;
+    padding: 6px 8px;
     vertical-align: top;
 }}
 
@@ -1600,8 +1634,8 @@ body {{
 }}
 
 .note-body blockquote {{
-    margin: 9px 0;
-    padding: 4px 12px;
+    margin: 11px 0;
+    padding: 5px 14px;
     border-left: 3px solid #999999;
     color: #444444;
 }}
@@ -1616,13 +1650,13 @@ body {{
    ================================================================ */
 
 .footer {{
-    border-top: 1px solid #bbbbbb;
-    margin-top: 22px;
-    padding-top: 7px;
-    font-size: 7.5pt;
+    border-top: 1px solid #b8b8b8;
+    margin-top: 26px;
+    padding-top: 9px;
+    font-size: 10.5px;
+    letter-spacing: 0.6px;
     color: #888888;
     text-align: center;
-    letter-spacing: 0.5px;
 }}
 
 </style>
@@ -1631,23 +1665,25 @@ body {{
 <body>
 
     <!-- ============================================================
-         LETTERHEAD
+         LETTERHEAD  (AVFU_Blank_Letterhead.docx)
+         A table so the crest and the title lines sit side by side in
+         both Chromium and the LibreOffice fallback.
          ============================================================ -->
 
-    <div class="letterhead">
-        {logo_html}
-        <div class="institution">
-            Assam Veterinary and Fishery University
-        </div>
-        <div class="subtitle">
-            Electronic File Management System (eFMS)
-        </div>
-    </div>
+    <table class="letterhead" cellpadding="0" cellspacing="0">
+        <tr>
+            <td class="lh-logo-cell">{logo_html}</td>
+            <td class="lh-titles">
+                <div class="lh-name-as">অসম পশু চিকিৎসা আৰু মীন বিশ্ববিদ্যালয়</div>
+                <div class="lh-name-en">ASSAM VETERINARY AND FISHERY UNIVERSITY</div>
+                <div class="lh-addr">KHANAPARA, GUWAHATI, ASSAM &#8211; 781022</div>
+            </td>
+        </tr>
+    </table>
+    <hr class="lh-rule">
 
     <div class="doc-title">Notesheet</div>
-    <div class="download-meta">
-        Downloaded {_escape_html(download_time_display)} IST
-    </div>
+    <div class="download-meta">Downloaded {_escape_html(download_time_display)} IST</div>
 
     <!-- ============================================================
          FILE REFERENCE
@@ -1703,12 +1739,12 @@ body {{
     # ------------------------------------------------------------------
     # Convert HTML → PDF.
     #
-    # The notesheet is the one document that needs a modern CSS engine
-    # (letter-spacing, justified text, flex, @page margins), so it renders
-    # in headless Chromium via Playwright. Every other conversion in the
-    # app still uses LibreOffice — and if Chromium isn't installed on this
-    # server yet, we fall back to LibreOffice here too so downloads keep
-    # working (just with the older, boxier layout).
+    # The notesheet needs a modern CSS engine (letter-spacing, justified
+    # text, @page margins, the letterhead table layout), so it renders in
+    # headless Chromium via Playwright. Every other document conversion in
+    # the app still uses LibreOffice — and if Chromium is not available on
+    # this server, we fall back to LibreOffice here as well so downloads
+    # keep working.
     # ------------------------------------------------------------------
     from starlette.concurrency import run_in_threadpool
 
@@ -1723,33 +1759,13 @@ body {{
         DocConversionFailed,
     )
 
-    # Fingerprint the generated HTML so the logs prove which template
-    # produced this download without needing to open the PDF. "note-entry"
-    # only appears in the new letterhead template; "notesheet-box" only in
-    # the old boxed one.
-    _nslog.warning(
-        "notesheet_pdf: html built len=%d new_template=%s old_template=%s",
-        len(html),
-        "note-entry-head" in html,
-        "notesheet-box" in html,
-    )
-
     pdf_bytes = None
-    engine_used = None
 
     try:
-        _nslog.warning("notesheet_pdf: trying Chromium (Playwright)…")
         pdf_bytes = await run_in_threadpool(render_html_to_pdf, html)
-        engine_used = "chromium"
-        _nslog.warning("notesheet_pdf: Chromium OK bytes=%d", len(pdf_bytes or b""))
-    except ChromiumUnavailable as exc:
-        _nslog.warning(
-            "notesheet_pdf: Chromium UNAVAILABLE -> falling back to LibreOffice: %s",
-            exc,
-        )
+    except ChromiumUnavailable:
         pdf_bytes = None  # fall through to LibreOffice
-    except ChromiumRenderFailed as exc:
-        _nslog.error("notesheet_pdf: Chromium RENDER FAILED: %s", exc, exc_info=True)
+    except ChromiumRenderFailed:
         raise HTTPException(
             status_code=422,
             detail="Failed to generate notesheet PDF.",
@@ -1757,24 +1773,17 @@ body {{
 
     if pdf_bytes is None:
         try:
-            _nslog.warning("notesheet_pdf: trying LibreOffice…")
             pdf_bytes = convert_html_to_pdf(
                 html.encode("utf-8")
             )
-            engine_used = "libreoffice"
-            _nslog.warning(
-                "notesheet_pdf: LibreOffice OK bytes=%d", len(pdf_bytes or b"")
-            )
 
         except DocConversionUnavailable:
-            _nslog.error("notesheet_pdf: LibreOffice UNAVAILABLE — no engine, 503")
             raise HTTPException(
                 status_code=503,
                 detail="PDF generation is not available on this server.",
             )
 
         except DocConversionFailed:
-            _nslog.error("notesheet_pdf: LibreOffice FAILED, 422", exc_info=True)
             raise HTTPException(
                 status_code=422,
                 detail="Failed to generate notesheet PDF.",
@@ -1792,22 +1801,13 @@ body {{
         safe="",
     )
 
-    _nslog.warning(
-        "notesheet_pdf: DONE build=%s engine=%s pdf_bytes=%d file=%s",
-        NOTESHEET_PDF_BUILD, engine_used, len(pdf_bytes or b""), file_name,
-    )
-
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",
         headers={
             "Content-Disposition": (
                 f"attachment; filename*=UTF-8''{encoded_name}"
-            ),
-            # Surfaces in the browser Network tab / curl -I too, so you can
-            # confirm the running build without server log access.
-            "X-Notesheet-Build": NOTESHEET_PDF_BUILD,
-            "X-Notesheet-Engine": engine_used or "unknown",
+            )
         },
     )
 

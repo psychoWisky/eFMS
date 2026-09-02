@@ -3,9 +3,9 @@
 Every other document conversion in this codebase still goes through
 LibreOffice (app/utils/doc_convert.py) and is unaffected by this module.
 The notesheet download is the one place that needs a modern CSS engine
-(flexbox, letter-spacing, justified text, @page margins, web fonts), which
-LibreOffice's ~2000-era HTML importer does not support, so it renders the
-notesheet HTML in real Chromium via Playwright instead.
+(letter-spacing, justified text, @page margins, table-based letterhead
+layout, web fonts), which LibreOffice's HTML importer does not support, so
+it renders the notesheet HTML in real Chromium via Playwright instead.
 
 Requires, on the server:
     pip install playwright
@@ -15,10 +15,6 @@ If Playwright or the browser binary is missing, render_html_to_pdf raises
 ChromiumUnavailable and the caller falls back to LibreOffice.
 """
 from __future__ import annotations
-
-import logging
-
-_log = logging.getLogger("efms.notesheet_pdf")
 
 
 class ChromiumUnavailable(Exception):
@@ -37,20 +33,18 @@ def render_html_to_pdf(html: str) -> bytes:
 
     Synchronous on purpose: it uses Playwright's sync API in its own
     thread-safe subprocess-backed driver, so it can be called from a
-    threadpool via fastapi.concurrency.run_in_threadpool without touching
-    the running event loop.
+    threadpool via starlette.concurrency.run_in_threadpool without
+    touching the running event loop.
     """
     try:
         from playwright.sync_api import sync_playwright
         from playwright._impl._errors import Error as PlaywrightError
     except ImportError as exc:  # Playwright not installed at all.
-        _log.warning("html_pdf: playwright import failed: %s", exc)
         raise ChromiumUnavailable(f"playwright not importable: {exc}") from exc
 
     try:
         with sync_playwright() as p:
             try:
-                _log.warning("html_pdf: launching Chromium…")
                 browser = p.chromium.launch(
                     args=["--no-sandbox", "--disable-dev-shm-usage"],
                 )
@@ -58,7 +52,6 @@ def render_html_to_pdf(html: str) -> bytes:
                 # Almost always: browser binary not downloaded yet
                 # ("Executable doesn't exist ... playwright install") or a
                 # missing shared library on the host.
-                _log.warning("html_pdf: Chromium launch failed: %s", exc)
                 raise ChromiumUnavailable(f"chromium launch failed: {exc}") from exc
 
             try:
@@ -74,11 +67,9 @@ def render_html_to_pdf(html: str) -> bytes:
     except ChromiumUnavailable:
         raise
     except Exception as exc:  # noqa: BLE001 - any launch/render failure
-        _log.error("html_pdf: Chromium render failed: %s", exc, exc_info=True)
         raise ChromiumRenderFailed(str(exc)) from exc
 
     if not pdf_bytes:
         raise ChromiumRenderFailed("Chromium produced an empty PDF.")
 
-    _log.warning("html_pdf: Chromium produced %d bytes", len(pdf_bytes))
     return pdf_bytes
