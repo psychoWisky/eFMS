@@ -1192,43 +1192,43 @@ async def download_notesheet(
 
     # ------------------------------------------------------------------
     # Small presentational helper: renders "Designation:"/"Department:"
-    # as separate identity lines (skipping whichever is blank). Shared by
-    # the initial Notesheet and every holder section below so the two
-    # never drift into different layouts.
+    # in ONE compact line ("Designation · Department"), skipping whichever
+    # is blank. Shared by the initial Notesheet and every holder section
+    # so the two never drift into different layouts. A single line — not a
+    # stack of faint rows — keeps each contributor block tight.
     # ------------------------------------------------------------------
-    def person_detail_lines(designation: str, department: str) -> str:
-        lines = []
+    def person_role_line(designation: str, department: str) -> str:
+        parts = [p for p in (designation, department) if p]
+        if not parts:
+            return ""
+        return (
+            '<div class="role-line">'
+            + " &nbsp;&middot;&nbsp; ".join(_escape_html(p) for p in parts)
+            + "</div>"
+        )
 
-        if designation:
-            lines.append(
-                '<div class="identity-line">'
-                '<span class="identity-label">Designation:</span> '
-                f'{_escape_html(designation)}</div>'
-            )
+    def stamp_line(label_recorded: str, created, updated) -> str:
+        """One muted timestamp line: '<label> <created>  ·  updated <updated>'
+        (the 'updated' half is dropped when it equals created)."""
+        c = format_timestamp(created)
+        u = format_timestamp(updated)
+        if not c and not u:
+            return ""
+        bits = []
+        if c:
+            bits.append(f"{label_recorded} {_escape_html(c)} IST")
+        if u and u != c:
+            bits.append(f"updated {_escape_html(u)} IST")
+        return '<div class="stamp-line">' + " &nbsp;&middot;&nbsp; ".join(bits) + "</div>"
 
-        if department:
-            lines.append(
-                '<div class="identity-line">'
-                '<span class="identity-label">Department:</span> '
-                f'{_escape_html(department)}</div>'
-            )
-
-        return "".join(lines)
-
-    creator_details_html = person_detail_lines(
+    creator_role_html = person_role_line(
         creator_designation, creator_department
     )
-
-    initial_created_display = format_timestamp(
-        f.notesheet.created_at
-    )
-
-    initial_updated_display = format_timestamp(
-        f.notesheet.updated_at
+    initial_stamp_html = stamp_line(
+        "Created", f.notesheet.created_at, f.notesheet.updated_at
     )
 
     initial_content = f.notesheet.content or ""
-
     if not initial_content.strip():
         initial_content = (
             '<p class="empty-notesheet">'
@@ -1237,43 +1237,11 @@ async def download_notesheet(
         )
 
     # ------------------------------------------------------------------
-    # Initial Notesheet timestamp line.
-    # ------------------------------------------------------------------
-    initial_timestamp_parts = []
-
-    if initial_created_display:
-        initial_timestamp_parts.append(
-            f"<strong>Created:</strong> "
-            f"{_escape_html(initial_created_display)} IST"
-        )
-
-    if initial_updated_display:
-        initial_timestamp_parts.append(
-            f"<strong>Updated:</strong> "
-            f"{_escape_html(initial_updated_display)} IST"
-        )
-
-    initial_timestamp_html = ""
-
-    if initial_timestamp_parts:
-        initial_timestamp_html = (
-            '<div class="identity-line">'
-            + " &nbsp;&nbsp;|&nbsp;&nbsp; ".join(
-                initial_timestamp_parts
-            )
-            + "</div>"
-        )
-
-    # ------------------------------------------------------------------
-    # Build Holder Notesheet boxes.
-    #
-    # Each box is a single bordered <div> — no outer/nested tables and
-    # no vertical "number column". The Notesheet number is shown plainly
-    # in the box heading text ("NOTESHEET N — HOLDER NOTESHEET"), and the
-    # heading + identity + timestamp are kept together on one page via
-    # page-break-inside: avoid on just that small inner block — the
-    # actual Notesheet content below it is free to flow onto the next
-    # page for long entries.
+    # Build the holder Notesheet sections — a flowing document, no boxed
+    # "cards" around fields. Each is introduced by a section rule, a
+    # small "NOTESHEET N — HOLDER" eyebrow, the contributor's name, one
+    # role line and one timestamp line; then the prose runs on. Only the
+    # heading block is kept off a page break — long prose flows over.
     # ------------------------------------------------------------------
     holder_sections = []
 
@@ -1290,20 +1258,14 @@ async def download_notesheet(
             holder_designation = ""
             holder_department = ""
 
-        holder_details_html = person_detail_lines(
+        holder_role_html = person_role_line(
             holder_designation, holder_department
         )
-
-        created_display = format_timestamp(
-            note.created_at
-        )
-
-        updated_display = format_timestamp(
-            note.updated_at
+        holder_stamp_html = stamp_line(
+            "Recorded", note.created_at, note.updated_at
         )
 
         holder_content = note.content or ""
-
         if not holder_content.strip():
             holder_content = (
                 '<p class="empty-notesheet">'
@@ -1312,47 +1274,14 @@ async def download_notesheet(
                 '</p>'
             )
 
-        # --------------------------------------------------------------
-        # Timestamp line
-        # --------------------------------------------------------------
-        timestamp_parts = []
-
-        if created_display:
-            timestamp_parts.append(
-                f"<strong>Recorded:</strong> "
-                f"{_escape_html(created_display)} IST"
-            )
-
-        if updated_display:
-            timestamp_parts.append(
-                f"<strong>Updated:</strong> "
-                f"{_escape_html(updated_display)} IST"
-            )
-
-        timestamp_html = ""
-
-        if timestamp_parts:
-            timestamp_html = (
-                '<div class="identity-line">'
-                + " &nbsp;&nbsp;|&nbsp;&nbsp; ".join(timestamp_parts)
-                + "</div>"
-            )
-
-        # --------------------------------------------------------------
-        # Holder Notesheet entry — a flowing document section (no box).
-        # A thin rule + the contributor's identity block introduces the
-        # entry, then the notesheet prose runs on naturally, the way a
-        # real government notesheet reads. Only the identity block is
-        # kept off a page break; long prose is free to flow over.
-        # --------------------------------------------------------------
         holder_sections.append(
             f"""
             <div class="note-entry">
                 <div class="note-entry-head">
-                    <div class="note-seq">Notesheet {note.sequence}</div>
+                    <div class="note-seq">Notesheet {note.sequence} &mdash; Holder</div>
                     <div class="contributor-name">{_escape_html(holder_name)}</div>
-                    {holder_details_html}
-                    {timestamp_html}
+                    {holder_role_html}
+                    {holder_stamp_html}
                 </div>
                 <div class="note-body">
                     {holder_content}
@@ -1389,32 +1318,40 @@ async def download_notesheet(
 
 <style>
 
+/* ================================================================
+   PALETTE
+   AVFU institutional teal/green (matches the crest and the eFMS
+   web app's #0D6E6E). Used only for rules, chips, panel tints and
+   labels — never for running body text, which stays near-black for
+   maximum print legibility.
+   ================================================================ */
+/* --avfu-teal        #0D6E6E   primary accent
+   --avfu-teal-dark   #0A5757   headings / chip
+   --avfu-teal-tint   #EEF6F5   panel background
+   --avfu-teal-border #BFDEDB   panel / hairline border
+   --avfu-gold        #C6902B   crest gold, used sparingly
+   --ink              #1A1A1A   body text
+   --ink-soft         #4A4A4A   secondary text
+   --ink-faint        #7C8A8A   timestamps / footer            */
+
 @page {{
     size: A4;
-    /* Uniform 15px on all four sides — the page's own padding, no extra
-       whitespace from the print engine. */
+    /* Uniform 15px frame on all four sides. */
     margin: 15px;
 }}
 
-* {{
-    box-sizing: border-box;
-}}
+* {{ box-sizing: border-box; }}
 
-html, body {{
-    margin: 0;
-    padding: 0;
-}}
+html, body {{ margin: 0; padding: 0; }}
 
 body {{
     font-family: Arial, "Helvetica Neue", Helvetica, "Liberation Sans", sans-serif;
-    font-size: 14px;
-    line-height: 1.7;
-    letter-spacing: 0.2px;
-    color: #1a1a1a;
-    /* @page already gives the 15px frame; this keeps a matching inset for
-       the LibreOffice fallback path, which ignores small @page margins. */
-    padding: 0;
+    font-size: 13.5px;
+    line-height: 1.6;
+    color: #1A1A1A;
 }}
+
+strong, b {{ font-weight: 700; }}
 
 /* ================================================================
    LETTERHEAD  — mirrors AVFU_Blank_Letterhead.docx
@@ -1423,59 +1360,64 @@ body {{
 .letterhead {{
     width: 100%;
     border-collapse: collapse;
-    margin-bottom: 6px;
 }}
 
 .lh-logo-cell {{
-    width: 96px;
+    width: 92px;
     vertical-align: middle;
     padding: 0;
 }}
 
-.lh-logo {{
-    height: auto;
-    display: block;
-}}
+.lh-logo {{ height: auto; display: block; }}
 
 .lh-titles {{
     vertical-align: middle;
     text-align: center;
-    padding: 0 12px 0 4px;
+    padding: 0 10px 0 2px;
 }}
 
 .lh-name-as {{
-    /* Assamese (Bengali script) title line from the official letterhead.
-       Needs an Indic font on the host; the stack below picks up the
-       common Linux packages (Lohit / Noto Sans Bengali) and Windows
-       "Nirmala UI", then falls back to Arial. */
-    font-family: "Noto Sans Bengali", "Lohit Assamese", "Lohit Bengali",
-                 "Nirmala UI", "Mukti Narrow", Arial, sans-serif;
-    font-size: 19px;
-    font-weight: bold;
-    letter-spacing: 0.3px;
-    line-height: 1.4;
+    /* Assamese (Bengali script) — needs an Indic font on the host. The
+       stack picks up the common Linux packages (Noto / Lohit) and
+       Windows "Nirmala UI". letter-spacing MUST stay 0 here: any tracking
+       splits Bengali consonant clusters mid-glyph. */
+    font-family: "Noto Sans Bengali", "Noto Serif Bengali", "Lohit Assamese",
+                 "Lohit Bengali", "Nirmala UI", "Mukti Narrow", Arial, sans-serif;
+    font-size: 18.5px;
+    font-weight: 700;
+    letter-spacing: 0;
+    line-height: 1.45;
+    color: #0A5757;
     margin: 0;
 }}
 
 .lh-name-en {{
-    font-size: 17px;
-    font-weight: bold;
-    letter-spacing: 1.2px;
+    font-size: 16px;
+    font-weight: 700;
+    letter-spacing: 1px;
     line-height: 1.4;
-    margin: 2px 0 0 0;
+    color: #0A5757;
+    margin: 1px 0 0 0;
 }}
 
 .lh-addr {{
-    font-size: 12px;
-    font-weight: bold;
-    letter-spacing: 1px;
+    font-size: 11.5px;
+    font-weight: 700;
+    letter-spacing: 0.8px;
+    color: #4A4A4A;
     margin: 3px 0 0 0;
 }}
 
 .lh-rule {{
     border: none;
-    border-top: 1.5px solid #000000;
-    margin: 8px 0 0 0;
+    border-top: 2.5px solid #0D6E6E;
+    margin: 7px 0 0 0;
+}}
+
+.lh-rule-thin {{
+    border: none;
+    border-top: 0.75px solid #C6902B;
+    margin: 2px 0 0 0;
 }}
 
 /* ================================================================
@@ -1484,30 +1426,32 @@ body {{
 
 .doc-title {{
     text-align: center;
-    font-size: 15px;
-    font-weight: bold;
-    letter-spacing: 1.5px;
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 3px;
     text-transform: uppercase;
-    margin: 16px 0 3px 0;
+    color: #0A5757;
+    margin: 14px 0 2px 0;
 }}
 
 .download-meta {{
     text-align: center;
-    font-size: 11px;
-    letter-spacing: 0.4px;
-    color: #666666;
-    margin-bottom: 18px;
+    font-size: 10px;
+    letter-spacing: 0.3px;
+    color: #7C8A8A;
+    margin-bottom: 14px;
 }}
 
 /* ================================================================
-   FILE REFERENCE
+   FILE REFERENCE  — tinted framed block
    ================================================================ */
 
 .file-info {{
-    border-top: 1px solid #b8b8b8;
-    border-bottom: 1px solid #b8b8b8;
-    padding: 10px 2px;
-    margin-bottom: 22px;
+    border: 1px solid #BFDEDB;
+    border-left: 4px solid #0D6E6E;
+    background: #EEF6F5;
+    padding: 9px 14px;
+    margin-bottom: 20px;
 }}
 
 .file-info-table {{
@@ -1516,146 +1460,145 @@ body {{
 }}
 
 .file-info-td-label {{
-    width: 130px;
-    font-weight: bold;
-    letter-spacing: 0.5px;
-    color: #333333;
+    width: 118px;
+    font-weight: 700;
+    letter-spacing: 0.4px;
+    text-transform: uppercase;
+    font-size: 10.5px;
+    color: #0A5757;
     vertical-align: top;
-    padding: 4px 0;
-    font-size: 13px;
+    padding: 3px 0;
 }}
 
 .file-info-td-value {{
     vertical-align: top;
-    padding: 4px 0;
-    font-size: 14px;
+    padding: 3px 0;
+    font-size: 13.5px;
+    color: #1A1A1A;
 }}
 
 /* ================================================================
-   NOTESHEET ENTRY  (flowing — no card border)
+   NOTESHEET ENTRY
+   Each entry's written text sits in a highlighted panel: a light
+   teal tint with a solid border, so the actual notesheet content
+   reads as a distinct "on the record" block.
    ================================================================ */
 
-.note-entry {{
-    margin: 0 0 26px 0;
-}}
+.note-entry {{ margin: 0 0 18px 0; }}
 
 .note-entry-head {{
-    /* Keep the rule + identity together on one page; the prose that
-       follows may break onto the next page for long entries. */
+    /* Keep the chip + identity together on one page; long prose below
+       is free to break onto the next page. */
     page-break-inside: avoid;
-    border-top: 2px solid #2a2a2a;
-    padding-top: 9px;
-    margin-bottom: 12px;
+    margin-bottom: 6px;
 }}
 
 .note-seq {{
-    font-size: 11px;
-    font-weight: bold;
-    letter-spacing: 0.8px;
+    display: inline-block;
+    font-size: 9.5px;
+    font-weight: 700;
+    letter-spacing: 1px;
     text-transform: uppercase;
-    color: #7a7a7a;
-    margin-bottom: 4px;
+    color: #ffffff;
+    background: #0D6E6E;
+    padding: 2px 9px;
+    border-radius: 2px;
+    margin-bottom: 6px;
 }}
 
 .contributor-name {{
-    font-size: 15px;
-    font-weight: bold;
-    letter-spacing: 0.3px;
-    color: #111111;
-    margin-bottom: 3px;
+    font-size: 14.5px;
+    font-weight: 700;
+    letter-spacing: 0.2px;
+    color: #0A5757;
+    margin-bottom: 2px;
 }}
 
-.identity-line {{
-    font-size: 12.5px;
-    letter-spacing: 0.3px;
-    color: #4a4a4a;
-    margin: 2px 0;
+.role-line {{
+    font-size: 12px;
+    color: #4A4A4A;
+    margin: 1px 0 0 0;
 }}
 
-.identity-label {{
-    font-weight: bold;
-    color: #5a5a5a;
+.stamp-line {{
+    font-size: 10.5px;
+    color: #7C8A8A;
+    margin: 2px 0 0 0;
 }}
 
 .note-body {{
-    font-size: 14px;
-    line-height: 1.8;
-    letter-spacing: 0.2px;
+    font-size: 13.5px;
+    line-height: 1.65;
     text-align: justify;
+    color: #1A1A1A;
+    background: #F4FAF9;
+    border: 1px solid #BFDEDB;
+    border-left: 3px solid #0D6E6E;
+    padding: 10px 14px;
+    border-radius: 3px;
 }}
 
-.note-body p {{
-    margin: 0 0 11px 0;
-}}
+.note-body p {{ margin: 0 0 7px 0; }}
+.note-body p:last-child {{ margin-bottom: 0; }}
 
-.note-body h1 {{
-    font-size: 18px;
-    margin: 14px 0 8px 0;
-}}
-
-.note-body h2 {{
-    font-size: 16px;
-    margin: 13px 0 7px 0;
-}}
-
-.note-body h3 {{
-    font-size: 15px;
-    margin: 12px 0 6px 0;
-}}
+.note-body h1 {{ font-size: 17px; font-weight: 700; color: #0A5757; margin: 12px 0 6px 0; }}
+.note-body h2 {{ font-size: 15px; font-weight: 700; color: #0A5757; margin: 11px 0 6px 0; }}
+.note-body h3 {{ font-size: 13.5px; font-weight: 700; color: #0A5757; margin: 10px 0 5px 0; }}
+.note-body h1:first-child,
+.note-body h2:first-child,
+.note-body h3:first-child {{ margin-top: 0; }}
 
 .note-body ul,
 .note-body ol {{
-    margin-top: 6px;
-    margin-bottom: 11px;
-    padding-left: 26px;
+    margin: 5px 0 8px 0;
+    padding-left: 24px;
 }}
 
-.note-body li {{
-    margin-bottom: 4px;
-}}
+.note-body li {{ margin-bottom: 3px; }}
+
+.note-body a {{ color: #0D6E6E; }}
 
 .note-body table {{
     width: 100%;
     border-collapse: collapse;
-    margin: 12px 0;
-    font-size: 13px;
+    margin: 10px 0;
+    font-size: 12.5px;
+    background: #ffffff;
 }}
 
 .note-body th,
 .note-body td {{
-    border: 1px solid #8a8a8a;
-    padding: 6px 8px;
+    border: 1px solid #BFDEDB;
+    padding: 5px 7px;
     vertical-align: top;
 }}
 
 .note-body th {{
-    font-weight: bold;
-    background: #f2f2f2;
+    font-weight: 700;
+    color: #0A5757;
+    background: #EEF6F5;
 }}
 
 .note-body blockquote {{
-    margin: 11px 0;
-    padding: 5px 14px;
-    border-left: 3px solid #999999;
-    color: #444444;
+    margin: 9px 0;
+    padding: 3px 12px;
+    border-left: 3px solid #C6902B;
+    color: #4A4A4A;
 }}
 
-.empty-notesheet {{
-    color: #888888;
-    font-style: italic;
-}}
+.empty-notesheet {{ color: #7C8A8A; font-style: italic; }}
 
 /* ================================================================
    FOOTER
    ================================================================ */
 
 .footer {{
-    border-top: 1px solid #b8b8b8;
-    margin-top: 26px;
-    padding-top: 9px;
-    font-size: 10.5px;
-    letter-spacing: 0.6px;
-    color: #888888;
+    border-top: 2px solid #0D6E6E;
+    margin-top: 20px;
+    padding-top: 7px;
+    font-size: 9.5px;
+    letter-spacing: 0.5px;
+    color: #7C8A8A;
     text-align: center;
 }}
 
@@ -1666,8 +1609,8 @@ body {{
 
     <!-- ============================================================
          LETTERHEAD  (AVFU_Blank_Letterhead.docx)
-         A table so the crest and the title lines sit side by side in
-         both Chromium and the LibreOffice fallback.
+         Table layout so the crest and the title lines sit side by side
+         in both Chromium and the LibreOffice fallback.
          ============================================================ -->
 
     <table class="letterhead" cellpadding="0" cellspacing="0">
@@ -1681,9 +1624,10 @@ body {{
         </tr>
     </table>
     <hr class="lh-rule">
+    <hr class="lh-rule-thin">
 
-    <div class="doc-title">Notesheet</div>
-    <div class="download-meta">Downloaded {_escape_html(download_time_display)} IST</div>
+    <div class="doc-title">Note Sheet</div>
+    <div class="download-meta">Generated {_escape_html(download_time_display)} IST</div>
 
     <!-- ============================================================
          FILE REFERENCE
@@ -1708,10 +1652,10 @@ body {{
 
     <div class="note-entry">
         <div class="note-entry-head">
-            <div class="note-seq">Notesheet 1 &mdash; Initial</div>
+            <span class="note-seq">Notesheet 1 &mdash; Initial</span>
             <div class="contributor-name">{_escape_html(creator_name)}</div>
-            {creator_details_html}
-            {initial_timestamp_html}
+            {creator_role_html}
+            {initial_stamp_html}
         </div>
         <div class="note-body">
             {initial_content}
@@ -1729,7 +1673,7 @@ body {{
          ============================================================ -->
 
     <div class="footer">
-        Assam Veterinary and Fishery University &bull; eFMS Electronic Notesheet
+        Assam Veterinary and Fishery University &bull; eFMS &mdash; Electronic Note Sheet
     </div>
 
 </body>
