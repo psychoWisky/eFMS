@@ -14,6 +14,7 @@ import {
   Power, PowerOff, ShieldAlert, Upload, Download, CheckCircle2, XCircle, ClipboardCopy,
 } from "lucide-react";
 import { SearchableSelect } from "@/components/shared/searchable-select";
+import { paginate, TablePagination } from "@/components/shared/table-pagination";
 
 interface Establishment { id: string; name: string; code: string | null; is_active: boolean; }
 interface Department { id: string; name: string; code: string | null; establishment_id: string | null; is_active: boolean; }
@@ -615,6 +616,7 @@ export function UserManagementSection() {
   const [editingUser, setEditingUser] = useState<AdminUser | null>(null);
   const [deactivatingUser, setDeactivatingUser] = useState<AdminUser | null>(null);
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
+  const [page, setPage] = useState(1);
 
   const { data: users = [], isLoading } = useQuery<AdminUser[]>({
     queryKey: ["user-management-users", statusFilter],
@@ -653,7 +655,7 @@ export function UserManagementSection() {
         <div className="flex items-center gap-2">
           <select
             value={statusFilter}
-            onChange={(e) => setStatusFilter(e.target.value as StatusFilter)}
+            onChange={(e) => { setStatusFilter(e.target.value as StatusFilter); setPage(1); }}
             className="border border-gray-300 rounded-lg px-3 py-2.5 text-sm font-semibold text-gray-700 focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]"
             aria-label="Filter by status"
           >
@@ -676,16 +678,19 @@ export function UserManagementSection() {
 
       {isLoading ? (
         <div className="flex items-center gap-2 text-gray-400 py-8"><Loader2 size={16} className="animate-spin" /> Loading…</div>
-      ) : (
-        <div className="bg-white rounded-xl border border-gray-200 overflow-x-auto">
-          <table className="w-full text-sm">
+      ) : (() => {
+        const { pageRows, total, totalPages, page: safePage, start } = paginate(users, page);
+        return (
+        <div className="bg-white rounded-xl border border-gray-200">
+          <div className="overflow-x-auto">
+          <table className="w-full text-sm min-w-[900px]">
             <thead className="bg-gray-50 border-b">
               <tr>{["Name", "Email", "Designation", "Department", "Role", "Status", "Actions"].map((h) => (
                 <th key={h} className="text-left px-4 py-3 font-semibold text-gray-600 whitespace-nowrap">{h}</th>
               ))}</tr>
             </thead>
             <tbody className="divide-y divide-gray-50">
-              {users.map((u) => (
+              {pageRows.map((u) => (
                 <tr key={u.id} className="hover:bg-gray-50">
                   <td className="px-4 py-3 font-medium text-gray-900 whitespace-nowrap">{u.full_name}</td>
                   <td className="px-4 py-3 text-gray-600 text-xs">{u.email}</td>
@@ -734,8 +739,11 @@ export function UserManagementSection() {
               ))}
             </tbody>
           </table>
+          </div>
+          <TablePagination page={safePage} totalPages={totalPages} total={total} start={start} pageCount={pageRows.length} onPage={setPage} />
         </div>
-      )}
+        );
+      })()}
 
       {showCreate && (
         <CreateUserModal onClose={() => setShowCreate(false)} establishments={establishments} departments={departments} roleOptions={roleOptions} />

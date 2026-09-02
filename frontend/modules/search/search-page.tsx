@@ -8,6 +8,7 @@ import { Search, Loader2, FileText, Eye } from "lucide-react";
 import { FileClassificationBadge } from "@/components/shared/file-classification-badge";
 import { PageHeader } from "@/components/shared/page-header";
 import { SearchableSelect } from "@/components/shared/searchable-select";
+import { paginate, TablePagination } from "@/components/shared/table-pagination";
 
 interface SearchResult {
   id: string; ref_number: string; subject: string; category: string;
@@ -33,6 +34,7 @@ export function EFMSSearchPage() {
   const [fromDate, setFromDate] = useState("");
   const [toDate, setToDate]     = useState("");
   const [submitted, setSubmitted] = useState(false);
+  const [page, setPage] = useState(1);
 
   const params = new URLSearchParams();
   if (keyword)  params.set("q", keyword);
@@ -51,10 +53,12 @@ export function EFMSSearchPage() {
   });
 
   const results = status === "released" ? rawResults.filter((r) => r.is_released) : rawResults;
+  const { pageRows, total, totalPages, page: safePage, start } = paginate(results, page);
 
   function handleSearch(e: React.FormEvent) {
     e.preventDefault();
     setSubmitted(true);
+    setPage(1);
     refetch();
   }
 
@@ -123,16 +127,17 @@ export function EFMSSearchPage() {
               <div className="px-6 py-4 border-b border-gray-100">
                 <p className="text-sm text-gray-500">{results.length} result{results.length !== 1 ? "s" : ""} found</p>
               </div>
-              <table className="w-full">
+              <div className="w-full overflow-x-auto">
+              <table className="w-full min-w-[820px]">
                 <thead className="bg-gray-50 border-b border-gray-200">
                   <tr>
                     {["Ref Number","Subject","Category","Status","Priority","Created","Action"].map((h) => (
-                      <th key={h} className="text-left px-4 py-3 text-xs font-semibold uppercase tracking-wide text-gray-500">{h}</th>
+                      <th key={h} className="text-left px-4 py-3 text-xs font-semibold uppercase tracking-wide text-gray-500 whitespace-nowrap">{h}</th>
                     ))}
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100">
-                  {results.map((f) => {
+                  {pageRows.map((f) => {
                     const displayStatus = f.is_released ? "released" : f.status;
                     return (
                     <tr key={f.id} className="hover:bg-gray-50">
@@ -161,6 +166,8 @@ export function EFMSSearchPage() {
                   })}
                 </tbody>
               </table>
+              </div>
+              <TablePagination page={safePage} totalPages={totalPages} total={total} start={start} pageCount={pageRows.length} onPage={setPage} />
             </div>
           )
         )}

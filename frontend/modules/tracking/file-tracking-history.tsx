@@ -11,6 +11,7 @@ import { FileClassificationBadge } from "@/components/shared/file-classification
 import { Search, Eye, Loader2, History } from "lucide-react";
 import { TimelineModal } from "./timeline-modal";
 import { PageHeader } from "@/components/shared/page-header";
+import { paginate, TablePagination } from "@/components/shared/table-pagination";
 
 interface TrackingItem {
   file_id: string; ref_number: string; subject: string; status: string; priority: string;
@@ -39,6 +40,7 @@ export function FileTrackingHistoryPage() {
   const [customFrom, setCustomFrom] = useState("");
   const [customTo, setCustomTo] = useState("");
   const [search, setSearch] = useState("");
+  const [page, setPage] = useState(1);
   const [timelineItem, setTimelineItem] = useState<TrackingItem | null>(null);
 
   const bounds = rangeId === "all" ? { from: "", to: "" }
@@ -58,6 +60,7 @@ export function FileTrackingHistoryPage() {
   // Ref-number search stays entirely client-side, reusing the one shared
   // matchesRefSuffix() implementation — no second matching algorithm.
   const filtered = items.filter((f) => matchesRefSuffix(f.ref_number, search));
+  const { pageRows, total, totalPages, page: safePage, start } = paginate(filtered, page);
 
   return (
     <div className="min-h-screen bg-[#F5F7FA]">
@@ -99,7 +102,7 @@ export function FileTrackingHistoryPage() {
         {/* Ref number search */}
         <div className="relative max-w-xs">
           <Search size={16} className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400" />
-          <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search by file number…"
+          <input value={search} onChange={(e) => { setSearch(e.target.value); setPage(1); }} placeholder="Search by file number…"
             className="w-full border border-gray-300 rounded-xl pl-10 pr-4 py-2.5 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]" />
         </div>
 
@@ -112,7 +115,8 @@ export function FileTrackingHistoryPage() {
           </div>
         ) : (
           <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
-            <table className="w-full">
+            <div className="w-full overflow-x-auto">
+            <table className="w-full min-w-[1100px]">
               <thead className="bg-gray-50 border-b border-gray-200">
                 <tr>
                   {["File Number", "Subject", "Status", "Classification", "Current Holder", "From", "To", "Forwarded", "Last Action", "Action"].map((h) => (
@@ -121,7 +125,7 @@ export function FileTrackingHistoryPage() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
-                {filtered.map((f) => (
+                {pageRows.map((f) => (
                   <tr key={f.file_id} className="hover:bg-gray-50">
                     <td className="px-4 py-3"><span className="font-mono text-xs font-bold text-[#0D6E6E] bg-[#E6F4F4] px-2 py-1 rounded whitespace-nowrap">{f.ref_number}</span></td>
                     <td className="px-4 py-3 max-w-[220px]"><p className="text-sm font-medium text-gray-900 truncate">{f.subject}</p></td>
@@ -142,6 +146,8 @@ export function FileTrackingHistoryPage() {
                 ))}
               </tbody>
             </table>
+            </div>
+            <TablePagination page={safePage} totalPages={totalPages} total={total} start={start} pageCount={pageRows.length} onPage={setPage} />
           </div>
         )}
       </div>

@@ -9,6 +9,7 @@ import { cn, formatDate, fileStatusBadgeClass, fileStatusLabel } from "@/lib/uti
 import { EmptyState } from "@/components/feedback/empty-state";
 import { FileClassificationBadge } from "@/components/shared/file-classification-badge";
 import { SearchableSelect } from "@/components/shared/searchable-select";
+import { paginate, TablePagination } from "@/components/shared/table-pagination";
 
 interface EfmsFile {
   id: string;
@@ -29,6 +30,7 @@ export function FilesListPage() {
   const router = useRouter();
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("All");
+  const [page, setPage] = useState(1);
 
   const { data: files = [], isLoading, isError } = useQuery<EfmsFile[]>({
     queryKey: ["efms-files"],
@@ -45,6 +47,7 @@ export function FilesListPage() {
     const matchStatus = statusFilter === "All" || displayStatus === statusFilter;
     return matchSearch && matchStatus;
   });
+  const { pageRows, total, totalPages, page: safePage, start } = paginate(filtered, page);
 
   return (
     <div className="space-y-5 animate-fade-in">
@@ -62,7 +65,7 @@ export function FilesListPage() {
       <div className="flex items-center gap-3 flex-wrap">
         <div className="relative flex-1 min-w-[220px] max-w-[360px]">
           <Search size={16} className="absolute left-4 top-1/2 -translate-y-1/2 text-[#9CA3AF]" />
-          <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search files…" className="form-input pl-10 h-11" />
+          <input value={search} onChange={(e) => { setSearch(e.target.value); setPage(1); }} placeholder="Search files…" className="form-input pl-10 h-11" />
         </div>
         <div className="min-w-[170px]">
           <SearchableSelect
@@ -103,7 +106,7 @@ export function FilesListPage() {
                 </tr>
               </thead>
               <tbody>
-                {filtered.map((file) => {
+                {pageRows.map((file) => {
                   const displayStatus = file.is_released ? "released" : file.status;
                   return (
                   <tr key={file.id} className="cursor-pointer" onClick={() => router.push(`/files/${file.id}`)}>
@@ -127,6 +130,7 @@ export function FilesListPage() {
                 })}
               </tbody>
             </table>
+            <TablePagination page={safePage} totalPages={totalPages} total={total} start={start} pageCount={pageRows.length} onPage={setPage} />
           </div>
         )}
       </motion.div>

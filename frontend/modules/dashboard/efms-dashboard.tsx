@@ -15,6 +15,7 @@ import { ReopenFilePicker } from "@/modules/files/reopen-file-picker";
 import { PersonBadge, type PersonInfo } from "@/components/shared/person-badge";
 import { FileClassificationBadge } from "@/components/shared/file-classification-badge";
 import { PageHeader } from "@/components/shared/page-header";
+import { paginate, TablePagination } from "@/components/shared/table-pagination";
 
 interface EfmsFile {
   id: string; ref_number: string; subject: string; category: string;
@@ -67,6 +68,9 @@ export function EFMSDashboard() {
   const [newFileMode, setNewFileMode] = useState<"choice" | "create" | "reopen">("choice");
   const [docketSearch, setDocketSearch] = useState("");
   const [myFilesSearch, setMyFilesSearch] = useState("");
+  const [docketPage, setDocketPage] = useState(1);
+  const [myFilesPage, setMyFilesPage] = useState(1);
+  const [releasedPage, setReleasedPage] = useState(1);
 
   // Docket: files currently held by me — poll every 10s so new forwards appear without manual refresh
   const { data: docketItems = [], isLoading: loadDocket } = useQuery<DocketItem[]>({
@@ -111,6 +115,10 @@ export function EFMSDashboard() {
   // (e.g. "0003" in AVFU/AGRO/2026/GEN/0003), leading-zero insensitive.
   const filteredDocketItems = docketItems.filter((f) => matchesRefSuffix(f.ref_number, docketSearch));
   const filteredMyFiles = myFiles.filter((f) => matchesRefSuffix(f.ref_number, myFilesSearch));
+
+  const docketPaged = paginate(filteredDocketItems, docketPage);
+  const myFilesPaged = paginate(filteredMyFiles, myFilesPage);
+  const releasedPaged = paginate(releasedFiles, releasedPage);
 
   const SECTIONS: { id: Section; label: string; icon: React.ElementType; count?: number }[] = [
     { id: "docket", label: "Docket",   icon: Inbox,      count: docketItems.length },
@@ -169,7 +177,7 @@ export function EFMSDashboard() {
 
             <div className="relative max-w-xs">
               <Search size={16} className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400" />
-              <input value={docketSearch} onChange={(e) => setDocketSearch(e.target.value)} placeholder="Search by file number…"
+              <input value={docketSearch} onChange={(e) => { setDocketSearch(e.target.value); setDocketPage(1); }} placeholder="Search by file number…"
                 className="w-full border border-gray-300 rounded-xl pl-10 pr-4 py-2.5 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]" />
             </div>
 
@@ -200,7 +208,7 @@ export function EFMSDashboard() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-100">
-                    {filteredDocketItems.map((f) => {
+                    {docketPaged.pageRows.map((f) => {
                       const isNew = !readFiles.has(f.file_id);
                       const days = daysAgo(f.updated_at);
                       return (
@@ -252,6 +260,7 @@ export function EFMSDashboard() {
                   </tbody>
                 </table>
                 </div>
+                <TablePagination page={docketPaged.page} totalPages={docketPaged.totalPages} total={docketPaged.total} start={docketPaged.start} pageCount={docketPaged.pageRows.length} onPage={setDocketPage} />
               </div>
             )}
           </div>
@@ -268,7 +277,7 @@ export function EFMSDashboard() {
 
             <div className="relative max-w-xs">
               <Search size={16} className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400" />
-              <input value={myFilesSearch} onChange={(e) => setMyFilesSearch(e.target.value)} placeholder="Search by file number…"
+              <input value={myFilesSearch} onChange={(e) => { setMyFilesSearch(e.target.value); setMyFilesPage(1); }} placeholder="Search by file number…"
                 className="w-full border border-gray-300 rounded-xl pl-10 pr-4 py-2.5 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]" />
             </div>
 
@@ -296,13 +305,13 @@ export function EFMSDashboard() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-100">
-                    {filteredMyFiles.map((f, idx) => {
+                    {myFilesPaged.pageRows.map((f, idx) => {
                       // Released overrides the underlying workflow status for display —
                       // users only ever see Draft, Active, or Released here.
                       const displayStatus = f.is_released ? "released" : f.status;
                       return (
                       <tr key={f.id} className="hover:bg-gray-50">
-                        <td className="px-4 py-3 text-sm text-gray-500 font-mono">{(idx + 1).toString().padStart(4, "0")}</td>
+                        <td className="px-4 py-3 text-sm text-gray-500 font-mono">{(myFilesPaged.start + idx + 1).toString().padStart(4, "0")}</td>
                         <td className="px-4 py-3 text-sm text-gray-900 max-w-xs truncate" title={f.subject}>{truncate(f.subject, 60)}</td>
                         <td className="px-4 py-3 text-sm text-gray-700">{f.category}</td>
                         <td className="px-4 py-3">
@@ -341,6 +350,7 @@ export function EFMSDashboard() {
                   </tbody>
                 </table>
                 </div>
+                <TablePagination page={myFilesPaged.page} totalPages={myFilesPaged.totalPages} total={myFilesPaged.total} start={myFilesPaged.start} pageCount={myFilesPaged.pageRows.length} onPage={setMyFilesPage} />
               </div>
             )}
 
@@ -364,7 +374,7 @@ export function EFMSDashboard() {
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-gray-100">
-                        {releasedFiles.map((d) => (
+                        {releasedPaged.pageRows.map((d) => (
                           <tr key={d.docket_id} className="hover:bg-gray-50 bg-green-50/20">
                             <td className="px-4 py-3">
                               <span className="font-mono text-sm font-bold text-green-700 bg-green-100 px-2 py-1 rounded">{d.ref_number}</span>
@@ -387,6 +397,7 @@ export function EFMSDashboard() {
                       </tbody>
                     </table>
                     </div>
+                    <TablePagination page={releasedPaged.page} totalPages={releasedPaged.totalPages} total={releasedPaged.total} start={releasedPaged.start} pageCount={releasedPaged.pageRows.length} onPage={setReleasedPage} />
                   </div>
                 )}
               </div>

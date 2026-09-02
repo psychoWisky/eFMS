@@ -9,7 +9,7 @@ import { confirmAction, showSuccess, escapeHtml } from "@/lib/alert";
 import { useUser, useActiveRole } from "@/stores/auth.store";
 import { cn, formatDate, getAttachmentPreviewKind, isNotesheetEmpty } from "@/lib/utils";
 import {
-  ChevronLeft, ChevronDown, FileText, Download, ArrowRight,
+  ChevronLeft, ChevronRight, ChevronDown, FileText, Download, ArrowRight,
   Loader2, Lock, Clock, MessageSquare, Upload, X, PenLine,
   CheckCircle2, XCircle, Trash2, Pencil, Save, FileX2, Paperclip,
 } from "lucide-react";
@@ -96,6 +96,14 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
   // Attached Files rail: show a few by default, open the rest in a
   // z-indexed dropdown-style overlay ("Expand" / "Close").
   const [attachExpanded, setAttachExpanded] = useState(false);
+  // The whole rail collapses to a thin "Expand" strip (like the app
+  // sidebar). null = automatic — expanded only when the file actually
+  // has attachments; a manual toggle overrides that either way.
+  const [railManual, setRailManual] = useState<boolean | null>(null);
+  // Notesheet History: with more than one prior note, show only the most
+  // recent by default (the note from whoever forwarded the file to you);
+  // the rest is one click away.
+  const [historyExpanded, setHistoryExpanded] = useState(false);
   const { toggleFavorite, buildGroups } = useFavoriteRecipients();
   // Draft editing (30-minute window)
   const [editingDraft, setEditingDraft] = useState(false);
@@ -851,89 +859,134 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
 
   const ATTACH_PEEK = 3;
   const hasMoreAttachments = file.attachments.length > ATTACH_PEEK;
+  // Expanded only when the file has attachments, unless the user has
+  // manually toggled the rail. Collapsed = a thin "Expand" strip.
+  const railExpanded = railManual ?? file.attachments.length > 0;
 
   return (
     <div className="flex h-[calc(100vh-4rem)] bg-[#F5F7FA] overflow-hidden">
-      {/* Left rail: PDF attachments — a short peek, with the rest opening
-          in a z-indexed dropdown-style overlay. */}
-      <div className="w-72 shrink-0 bg-white border-r border-gray-200 flex flex-col relative">
-        <div className="px-4 py-4 border-b border-gray-200">
-          <button onClick={() => guardNavigation(() => router.back())} className="flex items-center gap-1 text-sm text-[#0D6E6E] hover:underline mb-3">
-            <ChevronLeft size={14} /> Back
-          </button>
-          <div className="flex flex-col gap-2">
-            <div className="flex items-center gap-2">
-              <Paperclip size={16} className="text-[#0D6E6E] shrink-0" />
-              <h2 className="text-base font-bold text-gray-900">Attached Files</h2>
-              {file.attachments.length > 0 && (
-                <span className="ml-auto text-xs font-bold bg-gray-100 text-gray-600 px-2 py-0.5 rounded-full">{file.attachments.length}</span>
-              )}
-            </div>
-            {file.attachments.length > 0 && !isRestricted && (
+
+      {railExpanded ? (
+        /* ── Left rail: expanded ── */
+        <div className="w-72 shrink-0 bg-white border-r border-gray-200 flex flex-col relative">
+          <div className="px-4 py-4 border-b border-gray-200">
+            <div className="flex items-center justify-between mb-3">
+              <button onClick={() => guardNavigation(() => router.back())} className="flex items-center gap-1 text-sm text-[#0D6E6E] hover:underline">
+                <ChevronLeft size={14} /> Back
+              </button>
               <button
                 type="button"
-                onClick={downloadAllAttachmentsZip}
-                title="Download all attachments as a ZIP"
-                className="flex items-center justify-center gap-2 w-full text-sm font-semibold text-[#0D6E6E] border border-[#0D6E6E]/30 bg-[#F0F7F7] hover:bg-[#E6F4F4] rounded-lg px-3 py-2.5"
+                onClick={() => setRailManual(false)}
+                title="Collapse this panel"
+                className="flex items-center gap-1 text-xs font-semibold text-gray-400 hover:text-[#0D6E6E] border border-gray-200 rounded-lg px-2 py-1"
               >
-                <Download size={16} /> Download All
+                <ChevronLeft size={13} /> Collapse
               </button>
-            )}
-          </div>
-        </div>
-
-        {/* Peek list — grows with content up to ATTACH_PEEK rows, then a
-            clear "Expand" control. Scrolls if the peek itself overflows. */}
-        <div className="flex-1 overflow-y-auto p-3">
-          {file.attachments.length === 0 ? (
-            <div className="text-center py-10 px-4">
-              <FileText size={28} className="mx-auto mb-2 text-gray-300" />
-              <p className="text-sm text-gray-400">No attachments yet</p>
             </div>
-          ) : (
-            <div className="space-y-2">
-              {file.attachments.slice(0, ATTACH_PEEK).map(renderAttachmentRow)}
-              {hasMoreAttachments && (
+            <div className="flex flex-col gap-2">
+              <div className="flex items-center gap-2">
+                <Paperclip size={16} className="text-[#0D6E6E] shrink-0" />
+                <h2 className="text-base font-bold text-gray-900">Attached Files</h2>
+                {file.attachments.length > 0 && (
+                  <span className="ml-auto text-xs font-bold bg-gray-100 text-gray-600 px-2 py-0.5 rounded-full">{file.attachments.length}</span>
+                )}
+              </div>
+              {file.attachments.length > 0 && !isRestricted && (
                 <button
                   type="button"
-                  onClick={() => setAttachExpanded(true)}
-                  className="w-full flex items-center justify-center gap-2 py-2.5 rounded-xl border border-dashed border-[#0D6E6E]/40 text-sm font-semibold text-[#0D6E6E] hover:bg-[#F0F7F7] transition-colors"
+                  onClick={downloadAllAttachmentsZip}
+                  title="Download all attachments as a ZIP"
+                  className="flex items-center justify-center gap-2 w-full text-sm font-semibold text-[#0D6E6E] border border-[#0D6E6E]/30 bg-[#F0F7F7] hover:bg-[#E6F4F4] rounded-lg px-3 py-2.5"
                 >
-                  <ChevronDown size={15} />
-                  Expand — {file.attachments.length - ATTACH_PEEK} more file{file.attachments.length - ATTACH_PEEK > 1 ? "s" : ""}
+                  <Download size={16} /> Download All
                 </button>
               )}
             </div>
+          </div>
+
+          {/* Peek list — grows with content up to ATTACH_PEEK rows, then a
+              clear "Expand" control. Scrolls if the peek itself overflows. */}
+          <div className="flex-1 overflow-y-auto p-3">
+            {file.attachments.length === 0 ? (
+              <div className="text-center py-10 px-4">
+                <FileText size={28} className="mx-auto mb-2 text-gray-300" />
+                <p className="text-sm text-gray-400">No attachments yet</p>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {file.attachments.slice(0, ATTACH_PEEK).map(renderAttachmentRow)}
+                {hasMoreAttachments && (
+                  <button
+                    type="button"
+                    onClick={() => setAttachExpanded(true)}
+                    className="w-full flex items-center justify-center gap-2 py-2.5 rounded-xl border border-dashed border-[#0D6E6E]/40 text-sm font-semibold text-[#0D6E6E] hover:bg-[#F0F7F7] transition-colors"
+                  >
+                    <ChevronDown size={15} />
+                    Expand — {file.attachments.length - ATTACH_PEEK} more file{file.attachments.length - ATTACH_PEEK > 1 ? "s" : ""}
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* Expanded overlay: opens over the rail like a dropdown, lists
+              every attachment, closes on the Close button or a backdrop click. */}
+          {attachExpanded && (
+            <>
+              <div className="fixed inset-0 z-40 bg-black/20" onClick={() => setAttachExpanded(false)} />
+              <div className="absolute inset-y-2 left-2 z-50 w-[330px] bg-white rounded-2xl shadow-2xl border border-gray-200 flex flex-col overflow-hidden">
+                <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100 bg-gray-50 shrink-0">
+                  <div className="flex items-center gap-2">
+                    <Paperclip size={15} className="text-[#0D6E6E]" />
+                    <p className="text-sm font-bold text-gray-900">All Attachments</p>
+                    <span className="text-xs font-bold bg-white border border-gray-200 text-gray-600 px-1.5 py-0.5 rounded-full">{file.attachments.length}</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setAttachExpanded(false)}
+                    className="flex items-center gap-1 text-xs font-semibold text-gray-500 hover:text-gray-900 border border-gray-200 rounded-lg px-2.5 py-1.5"
+                  >
+                    <X size={13} /> Close
+                  </button>
+                </div>
+                <div className="flex-1 overflow-y-auto p-3 space-y-2">
+                  {file.attachments.map(renderAttachmentRow)}
+                </div>
+              </div>
+            </>
           )}
         </div>
-
-        {/* Expanded overlay: opens over the rail like a dropdown, lists
-            every attachment, closes on the Close button or a backdrop click. */}
-        {attachExpanded && (
-          <>
-            <div className="fixed inset-0 z-40 bg-black/20" onClick={() => setAttachExpanded(false)} />
-            <div className="absolute inset-y-2 left-2 z-50 w-[330px] bg-white rounded-2xl shadow-2xl border border-gray-200 flex flex-col overflow-hidden">
-              <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100 bg-gray-50 shrink-0">
-                <div className="flex items-center gap-2">
-                  <Paperclip size={15} className="text-[#0D6E6E]" />
-                  <p className="text-sm font-bold text-gray-900">All Attachments</p>
-                  <span className="text-xs font-bold bg-white border border-gray-200 text-gray-600 px-1.5 py-0.5 rounded-full">{file.attachments.length}</span>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setAttachExpanded(false)}
-                  className="flex items-center gap-1 text-xs font-semibold text-gray-500 hover:text-gray-900 border border-gray-200 rounded-lg px-2.5 py-1.5"
-                >
-                  <X size={13} /> Close
-                </button>
-              </div>
-              <div className="flex-1 overflow-y-auto p-3 space-y-2">
-                {file.attachments.map(renderAttachmentRow)}
-              </div>
-            </div>
-          </>
-        )}
-      </div>
+      ) : (
+        /* ── Left rail: collapsed to a thin "Expand" strip (same idea as
+             the app sidebar) ── */
+        <div className="w-14 shrink-0 bg-white border-r border-gray-200 flex flex-col items-center py-3 gap-2">
+          <button
+            onClick={() => guardNavigation(() => router.back())}
+            title="Back"
+            className="p-2 rounded-lg text-[#0D6E6E] hover:bg-[#F0F7F7]"
+          >
+            <ChevronLeft size={18} />
+          </button>
+          <div className="w-8 h-px bg-gray-100" />
+          <button
+            type="button"
+            onClick={() => setRailManual(true)}
+            title="Show attached files"
+            className="flex flex-col items-center gap-1 rounded-lg border border-[#0D6E6E]/25 bg-[#F0F7F7] text-[#0D6E6E] hover:bg-[#E6F4F4] transition-colors py-2.5 px-1 w-[46px]"
+          >
+            <span className="relative flex items-center justify-center">
+              <Paperclip size={18} />
+              {file.attachments.length > 0 && (
+                <span className="absolute -top-1.5 -right-2 min-w-[15px] h-[15px] px-0.5 text-[9px] font-bold bg-[#0D6E6E] text-white rounded-full flex items-center justify-center">
+                  {file.attachments.length}
+                </span>
+              )}
+            </span>
+            <span className="text-[10px] font-semibold leading-none">Expand</span>
+            <ChevronRight size={12} className="text-[#0D6E6E]/60" />
+          </button>
+        </div>
+      )}
 
       {/* Main panel */}
       <div className="flex-1 flex flex-col overflow-hidden">
@@ -959,18 +1012,20 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                 )}
               </div>
               <h1 className="text-xl font-bold text-gray-900 truncate">{file.subject}</h1>
-              {/* One compact metadata line: category · created · From → Holder */}
-              <div className="flex items-center flex-wrap gap-x-2.5 gap-y-1 mt-1.5 text-sm">
-                <span className="text-gray-500">{file.category}</span>
-                <span className="text-gray-300">·</span>
-                <span className="text-gray-500">Created {formatDate(file.created_at, "relative")}</span>
-                <span className="text-gray-300">·</span>
-                <span className="text-[11px] font-bold text-gray-400 uppercase tracking-wide">From</span>
+              {/* One flowing metadata line: category · created · From → Holder.
+                  Rendered as inline text (not flex items) so it fills the full
+                  width and wraps only at spaces — never mid-word. */}
+              <div className="mt-1.5 text-sm text-gray-500 leading-relaxed [overflow-wrap:normal] [word-break:normal]">
+                <span>{file.category}</span>
+                <span className="text-gray-300"> · </span>
+                <span>Created {formatDate(file.created_at, "relative")}</span>
+                <span className="text-gray-300"> · </span>
+                <span className="text-[11px] font-bold text-gray-400 uppercase tracking-wide">From </span>
                 {personInline(latestRouteEntry?.from_user_info)}
                 {file.current_holder_info && (
                   <>
-                    <ArrowRight size={14} className="text-gray-300 mx-0.5 shrink-0" />
-                    <span className="text-[11px] font-bold text-gray-400 uppercase tracking-wide">Holder</span>
+                    <ArrowRight size={13} className="inline align-middle text-gray-300 mx-1.5" />
+                    <span className="text-[11px] font-bold text-gray-400 uppercase tracking-wide">Holder </span>
                     {personInline(file.current_holder_info)}
                   </>
                 )}
@@ -1148,24 +1203,50 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                     === false and permanently read-only. */}
                 <div className="order-2 bg-white rounded-2xl border border-gray-200 shadow-sm">
                   {(() => {
-                    const historyNotes = holderNotesheets
+                    // Sorted newest-first so the most recent note (from
+                    // whoever forwarded the file to you) is always on top.
+                    const allHistory = holderNotesheets
                       .filter((n) => !n.is_current)
                       .slice()
-                      .sort((a, b) => a.sequence - b.sequence); // chronological — oldest holding-period first
+                      .sort((a, b) => b.sequence - a.sequence);
+                    const collapsible = allHistory.length > 1;
+                    const historyNotes = collapsible && !historyExpanded
+                      ? allHistory.slice(0, 1)   // latest only
+                      : allHistory;
+                    const hiddenCount = allHistory.length - historyNotes.length;
                     return (
                       <>
                         <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
                           <div>
-                            <h2 className="text-lg font-bold text-gray-800">Notesheet History</h2>
-                            <p className="text-sm text-gray-500 mt-0.5">Each holding period&apos;s own Notesheet, in order — read-only</p>
+                            <h2 className="text-lg font-bold text-gray-800">
+                              {collapsible && !historyExpanded ? "Latest Notesheet" : "Notesheet History"}
+                            </h2>
+                            <p className="text-sm text-gray-500 mt-0.5">
+                              {collapsible && !historyExpanded
+                                ? "Most recent note from the previous holder — read-only"
+                                : "Every holding period’s own Notesheet, newest first — read-only"}
+                            </p>
                           </div>
-                          {historyNotes.length > 0 && (
-                            <span className="text-xs font-semibold bg-gray-100 text-gray-600 px-2.5 py-1 rounded-full">
-                              {historyNotes.length} entr{historyNotes.length === 1 ? "y" : "ies"}
-                            </span>
-                          )}
+                          <div className="flex items-center gap-2 shrink-0">
+                            {allHistory.length > 0 && (
+                              <span className="text-xs font-semibold bg-gray-100 text-gray-600 px-2.5 py-1 rounded-full">
+                                {allHistory.length} entr{allHistory.length === 1 ? "y" : "ies"}
+                              </span>
+                            )}
+                            {collapsible && (
+                              <button
+                                type="button"
+                                onClick={() => setHistoryExpanded((v) => !v)}
+                                className="flex items-center gap-1 text-xs font-semibold text-[#0D6E6E] border border-[#0D6E6E]/30 rounded-lg px-2.5 py-1 hover:bg-[#F0F7F7]"
+                              >
+                                {historyExpanded
+                                  ? <>Show latest only <ChevronDown size={13} className="rotate-180" /></>
+                                  : <>Show {hiddenCount} earlier <ChevronDown size={13} /></>}
+                              </button>
+                            )}
+                          </div>
                         </div>
-                        {historyNotes.length === 0 ? (
+                        {allHistory.length === 0 ? (
                           <div className="px-6 py-10 text-center text-gray-400">
                             <p className="text-base">No previous holder Notesheets recorded yet.</p>
                           </div>
@@ -1530,52 +1611,49 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
             <div className="w-full p-[15px]">
               <div className="bg-white rounded-2xl border border-gray-200 shadow-sm">
                 <div className="px-6 py-4 border-b border-gray-100">
-                  <h2 className="text-lg font-bold text-gray-800">File Tracking</h2>
-                  <p className="text-sm text-gray-500 mt-0.5">Forwarding history — who sent to whom</p>
+                  <h2 className="text-lg font-bold text-gray-800">File Movement</h2>
+                  <p className="text-sm text-gray-500 mt-0.5">Every forward and signature, most recent last.</p>
                 </div>
                 <div className="px-6 py-5">
                   {trackEntries.length === 0 ? (
                     <p className="text-base text-gray-400 text-center py-8">No routing events yet.</p>
                   ) : (
-                    <div className="space-y-0">
-                      {trackEntries.map((entry, i) => (
-                        <div key={entry.id} className="flex items-start gap-4">
-                          <div className="flex flex-col items-center">
-                            <div className={cn("w-10 h-10 rounded-full flex items-center justify-center shrink-0 border-2",
-                              entry.type === "sign" ? "bg-emerald-600 border-emerald-600" : "bg-[#0D6E6E] border-[#0D6E6E]")}>
-                              {entry.type === "sign" ? <PenLine size={16} className="text-white" /> : <ArrowRight size={16} className="text-white" />}
+                    <ol className="relative">
+                      {trackEntries.map((entry, i) => {
+                        const last = i === trackEntries.length - 1;
+                        const label = entry.type === "sign" ? "Signed" : entry.action.replace(/_/g, " ");
+                        return (
+                          <li key={entry.id} className="relative flex gap-4 pb-5 last:pb-0">
+                            {/* rail + node */}
+                            <div className="flex flex-col items-center shrink-0">
+                              <div className={cn("w-8 h-8 rounded-full flex items-center justify-center border-2",
+                                entry.type === "sign" ? "bg-emerald-600 border-emerald-600" : "bg-[#0D6E6E] border-[#0D6E6E]")}>
+                                {entry.type === "sign" ? <PenLine size={14} className="text-white" /> : <ArrowRight size={14} className="text-white" />}
+                              </div>
+                              {!last && <div className="w-0.5 flex-1 min-h-[16px] bg-gray-200 mt-1" />}
                             </div>
-                            {i < trackEntries.length - 1 && <div className="w-0.5 h-10 mt-1 bg-gray-200" />}
-                          </div>
-                          <div className="flex-1 pb-6">
-                            <div className="flex items-center justify-between gap-3">
-                              <p className="text-base font-bold text-gray-900 capitalize">
-                                {entry.type === "sign" ? "Document Signed" : entry.action.replace("_"," ")}
-                              </p>
-                              {entry.created_at && (
-                                <span className="text-xs text-gray-400 shrink-0">{formatDate(entry.created_at, "datetime")}</span>
-                              )}
-                            </div>
-                            {/* Track Status is movement/status only — no remark/notesheet
-                                content here (that belongs to Notesheet History /
-                                GET /docket/remarks, a separate feature/data source). */}
-                            {entry.type === "sign" ? (
-                              <PersonBadge person={entry.from_user_info} fallback="System" className="mt-1" />
-                            ) : (
-                              <div className="flex flex-col gap-1.5 mt-2 text-sm">
-                                <PersonBadge person={entry.from_user_info} fallback="System" />
-                                {entry.to_user_info && (
+                            {/* content — one scannable row */}
+                            <div className="flex-1 min-w-0 pt-1">
+                              <div className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5">
+                                <span className="text-sm font-bold text-gray-900 capitalize">{label}</span>
+                                {entry.created_at && (
+                                  <span className="text-xs text-gray-400">{formatDate(entry.created_at, "datetime")}</span>
+                                )}
+                              </div>
+                              <div className="mt-1 text-sm text-gray-500 leading-relaxed [overflow-wrap:normal] [word-break:normal]">
+                                {entry.from_user_info ? personInline(entry.from_user_info) : <span className="text-gray-400">System</span>}
+                                {entry.type !== "sign" && entry.to_user_info && (
                                   <>
-                                    <ArrowRight size={13} className="text-gray-400 rotate-90 shrink-0" />
-                                    <PersonBadge person={entry.to_user_info} />
+                                    <ArrowRight size={13} className="inline align-middle text-gray-300 mx-1.5" />
+                                    {personInline(entry.to_user_info)}
                                   </>
                                 )}
                               </div>
-                            )}
-                          </div>
-                        </div>
-                      ))}
-                    </div>
+                            </div>
+                          </li>
+                        );
+                      })}
+                    </ol>
                   )}
                 </div>
               </div>
