@@ -1202,50 +1202,72 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                     (still-editable) row is excluded here (shown above in
                     "My Notesheet" instead); every row here is is_current
                     === false and permanently read-only. */}
-                {/* Latest Notesheet — ONLY the most recent prior holder
-                    note (the one written when the file was forwarded to
-                    the current holder). Older holder notes are never
-                    shown here. Hidden entirely when there is no prior
-                    holder note (e.g. first hop straight from the creator). */}
-                {latestHolderNote && (
-                  <div className="order-2 bg-white rounded-2xl border border-gray-200 shadow-sm">
-                    <div className="px-6 py-4 border-b border-gray-100">
-                      <h2 className="text-lg font-bold text-gray-800">Latest Notesheet</h2>
-                      <p className="text-sm text-gray-500 mt-0.5">The note written by the previous holder when forwarding this file to you — read-only</p>
-                    </div>
-                    <div className="px-6 py-5">
-                      <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
-                        <div className="flex items-center gap-1.5">
-                          <PersonBadge person={latestHolderNote.user_info} fallback="Unknown" compact />
-                          {latestHolderNote.user_id === user?.id && (
-                            <span className="text-xs text-[#0D6E6E] font-medium">(You)</span>
-                          )}
+                {/* Notesheet History — every past holding period's own
+                    Notesheet, newest first, all visible to the holder.
+                    `order-1` keeps it at the top so the latest note is
+                    always the first thing visible. Hidden only when there
+                    are no prior holder notes (first hop from the creator). */}
+                {(() => {
+                  const historyNotes = holderNotesheets
+                    .filter((n) => !n.is_current)
+                    .slice()
+                    .sort((a, b) => b.sequence - a.sequence); // newest first
+                  if (historyNotes.length === 0) return null;
+                  return (
+                    <div className="order-1 bg-white rounded-2xl border border-gray-200 shadow-sm">
+                      <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between gap-2">
+                        <div>
+                          <h2 className="text-lg font-bold text-gray-800">Notesheet History</h2>
+                          <p className="text-sm text-gray-500 mt-0.5">Every holding period’s own Notesheet, newest first — read-only</p>
                         </div>
-                        <span className="flex items-center gap-1.5 text-xs font-medium text-gray-500">
-                          <Clock size={12} className="text-gray-400" />{formatDate(latestHolderNote.updated_at, "datetime")}
+                        <span className="text-xs font-semibold bg-gray-100 text-gray-600 px-2.5 py-1 rounded-full shrink-0">
+                          {historyNotes.length} entr{historyNotes.length === 1 ? "y" : "ies"}
                         </span>
                       </div>
-                      {latestHolderNote.accessible === false ? (
-                        <p className="text-sm text-gray-400 flex items-center gap-1.5 bg-gray-50 border border-gray-200 rounded-xl px-4 py-3">
-                          <Lock size={12} /> You don&apos;t have access to read this
-                        </p>
-                      ) : (
-                        <div className={cn("bg-gray-50 border border-gray-200 rounded-xl px-4 py-3", NOTESHEET_PROSE_CLASS)}
-                          dangerouslySetInnerHTML={{ __html: toSafeNotesheetHtml(latestHolderNote.content) }} />
-                      )}
+                      <div className="px-6 py-5">
+                        {historyNotes.map((n, idx, arr) => (
+                          <div key={n.id} className="flex items-start gap-4">
+                            <div className="flex flex-col items-center">
+                              <div className="w-9 h-9 rounded-full flex items-center justify-center shrink-0 border-2 bg-[#0D6E6E] border-[#0D6E6E]">
+                                <span className="text-xs font-bold text-white">{n.sequence}</span>
+                              </div>
+                              {idx < arr.length - 1 && <div className="w-0.5 flex-1 min-h-[24px] mt-1 bg-gray-200" />}
+                            </div>
+                            <div className="flex-1 min-w-0 pb-6">
+                              <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
+                                <div className="flex items-center gap-1.5">
+                                  <PersonBadge person={n.user_info} fallback="Unknown" compact />
+                                  {n.user_id === user?.id && (
+                                    <span className="text-xs text-[#0D6E6E] font-medium">(You)</span>
+                                  )}
+                                </div>
+                                <span className="flex items-center gap-1.5 text-xs font-medium text-gray-500">
+                                  <Clock size={12} className="text-gray-400" />{formatDate(n.updated_at, "datetime")}
+                                </span>
+                              </div>
+                              {n.accessible === false ? (
+                                <p className="text-sm text-gray-400 flex items-center gap-1.5 bg-gray-50 border border-gray-200 rounded-xl px-4 py-3">
+                                  <Lock size={12} /> You don&apos;t have access to read this
+                                </p>
+                              ) : (
+                                <div className={cn("bg-gray-50 border border-gray-200 rounded-xl px-4 py-3", NOTESHEET_PROSE_CLASS)}
+                                  dangerouslySetInnerHTML={{ __html: toSafeNotesheetHtml(n.content) }} />
+                              )}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
                     </div>
-                  </div>
-                )}
+                  );
+                })()}
 
                 {/* Initial Notesheet — the creator's original document,
                     always conceptually numbered 1 (it precedes every
                     HolderNote holding-period, which start numbering at 2).
-                    Immutable once created — never editable by whoever
-                    currently holds the file; the current holder's own
-                    contribution is the separate, editable "Your Notesheet"
-                    card. `order-1` puts it first — the notesheet reads
-                    chronologically, editor last. */}
-                <div className="order-1 bg-white rounded-2xl border border-gray-200 shadow-sm">
+                    Immutable once created. `order-2` places it BELOW the
+                    Notesheet History (latest note stays on top); the
+                    editable "Your Notesheet" card (order-3) sits last. */}
+                <div className="order-2 bg-white rounded-2xl border border-gray-200 shadow-sm">
                   <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
                     <div className="flex items-center gap-2.5">
                       <div className="w-9 h-9 rounded-full flex items-center justify-center shrink-0 border-2 bg-gray-400 border-gray-400">
