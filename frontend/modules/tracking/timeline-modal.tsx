@@ -18,12 +18,13 @@
 // backend actually sent content for; everything else shows an explicit
 // "you don't have access to read this" instead of silently rendering
 // nothing, so it's never ambiguous whether something is being withheld.
+import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { api } from "@/services/api";
 import { cn, formatDate, hasRealNotesheetContent } from "@/lib/utils";
 import { toSafeNotesheetHtml, NOTESHEET_PROSE_CLASS } from "@/lib/notesheet-html";
-import { printTimelinePdf } from "@/lib/timeline-pdf";
+import { downloadTimelinePdf } from "@/lib/timeline-pdf";
 import { PersonBadge, type PersonInfo } from "@/components/shared/person-badge";
 import { X, FileText, ArrowRight, PenLine, Unlock, Loader2, Lock, Download } from "lucide-react";
 
@@ -142,6 +143,7 @@ const EVENT_STYLE: Record<TimelineEvent["type"], { bg: string; icon: React.Eleme
 };
 
 export function TimelineModal({ item, onClose }: { item: TrackingItem; onClose: () => void }) {
+  const [downloading, setDownloading] = useState(false);
   const { data: trackEntries = [], isLoading: loadingTrack } = useQuery<TrackEntry[]>({
     queryKey: ["tracking-file-track", item.file_id],
     queryFn: async () => (await api.get(`/efms/files/${item.file_id}/track`)).data,
@@ -166,14 +168,21 @@ export function TimelineModal({ item, onClose }: { item: TrackingItem; onClose: 
             <div className="flex items-center gap-2">
               <button
                 type="button"
-                onClick={() => {
-                  const ok = printTimelinePdf(item, events);
-                  if (!ok) toast.error("Please allow pop-ups for this site to download the timeline.");
+                onClick={async () => {
+                  setDownloading(true);
+                  try {
+                    await downloadTimelinePdf(item, events);
+                  } catch {
+                    toast.error("Could not generate the timeline PDF. Please try again.");
+                  } finally {
+                    setDownloading(false);
+                  }
                 }}
-                disabled={isLoading || events.length === 0}
+                disabled={isLoading || downloading || events.length === 0}
                 className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-semibold text-[#0D6E6E] border border-[#0D6E6E]/30 rounded-lg hover:bg-[#F0F7F7] disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                <Download size={15} /> Download PDF
+                {downloading ? <Loader2 size={15} className="animate-spin" /> : <Download size={15} />}
+                {downloading ? "Preparing…" : "Download PDF"}
               </button>
               <button onClick={onClose} className="text-gray-400 hover:text-gray-600"><X size={20} /></button>
             </div>
