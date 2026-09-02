@@ -9,9 +9,9 @@ import { confirmAction, showSuccess, escapeHtml } from "@/lib/alert";
 import { useUser, useActiveRole } from "@/stores/auth.store";
 import { cn, formatDate, getAttachmentPreviewKind, isNotesheetEmpty } from "@/lib/utils";
 import {
-  ChevronLeft, FileText, Download, ArrowRight,
+  ChevronLeft, ChevronDown, FileText, Download, ArrowRight,
   Loader2, Lock, Clock, MessageSquare, Upload, X, PenLine,
-  CheckCircle2, XCircle, Trash2, Pencil, Save, FileX2,
+  CheckCircle2, XCircle, Trash2, Pencil, Save, FileX2, Paperclip,
 } from "lucide-react";
 import PdfSignatureCanvas, { type SignatureStamp } from "@/components/signature/pdf-signature-canvas";
 import OtpVerifyModal from "@/components/signature/otp-verify-modal";
@@ -93,6 +93,9 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
   // happens once, at final submit) but this panel's Upload button does,
   // since it can be clicked repeatedly as more files are queued.
   const [uploadingQueue, setUploadingQueue] = useState(false);
+  // Attached Files rail: show a few by default, open the rest in a
+  // z-indexed dropdown-style overlay ("Expand" / "Close").
+  const [attachExpanded, setAttachExpanded] = useState(false);
   const { toggleFavorite, buildGroups } = useFavoriteRecipients();
   // Draft editing (30-minute window)
   const [editingDraft, setEditingDraft] = useState(false);
@@ -754,18 +757,117 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
   const statusStyle = STATUS_STYLES[displayStatus] ?? STATUS_STYLES.draft;
   const days = daysElapsed(file.created_at);
 
+  // Compact one-line person rendering for the file header's From → Holder
+  // flow — name in ink, role/department trailing in muted grey, no stacked
+  // rows or badges eating vertical space.
+  const personInline = (p?: PersonInfo | null) => {
+    if (!p) return <span className="italic text-gray-400">Not yet forwarded</span>;
+    const meta = [p.designation, p.department_name].filter(Boolean).join(" · ");
+    const name = p.is_active === false ? `${p.full_name} (Inactive)` : p.full_name;
+    return (
+      <span className="text-gray-800">
+        <span className="font-semibold">{name}</span>
+        {meta && <span className="font-normal text-gray-400"> · {meta}</span>}
+      </span>
+    );
+  };
+
+  // One attachment row, reused by the peek list and the expanded overlay.
+  const renderAttachmentRow = (att: Attachment) => {
+    // Backend is the real enforcement (uploader-only + 5 minutes + still-
+    // current-holder); this mirrors it client-side purely to hide/disable
+    // the button.
+    const canDelete = att.uploaded_by === user?.id
+      && isHolder
+      && Date.now() - new Date(att.created_at).getTime() < ATTACHMENT_DELETE_WINDOW_MS;
+    return (
+      <div key={att.id}
+        role="button"
+        tabIndex={0}
+        onClick={() => selectAttachment(att)}
+        onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); selectAttachment(att); } }}
+        className={cn("w-full flex items-start gap-3 p-3 rounded-xl border text-left transition-all cursor-pointer",
+          selectedPdf?.id === att.id ? "border-[#0D6E6E] bg-[#E6F4F4]" : "border-gray-100 bg-gray-50 hover:border-gray-200")}>
+        <FileText size={18} className="text-[#0D6E6E] shrink-0 mt-0.5" />
+        <div className="flex-1 min-w-0">
+          <p className="text-sm font-semibold text-gray-900 truncate">{att.original_name}</p>
+          <p className="text-xs text-gray-500 mt-0.5">{att.file_size ? `${(att.file_size/1024).toFixed(0)} KB · ` : ""}{formatDate(att.created_at, "relative")}</p>
+          <div className="flex items-center gap-3 mt-2">
+            {(() => {
+              const kind = getAttachmentPreviewKind(att);
+              if (kind === "none") {
+                return (
+                  <span
+                    title="Preview is not available for this file type. Please download the file to view it."
+                    className="text-xs text-gray-400 cursor-default"
+                  >
+                    No preview
+                  </span>
+                );
+              }
+              return (
+                <button
+                  type="button"
+                  onClick={(e) => { e.stopPropagation(); selectAttachment(att); }}
+                  className="text-xs text-[#0D6E6E] font-semibold hover:underline"
+                >
+                  View
+                </button>
+              );
+            })()}
+            {!isRestricted && (
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); downloadAttachment(att.id, att.original_name); }}
+                className="text-xs text-gray-500 hover:text-gray-700 hover:underline"
+              >
+                Download
+              </button>
+            )}
+            {canDelete && (
+              <button
+                type="button"
+                onClick={async (e) => {
+                  e.stopPropagation();
+                  const confirmed = await confirmAction({
+                    title: "Delete this attachment?",
+                    text: `"${att.original_name}" will be permanently removed from this file.`,
+                    confirmText: "Delete",
+                    danger: true,
+                  });
+                  if (confirmed) deleteAttachmentMutation.mutate(att.id);
+                }}
+                disabled={deleteAttachmentMutation.isPending}
+                className="text-xs text-red-400 hover:text-red-600 flex items-center gap-1 ml-auto disabled:opacity-50"
+              >
+                <Trash2 size={12} /> Delete
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  const ATTACH_PEEK = 3;
+  const hasMoreAttachments = file.attachments.length > ATTACH_PEEK;
+
   return (
-    <div className="flex h-screen bg-[#F5F7FA] overflow-hidden -mt-0">
-      {/* Left panel: PDF attachments */}
-      <div className="w-72 shrink-0 bg-white border-r border-gray-200 flex flex-col">
+    <div className="flex h-[calc(100vh-4rem)] bg-[#F5F7FA] overflow-hidden">
+      {/* Left rail: PDF attachments — a short peek, with the rest opening
+          in a z-indexed dropdown-style overlay. */}
+      <div className="w-72 shrink-0 bg-white border-r border-gray-200 flex flex-col relative">
         <div className="px-4 py-4 border-b border-gray-200">
           <button onClick={() => guardNavigation(() => router.back())} className="flex items-center gap-1 text-sm text-[#0D6E6E] hover:underline mb-3">
             <ChevronLeft size={14} /> Back
           </button>
           <div className="flex flex-col gap-2">
-            <div>
+            <div className="flex items-center gap-2">
+              <Paperclip size={16} className="text-[#0D6E6E] shrink-0" />
               <h2 className="text-base font-bold text-gray-900">Attached Files</h2>
-              <p className="text-xs text-gray-400 mt-0.5">PDF versions for download</p>
+              {file.attachments.length > 0 && (
+                <span className="ml-auto text-xs font-bold bg-gray-100 text-gray-600 px-2 py-0.5 rounded-full">{file.attachments.length}</span>
+              )}
             </div>
             {file.attachments.length > 0 && !isRestricted && (
               <button
@@ -774,94 +876,63 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                 title="Download all attachments as a ZIP"
                 className="flex items-center justify-center gap-2 w-full text-sm font-semibold text-[#0D6E6E] border border-[#0D6E6E]/30 bg-[#F0F7F7] hover:bg-[#E6F4F4] rounded-lg px-3 py-2.5"
               >
-                <Download size={16} /> Download All Attachment
+                <Download size={16} /> Download All
               </button>
             )}
           </div>
         </div>
-        <div className="flex-1 overflow-y-auto p-3 space-y-2">
+
+        {/* Peek list — grows with content up to ATTACH_PEEK rows, then a
+            clear "Expand" control. Scrolls if the peek itself overflows. */}
+        <div className="flex-1 overflow-y-auto p-3">
           {file.attachments.length === 0 ? (
-            <p className="text-sm text-gray-400 text-center py-8">No attachments</p>
+            <div className="text-center py-10 px-4">
+              <FileText size={28} className="mx-auto mb-2 text-gray-300" />
+              <p className="text-sm text-gray-400">No attachments yet</p>
+            </div>
           ) : (
-            file.attachments.map((att) => {
-              // Backend is the real enforcement (uploader-only + 5 minutes +
-              // still-current-holder); this mirrors it client-side purely to
-              // hide/disable the button. Deletion must stop the moment the
-              // file is forwarded on, even if the 5-minute window hasn't
-              // elapsed yet — the uploader is no longer the current holder.
-              const canDelete = att.uploaded_by === user?.id
-                && isHolder
-                && Date.now() - new Date(att.created_at).getTime() < ATTACHMENT_DELETE_WINDOW_MS;
-              return (
-              <div key={att.id}
-                role="button"
-                tabIndex={0}
-                onClick={() => selectAttachment(att)}
-                onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); selectAttachment(att); } }}
-                className={cn("w-full flex items-start gap-3 p-3 rounded-xl border text-left transition-all cursor-pointer",
-                  selectedPdf?.id === att.id ? "border-[#0D6E6E] bg-[#E6F4F4]" : "border-gray-100 bg-gray-50")}>
-                <FileText size={18} className="text-[#0D6E6E] shrink-0 mt-0.5" />
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm font-semibold text-gray-900 truncate">{att.original_name}</p>
-                  <p className="text-xs text-gray-500 mt-0.5">{att.file_size ? `${(att.file_size/1024).toFixed(0)} KB · ` : ""}{formatDate(att.created_at, "relative")}</p>
-                  <div className="flex items-center gap-3 mt-2">
-                    {(() => {
-                      const kind = getAttachmentPreviewKind(att);
-                      if (kind === "none") {
-                        return (
-                          <span
-                            title="Preview is not available for this file type. Please download the file to view it."
-                            className="text-xs text-gray-400 cursor-default"
-                          >
-                            No preview
-                          </span>
-                        );
-                      }
-                      return (
-                        <button
-                          type="button"
-                          onClick={(e) => { e.stopPropagation(); selectAttachment(att); }}
-                          className="text-xs text-[#0D6E6E] font-semibold hover:underline"
-                        >
-                          View
-                        </button>
-                      );
-                    })()}
-                    {!isRestricted && (
-                      <button
-                        type="button"
-                        onClick={(e) => { e.stopPropagation(); downloadAttachment(att.id, att.original_name); }}
-                        className="text-xs text-gray-500 hover:text-gray-700 hover:underline"
-                      >
-                        Download
-                      </button>
-                    )}
-                    {canDelete && (
-                      <button
-                        type="button"
-                        onClick={async (e) => {
-                          e.stopPropagation();
-                          const confirmed = await confirmAction({
-                            title: "Delete this attachment?",
-                            text: `"${att.original_name}" will be permanently removed from this file.`,
-                            confirmText: "Delete",
-                            danger: true,
-                          });
-                          if (confirmed) deleteAttachmentMutation.mutate(att.id);
-                        }}
-                        disabled={deleteAttachmentMutation.isPending}
-                        className="text-xs text-red-400 hover:text-red-600 flex items-center gap-1 ml-auto disabled:opacity-50"
-                      >
-                        <Trash2 size={12} /> Delete
-                      </button>
-                    )}
-                  </div>
-                </div>
-              </div>
-              );
-            })
+            <div className="space-y-2">
+              {file.attachments.slice(0, ATTACH_PEEK).map(renderAttachmentRow)}
+              {hasMoreAttachments && (
+                <button
+                  type="button"
+                  onClick={() => setAttachExpanded(true)}
+                  className="w-full flex items-center justify-center gap-2 py-2.5 rounded-xl border border-dashed border-[#0D6E6E]/40 text-sm font-semibold text-[#0D6E6E] hover:bg-[#F0F7F7] transition-colors"
+                >
+                  <ChevronDown size={15} />
+                  Expand — {file.attachments.length - ATTACH_PEEK} more file{file.attachments.length - ATTACH_PEEK > 1 ? "s" : ""}
+                </button>
+              )}
+            </div>
           )}
         </div>
+
+        {/* Expanded overlay: opens over the rail like a dropdown, lists
+            every attachment, closes on the Close button or a backdrop click. */}
+        {attachExpanded && (
+          <>
+            <div className="fixed inset-0 z-40 bg-black/20" onClick={() => setAttachExpanded(false)} />
+            <div className="absolute inset-y-2 left-2 z-50 w-[330px] bg-white rounded-2xl shadow-2xl border border-gray-200 flex flex-col overflow-hidden">
+              <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100 bg-gray-50 shrink-0">
+                <div className="flex items-center gap-2">
+                  <Paperclip size={15} className="text-[#0D6E6E]" />
+                  <p className="text-sm font-bold text-gray-900">All Attachments</p>
+                  <span className="text-xs font-bold bg-white border border-gray-200 text-gray-600 px-1.5 py-0.5 rounded-full">{file.attachments.length}</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setAttachExpanded(false)}
+                  className="flex items-center gap-1 text-xs font-semibold text-gray-500 hover:text-gray-900 border border-gray-200 rounded-lg px-2.5 py-1.5"
+                >
+                  <X size={13} /> Close
+                </button>
+              </div>
+              <div className="flex-1 overflow-y-auto p-3 space-y-2">
+                {file.attachments.map(renderAttachmentRow)}
+              </div>
+            </div>
+          </>
+        )}
       </div>
 
       {/* Main panel */}
@@ -873,34 +944,35 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
           )}
           <div className="flex items-start justify-between gap-4">
             <div className="flex-1 min-w-0">
-              <div className="flex items-center gap-2 mb-1 flex-wrap">
+              <div className="flex items-center gap-2 mb-1.5 flex-wrap">
                 <span className="font-mono text-sm font-bold text-[#0D6E6E] bg-[#E6F4F4] px-2 py-0.5 rounded">{file.ref_number}</span>
-                <span className={cn("px-2 py-0.5 rounded-full text-sm font-semibold", statusStyle.bg, statusStyle.text)}>{statusStyle.label}</span>
+                <span className={cn("px-2 py-0.5 rounded-full text-xs font-semibold", statusStyle.bg, statusStyle.text)}>{statusStyle.label}</span>
                 <FileClassificationBadge priority={file.priority} />
-                <span className={cn("text-sm font-semibold px-2 py-0.5 rounded-full",
+                <span className={cn("text-xs font-semibold px-2 py-0.5 rounded-full",
                   days > 7 ? "text-red-600 bg-red-50" : days > 3 ? "text-amber-600 bg-amber-50" : "text-green-600 bg-green-50")}>
                   {days}d elapsed
                 </span>
+                {displayStatus === "active" && isHolder && (
+                  <span className="inline-flex items-center gap-1.5 text-xs font-bold px-2.5 py-0.5 rounded-full bg-green-50 text-green-700 border border-green-200">
+                    <span className="w-1.5 h-1.5 rounded-full bg-green-500" /> You hold this file
+                  </span>
+                )}
               </div>
               <h1 className="text-xl font-bold text-gray-900 truncate">{file.subject}</h1>
-              <p className="text-sm text-gray-500 mt-0.5">{file.category} · Created {formatDate(file.created_at, "relative")}</p>
-              <div className="flex flex-wrap items-start gap-x-6 gap-y-1.5 mt-2">
-                {latestRouteEntry?.from_user_info ? (
-                  <div className="flex items-start gap-1.5">
-                    <span className="text-xs font-semibold text-gray-400 uppercase mt-0.5">From</span>
-                    <PersonBadge person={latestRouteEntry.from_user_info} compact />
-                  </div>
-                ) : (
-                  <div className="flex items-start gap-1.5">
-                    <span className="text-xs font-semibold text-gray-400 uppercase mt-0.5">From</span>
-                    <span className="text-sm text-gray-400 italic mt-0.5">Not yet forwarded</span>
-                  </div>
-                )}
+              {/* One compact metadata line: category · created · From → Holder */}
+              <div className="flex items-center flex-wrap gap-x-2.5 gap-y-1 mt-1.5 text-sm">
+                <span className="text-gray-500">{file.category}</span>
+                <span className="text-gray-300">·</span>
+                <span className="text-gray-500">Created {formatDate(file.created_at, "relative")}</span>
+                <span className="text-gray-300">·</span>
+                <span className="text-[11px] font-bold text-gray-400 uppercase tracking-wide">From</span>
+                {personInline(latestRouteEntry?.from_user_info)}
                 {file.current_holder_info && (
-                  <div className="flex items-start gap-1.5">
-                    <span className="text-xs font-semibold text-gray-400 uppercase mt-0.5">Current Holder</span>
-                    <PersonBadge person={file.current_holder_info} compact />
-                  </div>
+                  <>
+                    <ArrowRight size={14} className="text-gray-300 mx-0.5 shrink-0" />
+                    <span className="text-[11px] font-bold text-gray-400 uppercase tracking-wide">Holder</span>
+                    {personInline(file.current_holder_info)}
+                  </>
                 )}
               </div>
             </div>
@@ -945,25 +1017,36 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
             </div>
           </div>
 
-          {/* Status tracker bar */}
-          <div className={cn("mt-3 rounded-xl px-4 py-3 flex items-center gap-3",
-            displayStatus === "released" ? "bg-green-50 border border-green-200" :
-            "bg-amber-50 border border-amber-200")}>
-            <div className={cn("w-2 h-2 rounded-full shrink-0",
-              displayStatus === "released" ? "bg-green-500" : "bg-amber-500")} />
-            <p className="text-base text-gray-700">
-              {displayStatus === "draft"      ? "Draft — not yet forwarded. Use 'Forward to Recipient' when ready." :
-               displayStatus === "active"     ? (isHolder ? "You are the current holder of this file." : "Forwarded — awaiting review by the current holder.") :
-               displayStatus === "released"   ? "Released to the department." :
-               displayStatus === "dispatched" ? "Officially dispatched." : "Active."}
-            </p>
-            {!isHolder && (
-              <span className="ml-auto text-sm text-gray-400 shrink-0">
-                <Lock size={13} className="inline mr-1" />
-                {isRestricted ? "Restricted view — your notesheet & attachments only" : "Read-only"}
-              </span>
-            )}
-          </div>
+          {/* Slim contextual note — only shown when it carries information
+              the header chips don't already convey. "You hold this file"
+              lives in the header pill above, so an active holder sees no
+              bar here at all. */}
+          {(() => {
+            const note =
+              displayStatus === "draft"      ? "Draft — not yet forwarded. Use 'Forward to Recipient' when ready." :
+              displayStatus === "released"   ? "Released to the department." :
+              displayStatus === "dispatched" ? "Officially dispatched." :
+              (displayStatus === "active" && !isHolder) ? "Forwarded — awaiting review by the current holder." :
+              null;
+            if (!note && isHolder) return null;
+            const tone =
+              displayStatus === "released" ? "bg-green-50 text-green-800" :
+              displayStatus === "draft"    ? "bg-gray-50 text-gray-600" :
+              "bg-amber-50 text-amber-800";
+            return (
+              <div className={cn("mt-2.5 rounded-lg px-3 py-2 flex items-center gap-2.5 text-sm", tone)}>
+                <span className={cn("w-1.5 h-1.5 rounded-full shrink-0",
+                  displayStatus === "released" ? "bg-green-500" : displayStatus === "draft" ? "bg-gray-400" : "bg-amber-500")} />
+                <span>{note ?? "Active."}</span>
+                {!isHolder && (
+                  <span className="ml-auto text-xs text-gray-400 shrink-0">
+                    <Lock size={12} className="inline mr-1" />
+                    {isRestricted ? "Restricted view" : "Read-only"}
+                  </span>
+                )}
+              </div>
+            );
+          })()}
 
           {/* Tabs */}
           <div className="flex gap-1 mt-3">
@@ -990,15 +1073,16 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
         {/* Tab content */}
         <div className="flex-1 overflow-y-auto">
           {activeTab === "notesheet" && (
-            <div className="p-6 grid grid-cols-1 lg:grid-cols-3 gap-5">
-              {/* LEFT: My Notesheet (top, if current holder) -> Notesheet
-                  History (newest holding-period first) -> Initial Notesheet
-                  (always last, numbered 1). Numbering comes directly from
-                  the backend's `sequence` field (stable, chronological,
-                  assigned when each holding-period row is created) — never
-                  recalculated from this array's display order, which is
-                  intentionally the reverse of creation order. */}
-              <div className="lg:col-span-2 space-y-5">
+            <div className="mx-auto w-full max-w-[1180px] p-6 flex flex-col lg:flex-row gap-6 items-start">
+              {/* MAIN (wide, centred): My Notesheet (top, if current holder)
+                  -> Notesheet History (newest holding-period first) ->
+                  Initial Notesheet (always last, numbered 1). Numbering
+                  comes directly from the backend's `sequence` field
+                  (stable, chronological, assigned when each holding-period
+                  row is created) — never recalculated from this array's
+                  display order, which is intentionally the reverse of
+                  creation order. */}
+              <div className="flex-1 min-w-0 w-full space-y-5">
                 {/* My Notesheet — the current holder's OWN, server-persisted
                     Notesheet (HolderNote), only ever shown/editable while
                     they are the file's current holder on an Active file.
@@ -1021,7 +1105,7 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                     <div className="px-6 py-5 space-y-3">
                       <div className="border border-gray-200 rounded-xl overflow-hidden">
                         <RichTextToolbar editor={myNoteEditor} />
-                        <EditorContent editor={myNoteEditor} className="min-h-[200px] text-sm" />
+                        <EditorContent editor={myNoteEditor} className="min-h-[420px] text-sm" />
                       </div>
                       <div className="flex justify-end">
                         <button type="button" onClick={saveMyNotesheet} disabled={saveHolderNotesheetMutation.isPending || !myNoteDirty}
@@ -1174,9 +1258,11 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                 </div>
               </div>
 
-              {/* RIGHT: Edit Draft (creator, within window) / recipient-only picker
-                  (draft, window closed) / Forward panel (subsequent holders) */}
-              <div className="lg:col-span-1 space-y-5">
+              {/* ASIDE: Edit Draft (creator, within window) / recipient-only picker
+                  (draft, window closed) / Forward panel (subsequent holders).
+                  Sticks alongside the notesheet on wide screens; drops below
+                  it on narrow ones. */}
+              <div className="w-full lg:w-[336px] shrink-0 lg:sticky lg:top-4 space-y-5">
                 {editingDraft ? (
                   <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-5 space-y-4">
                     <div className="flex items-center justify-between">
@@ -1237,7 +1323,7 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                       <label className="block text-sm font-semibold text-gray-700 mb-1.5">Notesheet</label>
                       <div className="border border-gray-200 rounded-xl overflow-hidden">
                         <RichTextToolbar editor={draftEditor} />
-                        <EditorContent editor={draftEditor} className="min-h-[160px] text-sm" />
+                        <EditorContent editor={draftEditor} className="min-h-[220px] text-sm" />
                       </div>
                     </div>
                     <div className="flex gap-2 pt-1">
@@ -1415,7 +1501,7 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
           )}
 
           {activeTab === "track" && (
-            <div className="p-6">
+            <div className="mx-auto w-full max-w-[1180px] p-6">
               <div className="bg-white rounded-2xl border border-gray-200 shadow-sm">
                 <div className="px-6 py-4 border-b border-gray-100">
                   <h2 className="text-lg font-bold text-gray-800">File Tracking</h2>
@@ -1472,7 +1558,7 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
 
           {/* ── SIGN DOCUMENT TAB ── */}
           {activeTab === "sign" && (
-            <div className="p-6 space-y-5">
+            <div className="mx-auto w-full max-w-[1180px] p-6 space-y-5">
               <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
                 <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
                   <div>
