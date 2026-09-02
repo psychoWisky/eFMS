@@ -1,6 +1,7 @@
 """eFMS file, notesheet, routing, and dispatch endpoints."""
 import uuid as _uuid
 import re
+import logging
 import smtplib
 import urllib.parse
 import io
@@ -37,6 +38,13 @@ def _send_email(to: str, subject: str, body: str) -> None:
             s.sendmail(settings.SMTP_FROM, [to], msg.as_string())
     except Exception:
         pass  # Don't fail the request if email fails
+
+_nslog = logging.getLogger("efms.notesheet_pdf")
+
+# Bump this string whenever the notesheet PDF template/pipeline changes. It
+# is logged on every download so the server logs prove which build is
+# actually running (a stale process / un-pulled deploy shows the old tag).
+NOTESHEET_PDF_BUILD = "2026-09-02-chromium-letterhead-v1"
 
 from app.db.base import get_db
 from app.core.dependencies import get_current_verified_user
@@ -1071,6 +1079,11 @@ async def download_notesheet(
     records.
     """
 
+    _nslog.warning(
+        "notesheet_pdf: ENTER build=%s file_id=%s user=%s",
+        NOTESHEET_PDF_BUILD, file_id, getattr(user, "id", "?"),
+    )
+
     # ------------------------------------------------------------------
     # Load file and enforce existing full-access rules.
     # ------------------------------------------------------------------
@@ -1710,13 +1723,33 @@ body {{
         DocConversionFailed,
     )
 
+    # Fingerprint the generated HTML so the logs prove which template
+    # produced this download without needing to open the PDF. "note-entry"
+    # only appears in the new letterhead template; "notesheet-box" only in
+    # the old boxed one.
+    _nslog.warning(
+        "notesheet_pdf: html built len=%d new_template=%s old_template=%s",
+        len(html),
+        "note-entry-head" in html,
+        "notesheet-box" in html,
+    )
+
     pdf_bytes = None
+    engine_used = None
 
     try:
+        _nslog.warning("notesheet_pdf: trying Chromium (Playwright)…")
         pdf_bytes = await run_in_threadpool(render_html_to_pdf, html)
-    except ChromiumUnavailable:
+        engine_used = "chromium"
+        _nslog.warning("notesheet_pdf: Chromium OK bytes=%d", len(pdf_bytes or b""))
+    except ChromiumUnavailable as exc:
+        _nslog.warning(
+            "notesheet_pdf: Chromium UNAVAILABLE -> falling back to LibreOffice: %s",
+            exc,
+        )
         pdf_bytes = None  # fall through to LibreOffice
-    except ChromiumRenderFailed:
+    except ChromiumRenderFailed as exc:
+        _nslog.error("notesheet_pdf: Chromium RENDER FAILED: %s", exc, exc_info=True)
         raise HTTPException(
             status_code=422,
             detail="Failed to generate notesheet PDF.",
@@ -1724,17 +1757,24 @@ body {{
 
     if pdf_bytes is None:
         try:
+            _nslog.warning("notesheet_pdf: trying LibreOffice…")
             pdf_bytes = convert_html_to_pdf(
                 html.encode("utf-8")
             )
+            engine_used = "libreoffice"
+            _nslog.warning(
+                "notesheet_pdf: LibreOffice OK bytes=%d", len(pdf_bytes or b"")
+            )
 
         except DocConversionUnavailable:
+            _nslog.error("notesheet_pdf: LibreOffice UNAVAILABLE — no engine, 503")
             raise HTTPException(
                 status_code=503,
                 detail="PDF generation is not available on this server.",
             )
 
         except DocConversionFailed:
+            _nslog.error("notesheet_pdf: LibreOffice FAILED, 422", exc_info=True)
             raise HTTPException(
                 status_code=422,
                 detail="Failed to generate notesheet PDF.",
@@ -1752,13 +1792,22 @@ body {{
         safe="",
     )
 
+    _nslog.warning(
+        "notesheet_pdf: DONE build=%s engine=%s pdf_bytes=%d file=%s",
+        NOTESHEET_PDF_BUILD, engine_used, len(pdf_bytes or b""), file_name,
+    )
+
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",
         headers={
             "Content-Disposition": (
                 f"attachment; filename*=UTF-8''{encoded_name}"
-            )
+            ),
+            # Surfaces in the browser Network tab / curl -I too, so you can
+            # confirm the running build without server log access.
+            "X-Notesheet-Build": NOTESHEET_PDF_BUILD,
+            "X-Notesheet-Engine": engine_used or "unknown",
         },
     )
 
