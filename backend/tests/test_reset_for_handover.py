@@ -68,7 +68,8 @@ CREATE TABLE users (
     id UUID PRIMARY KEY, email TEXT UNIQUE NOT NULL, hashed_password TEXT,
     first_name TEXT, last_name TEXT, is_active BOOLEAN NOT NULL DEFAULT true,
     active_role TEXT, origin_user_id UUID REFERENCES users(id),
-    project_id UUID REFERENCES projects(id), deactivated_by UUID REFERENCES users(id)
+    project_id UUID REFERENCES projects(id), deactivated_by UUID REFERENCES users(id),
+    department_id UUID, establishment_id UUID
 );
 ALTER TABLE projects ADD CONSTRAINT fk_projects_current_profile FOREIGN KEY (current_profile_id) REFERENCES users(id);
 ALTER TABLE projects ADD CONSTRAINT fk_projects_created_by FOREIGN KEY (created_by) REFERENCES users(id);
@@ -85,6 +86,12 @@ CREATE TABLE departments (
     establishment_id UUID REFERENCES establishments(id),
     head_of_department_id UUID REFERENCES users(id)
 );
+-- users.department_id/establishment_id are RESTRICT with no ondelete clause,
+-- exactly matching alembic/versions/0001_initial_schema.py:77-78 — added
+-- only now that departments/establishments exist, same deferred-FK pattern
+-- already used above for the projects<->users circular reference.
+ALTER TABLE users ADD CONSTRAINT fk_users_department FOREIGN KEY (department_id) REFERENCES departments(id);
+ALTER TABLE users ADD CONSTRAINT fk_users_establishment FOREIGN KEY (establishment_id) REFERENCES establishments(id);
 CREATE TABLE file_categories (id UUID PRIMARY KEY, name TEXT NOT NULL);
 CREATE TABLE file_priorities (
     id UUID PRIMARY KEY, name TEXT UNIQUE NOT NULL, label TEXT NOT NULL, is_active BOOLEAN NOT NULL DEFAULT true
@@ -260,6 +267,15 @@ async def seed_fixture_data(asyncpg_dsn: str) -> dict:
         await conn.execute(
             "INSERT INTO departments (id, name, establishment_id, head_of_department_id) VALUES ($1, 'Finance', $2, $3)",
             ids["department1"], ids["establishment1"], ids["dept_head"],
+        )
+        # Reproduces the exact real handover failure: the preserved Super
+        # Admin itself has a department/establishment reference, which — if
+        # left unset — blocks "DELETE FROM departments"/"DELETE FROM
+        # establishments" via users_department_id_fkey/
+        # users_establishment_id_fkey even after every other user is gone.
+        await conn.execute(
+            "UPDATE users SET department_id = $1, establishment_id = $2 WHERE id = $3",
+            ids["department1"], ids["establishment1"], ids["super_admin"],
         )
         await conn.execute("INSERT INTO file_categories (id, name) VALUES ($1, 'General')", ids["category1"])
         await conn.execute(
@@ -521,6 +537,55 @@ async def test_execute_missing_super_admin_aborts_safely(test_db, upload_dir):
 
 
 @pytest.mark.asyncio
+async def test_super_admin_department_establishment_refs_do_not_block_reset(test_db, upload_dir):
+    """Regression test for the real handover failure: DELETE FROM departments
+    aborted on users_department_id_fkey because the preserved Super Admin's
+    own department_id/establishment_id survive user deletion (Super Admin
+    is never deleted). seed_fixture_data() always gives the Super Admin both
+    references, exactly reproducing the reported scenario."""
+    sqlalchemy_url, asyncpg_dsn = test_db
+    ids = await seed_fixture_data(asyncpg_dsn)
+    db_name = db_name_from_dsn(asyncpg_dsn)
+
+    conn = await asyncpg.connect(asyncpg_dsn)
+    try:
+        before_row = await conn.fetchrow(
+            "SELECT department_id, establishment_id FROM users WHERE email = $1", SUPER_ADMIN_EMAIL
+        )
+        assert before_row["department_id"] is not None
+        assert before_row["establishment_id"] is not None
+    finally:
+        await conn.close()
+
+    result = run_script(
+        sqlalchemy_url, upload_dir,
+        ["--execute", "--skip-backup-check",
+         "--confirm-database", f"RESET AVFU EFMS DATABASE {db_name}",
+         "--confirm", "RESET AVFU EFMS", "--confirm-uploads", "CLEAN UPLOADS"],
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "users_department_id_fkey" not in (result.stdout + result.stderr)
+
+    conn = await asyncpg.connect(asyncpg_dsn)
+    try:
+        # 2. Departments and establishments are successfully deleted.
+        assert await conn.fetchval("SELECT COUNT(*) FROM departments") == 0
+        assert await conn.fetchval("SELECT COUNT(*) FROM establishments") == 0
+        # 3. The preserved Super Admin remains.
+        row = await conn.fetchrow(
+            "SELECT id, department_id, establishment_id FROM users WHERE email = $1", SUPER_ADMIN_EMAIL
+        )
+        assert row is not None
+        assert str(row["id"]) == ids["super_admin"]
+        # 4. Its department_id and establishment_id are NULL after reset.
+        assert row["department_id"] is None
+        assert row["establishment_id"] is None
+    finally:
+        await conn.close()
+
+
+@pytest.mark.asyncio
 async def test_execute_full_reset_reaches_expected_final_state(test_db, upload_dir):
     sqlalchemy_url, asyncpg_dsn = test_db
     ids = await seed_fixture_data(asyncpg_dsn)
@@ -559,6 +624,9 @@ async def test_execute_full_reset_reaches_expected_final_state(test_db, upload_d
         ]:
             assert await conn.fetchval(f"SELECT COUNT(*) FROM {table}") == 0, table
         assert await conn.fetchval("SELECT COUNT(*) FROM users WHERE origin_user_id IS NOT NULL") == 0
+        super_admin_row = await conn.fetchrow("SELECT department_id, establishment_id FROM users LIMIT 1")
+        assert super_admin_row["department_id"] is None
+        assert super_admin_row["establishment_id"] is None
         assert await conn.fetchval("SELECT COUNT(*) FROM file_priorities") == 3
         priority_names = {r["name"] for r in await conn.fetch("SELECT name FROM file_priorities")}
         assert priority_names == {"high", "medium", "low"}

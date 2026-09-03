@@ -387,7 +387,19 @@ DELETION_ORDER: list[tuple[str, str]] = [
     # (ON DELETE CASCADE, verified in migration 0001) — Super Admin's own
     # rows in those tables are untouched since Super Admin is never deleted.
     ("users (all except Super Admin)", "DELETE FROM users WHERE id != :super_admin_id"),
+    # By this point the only remaining user is the preserved Super Admin.
+    # users.department_id/establishment_id have no ondelete clause (verified
+    # in alembic/versions/0001_initial_schema.py:77-78) and are RESTRICT by
+    # default, so the Super Admin's own department/establishment reference
+    # would otherwise block deleting the very row it points to — this is
+    # the exact failure a real handover run hit at "DELETE FROM
+    # departments" (users_department_id_fkey). Clearing the reference does
+    # not delete or rename the department/establishment itself — it only
+    # detaches the preserved user's now-meaningless department/establishment
+    # link, immediately before those rows are removed anyway.
+    ("users.department_id -> NULL (all remaining users)", "UPDATE users SET department_id = NULL"),
     ("departments (all)", "DELETE FROM departments"),
+    ("users.establishment_id -> NULL (all remaining users)", "UPDATE users SET establishment_id = NULL"),
     ("establishments (all)", "DELETE FROM establishments"),
     ("file_categories (all)", "DELETE FROM file_categories"),
     ("roles (all non-system)", "DELETE FROM roles WHERE is_system = false"),
@@ -421,6 +433,17 @@ async def _verify_after_state(
         {"id": super_admin.id, "email": super_admin.email},
     )
     checks.append(("preserved user is still the exact Super Admin row", still_super_admin == 1))
+
+    super_admin_org_refs_cleared = await conn.scalar(
+        text(
+            "SELECT COUNT(*) FROM users "
+            "WHERE id = :id AND department_id IS NULL AND establishment_id IS NULL"
+        ),
+        {"id": super_admin.id},
+    )
+    checks.append(
+        ("Super Admin department_id/establishment_id are NULL", super_admin_org_refs_cleared == 1)
+    )
 
     roles = await _count(conn, "roles")
     checks.append((f"roles == 1 (got {roles})", roles == 1))
