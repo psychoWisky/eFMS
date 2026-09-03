@@ -1,7 +1,9 @@
 // Client-side "Download PDF" for the File Timeline modal. Renders a
 // self-contained document that mirrors the notesheet download's AVFU
-// letterhead + teal/gold theme into an off-screen node and turns it into
-// a downloaded .pdf via html2pdf.js (no print dialog, no backend).
+// letterhead + teal/gold theme, rasterises it with html2canvas-pro
+// (Tailwind v4's oklch() colours break the older html2canvas), and writes
+// it to a downloaded .pdf via jsPDF — no print dialog, no backend.
+import { jsPDF } from "jspdf";
 import { escapeHtml } from "@/lib/alert";
 import { formatDate, hasRealNotesheetContent } from "@/lib/utils";
 import { toSafeNotesheetHtml } from "@/lib/notesheet-html";
@@ -188,8 +190,13 @@ function buildBody(file: TimelinePdfFile, events: TimelinePdfEvent[], logoUrl: s
   `;
 }
 
-/** Build the styled File Timeline document off-screen and download it as a
- *  real .pdf file (via html2pdf.js — no print dialog). */
+/** Build the styled File Timeline document and download it as a real .pdf
+ *  file (html2canvas-pro + jsPDF — no print dialog).
+ *
+ *  The document is rendered ON-SCREEN behind a full-viewport white cover
+ *  ("Preparing your PDF…") rather than off-screen: html2canvas reliably
+ *  captures a laid-out, visible node, whereas a `left:-99999px` node often
+ *  rasterises blank. The cover is removed only after the PDF is produced. */
 export async function downloadTimelinePdf(file: TimelinePdfFile, events: TimelinePdfEvent[]): Promise<void> {
   const logoUrl = `${window.location.origin}/avfu_letterhead_logo.png`;
 
@@ -201,28 +208,80 @@ export async function downloadTimelinePdf(file: TimelinePdfFile, events: Timelin
     img.src = logoUrl;
   });
 
-  const host = document.createElement("div");
-  host.className = "tl-doc";
-  // A4 content width at 96dpi minus the 8mm page margins html2pdf applies.
-  host.style.cssText = "position:fixed;left:-99999px;top:0;width:770px;padding:0;background:#ffffff;";
-  host.innerHTML = `<style>${TIMELINE_STYLE}</style>${buildBody(file, events, logoUrl)}`;
-  document.body.appendChild(host);
+  const cover = document.createElement("div");
+  cover.style.cssText =
+    "position:fixed;inset:0;z-index:2147483000;background:#ffffff;overflow:auto;" +
+    "display:flex;flex-direction:column;align-items:center;padding:24px 16px;";
+
+  const notice = document.createElement("div");
+  notice.textContent = "Preparing your PDF…";
+  notice.style.cssText =
+    "font:600 14px Arial,sans-serif;color:#0A5757;margin-bottom:16px;";
+  cover.appendChild(notice);
+
+  const doc = document.createElement("div");
+  doc.className = "tl-doc";
+  doc.style.cssText = "width:794px;max-width:100%;background:#ffffff;";
+  doc.innerHTML = `<style>${TIMELINE_STYLE}</style>${buildBody(file, events, logoUrl)}`;
+  cover.appendChild(doc);
+  document.body.appendChild(cover);
 
   const filename = `${file.ref_number.replace(/\//g, "-")}-timeline.pdf`;
   try {
-    const html2pdf = (await import("html2pdf.js")).default;
-    await html2pdf()
-      .set({
-        margin: [8, 8, 10, 8],
-        filename,
-        image: { type: "jpeg", quality: 0.98 },
-        html2canvas: { scale: 2, useCORS: true, backgroundColor: "#ffffff", logging: false },
-        jsPDF: { unit: "mm", format: "a4", orientation: "portrait" },
-        pagebreak: { mode: ["css", "legacy"] },
-      })
-      .from(host)
-      .save();
+    // Give the browser a frame to lay the document out (and load fonts).
+    if (document.fonts?.ready) { try { await document.fonts.ready; } catch { /* ignore */ } }
+    await new Promise<void>((r) => requestAnimationFrame(() => r()));
+    await new Promise<void>((r) => setTimeout(r, 60));
+
+    const { default: html2canvas } = await import("html2canvas-pro");
+    const canvas = await html2canvas(doc, {
+      scale: 2,
+      useCORS: true,
+      backgroundColor: "#ffffff",
+      logging: false,
+      windowWidth: doc.scrollWidth,
+      windowHeight: doc.scrollHeight,
+    });
+
+    const pdf = new jsPDF({ unit: "pt", format: "a4", orientation: "portrait" });
+    const pageW = pdf.internal.pageSize.getWidth();
+    const pageH = pdf.internal.pageSize.getHeight();
+    const margin = 22;
+    const usableW = pageW - margin * 2;
+    const usableH = pageH - margin * 2;
+    const pxToPt = usableW / canvas.width;          // canvas px -> PDF pt
+    const sliceHpx = Math.max(1, Math.floor(usableH / pxToPt));
+
+    let rendered = 0;
+    let firstPage = true;
+    while (rendered < canvas.height) {
+      const hpx = Math.min(sliceHpx, canvas.height - rendered);
+      const pageCanvas = document.createElement("canvas");
+      pageCanvas.width = canvas.width;
+      pageCanvas.height = hpx;
+      const ctx = pageCanvas.getContext("2d");
+      if (ctx) {
+        ctx.fillStyle = "#ffffff";
+        ctx.fillRect(0, 0, pageCanvas.width, pageCanvas.height);
+        ctx.drawImage(canvas, 0, rendered, canvas.width, hpx, 0, 0, canvas.width, hpx);
+      }
+      const img = pageCanvas.toDataURL("image/jpeg", 0.95);
+      if (!firstPage) pdf.addPage();
+      pdf.addImage(img, "JPEG", margin, margin, usableW, hpx * pxToPt);
+      firstPage = false;
+      rendered += hpx;
+    }
+
+    const blob = pdf.output("blob");
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 4000);
   } finally {
-    host.remove();
+    cover.remove();
   }
 }
