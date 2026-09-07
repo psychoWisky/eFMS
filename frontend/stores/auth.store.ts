@@ -16,6 +16,10 @@ export interface AuthUser {
   roles: EfmsRole[];
   can_sign: boolean;
   is_active?: boolean;
+  // Present only on a project (PI) profile — used by the profile switcher
+  // to show which project a "<Name> PI…" identity belongs to.
+  project_number?: string | null;
+  project_name?: string | null;
 }
 
 interface AuthState {

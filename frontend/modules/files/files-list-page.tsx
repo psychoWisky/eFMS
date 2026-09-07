@@ -10,6 +10,7 @@ import { EmptyState } from "@/components/feedback/empty-state";
 import { FileClassificationBadge } from "@/components/shared/file-classification-badge";
 import { SearchableSelect } from "@/components/shared/searchable-select";
 import { paginate, TablePagination } from "@/components/shared/table-pagination";
+import { useTableSearchSort, SortTh } from "@/components/shared/table-controls";
 
 interface EfmsFile {
   id: string;
@@ -26,9 +27,23 @@ interface EfmsFile {
 
 const STATUSES = ["All", "draft", "active", "released"];
 
+const fileRowText = (f: EfmsFile) =>
+  [f.ref_number, f.subject, f.category, f.is_released ? "released" : f.status, f.priority, formatDate(f.updated_at, "relative")]
+    .filter(Boolean).join(" ");
+const fileSortValue = (f: EfmsFile, key: string): string | number | Date | null => {
+  switch (key) {
+    case "ref": return f.ref_number;
+    case "subject": return f.subject;
+    case "category": return f.category;
+    case "status": return f.is_released ? "released" : f.status;
+    case "priority": return f.priority;
+    case "updated": return new Date(f.updated_at);
+    default: return null;
+  }
+};
+
 export function FilesListPage() {
   const router = useRouter();
-  const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("All");
   const [page, setPage] = useState(1);
 
@@ -40,14 +55,12 @@ export function FilesListPage() {
     },
   });
 
-  const filtered = files.filter((f) => {
-    const q = search.toLowerCase();
+  const statusFiltered = files.filter((f) => {
     const displayStatus = f.is_released ? "released" : f.status;
-    const matchSearch = !search || f.ref_number.toLowerCase().includes(q) || f.subject.toLowerCase().includes(q);
-    const matchStatus = statusFilter === "All" || displayStatus === statusFilter;
-    return matchSearch && matchStatus;
+    return statusFilter === "All" || displayStatus === statusFilter;
   });
-  const { pageRows, total, totalPages, page: safePage, start } = paginate(filtered, page);
+  const t = useTableSearchSort(statusFiltered, fileRowText, fileSortValue, { key: "updated", dir: "desc" });
+  const { pageRows, total, totalPages, page: safePage, start } = paginate(t.view, page);
 
   return (
     <div className="space-y-5 animate-fade-in">
@@ -65,19 +78,19 @@ export function FilesListPage() {
       <div className="flex items-center gap-3 flex-wrap">
         <div className="relative flex-1 min-w-[220px] max-w-[360px]">
           <Search size={16} className="absolute left-4 top-1/2 -translate-y-1/2 text-[#9CA3AF]" />
-          <input value={search} onChange={(e) => { setSearch(e.target.value); setPage(1); }} placeholder="Search files…" className="form-input pl-10 h-11" />
+          <input value={t.query} onChange={(e) => { t.setQuery(e.target.value); setPage(1); }} placeholder="Search all columns…" className="form-input pl-10 h-11" />
         </div>
         <div className="min-w-[170px]">
           <SearchableSelect
             options={STATUSES.map((s) => ({ value: s, label: s === "All" ? "All Statuses" : fileStatusLabel(s) }))}
             value={statusFilter}
-            onChange={setStatusFilter}
+            onChange={(v) => { setStatusFilter(v); setPage(1); }}
             clearable={false}
             searchPlaceholder="Search…"
           />
         </div>
         <span className="text-[14px] text-[#4A5568] ml-auto">
-          {isLoading ? "Loading…" : `${filtered.length} file${filtered.length !== 1 ? "s" : ""}`}
+          {isLoading ? "Loading…" : `${t.view.length} file${t.view.length !== 1 ? "s" : ""}`}
         </span>
       </div>
 
@@ -89,19 +102,19 @@ export function FilesListPage() {
           </div>
         ) : isError ? (
           <EmptyState icon={FileText} title="Failed to load files" description="Could not connect to the server. Please try again." className="m-6" />
-        ) : filtered.length === 0 ? (
+        ) : t.view.length === 0 ? (
           <EmptyState icon={FileText} title="No files found" description={files.length === 0 ? "Create your first file using the button above." : "Try adjusting your search or filters."} className="m-6" />
         ) : (
           <div className="overflow-x-auto">
             <table className="enterprise-table">
               <thead>
                 <tr>
-                  <th>File Ref</th>
-                  <th>Subject</th>
-                  <th>Category</th>
-                  <th>Status</th>
-                  <th>Priority</th>
-                  <th>Last Updated</th>
+                  <SortTh label="File Ref" sortKey="ref" state={t} />
+                  <SortTh label="Subject" sortKey="subject" state={t} />
+                  <SortTh label="Category" sortKey="category" state={t} />
+                  <SortTh label="Status" sortKey="status" state={t} />
+                  <SortTh label="Priority" sortKey="priority" state={t} />
+                  <SortTh label="Last Updated" sortKey="updated" state={t} />
                   <th>Action</th>
                 </tr>
               </thead>

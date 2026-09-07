@@ -32,6 +32,7 @@ interface AdminUser {
   id: string;
   full_name: string;
   email: string;
+  employee_code?: string | null;
   active_role: string | null;
   is_active: boolean;
 }
@@ -42,6 +43,9 @@ const LABEL = "block text-sm font-semibold text-gray-600 mb-1";
 export function ProjectManagementSection() {
   const qc = useQueryClient();
   const [form, setForm] = useState({ name: "", total_funding: "", funding_agency: "", start_date: "", end_date: "" });
+  // Optional PI to assign at creation time. Empty string = create unassigned
+  // (the existing flow — assign later with the Assign button).
+  const [createAssignUserId, setCreateAssignUserId] = useState("");
   const [assignTarget, setAssignTarget] = useState<{ project: Project; mode: "assign" | "reassign" } | null>(null);
   const [assignUserId, setAssignUserId] = useState("");
 
@@ -56,7 +60,8 @@ export function ProjectManagementSection() {
   const { data: eligibleUsers = [] } = useQuery<AdminUser[]>({
     queryKey: ["auth-admin-users", "active"],
     queryFn: async () => (await api.get("/auth/admin/users?status=active")).data,
-    enabled: !!assignTarget,
+    // Used by the assign/reassign modal AND the optional PI field in the
+    // Create Project form, so it always loads on this screen.
   });
   const candidates = eligibleUsers.filter((u) => u.active_role !== "super_admin");
 
@@ -80,8 +85,12 @@ export function ProjectManagementSection() {
         funding_agency: form.funding_agency || undefined,
         start_date: form.start_date || undefined,
         end_date: form.end_date || undefined,
+        // Optional — only sent when a PI was picked; otherwise the project
+        // is created unassigned exactly as before.
+        assign_user_id: createAssignUserId || undefined,
       });
       setForm({ name: "", total_funding: "", funding_agency: "", start_date: "", end_date: "" });
+      setCreateAssignUserId("");
     });
   }
 
@@ -112,7 +121,17 @@ export function ProjectManagementSection() {
       <div className="bg-gray-50 rounded-xl border border-gray-200 p-4 mb-5">
         <p className="text-sm font-semibold text-gray-700 mb-3">Create Project</p>
         <div className="grid grid-cols-2 gap-3 mb-3">
-          <div className="col-span-2"><label className={LABEL}>Project Name *</label><input value={form.name} onChange={(e) => setForm((s) => ({ ...s, name: e.target.value }))} placeholder="e.g. ABC Research Project" className={INPUT} /></div>
+          <div><label className={LABEL}>Project Name *</label><input value={form.name} onChange={(e) => setForm((s) => ({ ...s, name: e.target.value }))} placeholder="e.g. ABC Research Project" className={INPUT} /></div>
+          <div>
+            <label className={LABEL}>Assign PI <span className="font-normal text-gray-400">(optional — you can assign later)</span></label>
+            <SearchableSelect
+              options={candidates.map((u) => ({ value: u.id, label: u.employee_code ? `${u.full_name} (${u.employee_code})` : `${u.full_name} — ${u.email}` }))}
+              value={createAssignUserId}
+              onChange={setCreateAssignUserId}
+              placeholder="Leave empty to assign later"
+              searchPlaceholder="Search users…"
+            />
+          </div>
           <div><label className={LABEL}>Funding Agency</label><input value={form.funding_agency} onChange={(e) => setForm((s) => ({ ...s, funding_agency: e.target.value }))} placeholder="e.g. ICAR" className={INPUT} /></div>
           <div><label className={LABEL}>Total Funding</label><input type="number" value={form.total_funding} onChange={(e) => setForm((s) => ({ ...s, total_funding: e.target.value }))} placeholder="e.g. 2500000" className={INPUT} /></div>
           <div><label className={LABEL}>Start Date</label><input type="date" value={form.start_date} onChange={(e) => setForm((s) => ({ ...s, start_date: e.target.value }))} className={INPUT} /></div>

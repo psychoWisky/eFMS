@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from typing import Optional, List
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, func
 from pydantic import BaseModel
 
 from app.db.base import get_db
@@ -14,7 +14,7 @@ from app.models.efms import EfmsFile, FileStatus
 from app.models.efms_extra import Docket, FileRemark
 from app.api.v1.endpoints.efms_files import (
     _load_file, _assert_tracking_access, _has_full_remark_visibility,
-    _finalize_current_holder_note,
+    _finalize_current_holder_note, _finalize_any_current_holder_note,
 )
 from app.utils.person_info import person_info_map
 
@@ -25,21 +25,41 @@ router = APIRouter(prefix="/docket", tags=["Docket"])
 
 @router.get("", response_model=List[dict])
 async def my_docket(db: AsyncSession = Depends(get_db), user: User = Depends(get_current_verified_user)):
-    """Files currently forwarded TO me (I am the current holder).
+    """Files currently forwarded TO me by SOMEONE ELSE (I am the current
+    holder and did NOT create the file).
 
-    A file's creator is also its initial current_holder_id (set at creation,
-    before any routing), so a never-forwarded Draft would otherwise show up
-    in its own creator's Docket despite not being "received" work at all —
-    excluded here via status != draft, which is equivalent to "never
-    forwarded" since the first forward always flips status off draft
-    (see route_file)."""
+    A file I created lives in "My Files" exclusively — it never appears in
+    my own Docket, even when I currently hold it (a fresh draft, or a file
+    I reopened after release). Docket is strictly "work others sent me".
+    `created_by != me` is what enforces that; `status != draft` additionally
+    keeps out any lingering draft-state file that slipped through."""
     result = await db.execute(
         select(EfmsFile)
-        .where(EfmsFile.current_holder_id == user.id, EfmsFile.status != FileStatus.draft)
+        .where(
+            EfmsFile.current_holder_id == user.id,
+            EfmsFile.created_by != user.id,
+            EfmsFile.status != FileStatus.draft,
+        )
         .order_by(EfmsFile.updated_at.desc())
     )
     files = result.scalars().all()
-    from app.models.efms import RouteEntry
+    from app.models.efms import RouteEntry, HolderNote
+
+    # Which of these files does the current holder have unsent notesheet
+    # edits on — i.e. an is_current HolderNote row of their own with real
+    # content, meaning they've written something and not yet forwarded.
+    # One batched query; the Docket badges these as "Draft saved".
+    _draft_ids = set()
+    if files:
+        _rows = (await db.execute(
+            select(HolderNote.file_id).where(
+                HolderNote.file_id.in_([f.id for f in files]),
+                HolderNote.user_id == user.id,
+                HolderNote.is_current == True,
+                func.length(func.trim(HolderNote.content)) > 0,
+            )
+        )).scalars().all()
+        _draft_ids = set(_rows)
 
     # Find who last forwarded each file to me (still one routing-history query
     # per file — unchanged, unrelated to this task), then batch-resolve all
@@ -77,6 +97,9 @@ async def my_docket(db: AsyncSession = Depends(get_db), user: User = Depends(get
             "can_release": str(f.created_by) == str(user.id),
             "from_user_name": from_info.full_name if from_info else None,
             "from_user_info": from_info.model_dump() if from_info else None,
+            # I hold this file and have saved notesheet edits I haven't
+            # forwarded yet — the Docket badges it "Draft saved".
+            "has_unsent_edits": f.id in _draft_ids,
         })
     return out
 
@@ -108,9 +131,12 @@ async def release_file(file_id: UUID, db: AsyncSession = Depends(get_db), user: 
         )
         db.add(docket)
 
-    # Finalize the releaser's current holding-period Notesheet — nobody
-    # holds the file once released, so nothing should remain editable.
-    await _finalize_current_holder_note(db, file_id, user.id)
+    # Finalize whoever's holding-period Notesheet is currently editable —
+    # nobody holds the file once released, so nothing should remain
+    # writable. Must close the *actual* current holder's row (not the
+    # releaser's), since the creator can release a file another user still
+    # holds; leaving that row open would 409 a later reopen + first save.
+    await _finalize_any_current_holder_note(db, file_id)
 
     # Clear current_holder so the file leaves everyone's docket
     file.current_holder_id = None

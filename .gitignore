@@ -11,3 +11,8 @@ backend/.env
 # stray root lockfile (real one lives in frontend/)
 /package-lock.json
 frontend/package-lock.json
+
+# local-only backend data
+backend/seed.py
+backend/uploads/
+uploads/

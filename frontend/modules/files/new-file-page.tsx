@@ -25,7 +25,11 @@ interface NewFileFormProps { onSuccess?: () => void; }
 export function NewFilePage() { return <NewFileForm />; }
 
 const DRAFT_KEY = "efms-new-file-draft";
-const DEFAULT_NOTESHEET_HTML = "<p>Write your official notesheet here…</p>";
+// The editor starts genuinely empty; the "Write your official notesheet
+// here…" line is a visual hint rendered over the editor (see the
+// EditorContent block below), not real content — so it disappears the
+// moment the user types and is never submitted.
+const DEFAULT_NOTESHEET_HTML = "";
 
 export function NewFileForm({ onSuccess }: NewFileFormProps) {
   const qc = useQueryClient();
@@ -77,7 +81,7 @@ export function NewFileForm({ onSuccess }: NewFileFormProps) {
   // Tiptap WYSIWYG editor (shared config — see components/shared/rich-text-editor.tsx)
   const editor = useRichTextEditor({
     content: DEFAULT_NOTESHEET_HTML,
-    onChange: (html) => setNotesheetDirty(html !== DEFAULT_NOTESHEET_HTML),
+    onChange: (html) => setNotesheetDirty(!isNotesheetEmpty(html)),
   });
 
   // Restore draft on mount
@@ -86,7 +90,7 @@ export function NewFileForm({ onSuccess }: NewFileFormProps) {
     if (saved && editor) {
       try {
         const { content, subject: s, category: c, priority: p } = JSON.parse(saved);
-        if (content) { editor.commands.setContent(content); setDraftRestored(true); setNotesheetDirty(content !== DEFAULT_NOTESHEET_HTML); }
+        if (content) { editor.commands.setContent(content); setDraftRestored(true); setNotesheetDirty(!isNotesheetEmpty(content)); }
         if (s) setSubject(s);
         if (c) setCategory(c);
         if (p) setPriority(p);
@@ -461,7 +465,14 @@ export function NewFileForm({ onSuccess }: NewFileFormProps) {
           <p className="text-xs text-gray-400">Paste from Word / PDF — formatting is preserved</p>
         </div>
         <RichTextToolbar editor={editor} />
-        <EditorContent editor={editor} className="min-h-[560px]" />
+        <div className="relative">
+          <EditorContent editor={editor} className="min-h-[560px]" />
+          {editor && !notesheetDirty && isNotesheetEmpty(editor.getHTML()) && (
+            <p className="pointer-events-none absolute left-5 top-5 text-base text-gray-400 select-none">
+              Write your official notesheet here…
+            </p>
+          )}
+        </div>
         {editor && (
           <div className="px-5 py-2 border-t border-gray-100 text-xs text-gray-400 text-right">
             Words: {editor.getText().split(/\s+/).filter(Boolean).length}

@@ -11,7 +11,7 @@ import { cn, formatDate, getAttachmentPreviewKind, isNotesheetEmpty, hasRealNote
 import {
   ChevronLeft, ChevronRight, ChevronDown, FileText, Download, ArrowRight,
   Loader2, Lock, Clock, MessageSquare, Upload, X, PenLine,
-  CheckCircle2, XCircle, Trash2, Pencil, Save, FileX2, Paperclip,
+  CheckCircle2, XCircle, Trash2, Pencil, Save, FileX2, Paperclip, RotateCcw,
 } from "lucide-react";
 import PdfSignatureCanvas, { type SignatureStamp } from "@/components/signature/pdf-signature-canvas";
 import OtpVerifyModal from "@/components/signature/otp-verify-modal";
@@ -362,6 +362,33 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
   const deleteFileMutation = useMutation({
     mutationFn: () => api.delete(`/efms/files/${fileId}`),
   });
+
+  // Reopen (reactivate) a released file — original creator only. Uses the
+  // same POST /docket/{id}/reopen the "Use Existing Released File" picker
+  // already uses; nothing new server-side.
+  const reopenFileMutation = useMutation({
+    mutationFn: () => api.post(`/docket/${fileId}/reopen`, {}),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["efms-file", fileId] });
+      qc.invalidateQueries({ queryKey: ["efms-files-outbox"] });
+      qc.invalidateQueries({ queryKey: ["docket-released-mine"] });
+      qc.invalidateQueries({ queryKey: ["my-docket"] });
+      showSuccess("File reopened — it is active again and back with you.");
+    },
+    onError: (err: unknown) => {
+      const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      toast.error(msg ?? "Could not reopen this file.");
+    },
+  });
+
+  async function handleReopenFile() {
+    const confirmed = await confirmAction({
+      title: "Reopen this released file?",
+      text: "The file becomes Active again and returns to you as the current holder, so you can continue its workflow.",
+      confirmText: "Reopen",
+    });
+    if (confirmed) reopenFileMutation.mutate();
+  }
 
   async function handleDeleteDraft() {
     const confirmed = await confirmAction({
@@ -1070,6 +1097,13 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                 }}
                   className="flex items-center gap-1.5 px-4 py-2 bg-[#0D6E6E] text-white rounded-xl text-sm font-semibold hover:bg-[#178F8F]">
                   <ArrowRight size={15} /> Forward to Recipient
+                </button>
+              )}
+              {isReleased && isCreator && (
+                <button onClick={handleReopenFile} disabled={reopenFileMutation.isPending}
+                  className="flex items-center gap-1.5 px-4 py-2 bg-[#0D6E6E] text-white rounded-xl text-sm font-semibold hover:bg-[#178F8F] disabled:opacity-50">
+                  {reopenFileMutation.isPending ? <Loader2 size={14} className="animate-spin" /> : <RotateCcw size={15} />}
+                  Reopen File
                 </button>
               )}
             </div>

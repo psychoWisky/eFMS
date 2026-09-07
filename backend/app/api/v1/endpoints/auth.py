@@ -122,6 +122,11 @@ def _parse_dob(s: Optional[str]) -> Optional[date]:
 # ── Helpers shared by login steps ────────────────────────────────────────────
 
 def build_user_brief(user: User) -> UserBrief:
+    # Only surface project fields when the relationship is already loaded on
+    # this instance (the my-profiles query eager-loads it). Touching
+    # user.project unconditionally would lazy-load in an async context for
+    # every other caller (login, switch-profile, refresh) and raise.
+    proj = user.__dict__.get("project")
     return UserBrief(
         id=str(user.id),
         email=user.email,
@@ -133,6 +138,8 @@ def build_user_brief(user: User) -> UserBrief:
         roles=[r.role for r in user.roles],
         can_sign=user.can_sign,
         is_active=user.is_active,
+        project_number=proj.project_number if proj else None,
+        project_name=proj.name if proj else None,
     )
 
 
@@ -445,7 +452,7 @@ async def list_my_profiles(
     derived from the caller's own verified token."""
     person_id = _resolve_person_id(current_user)
     result = await db.execute(
-        select(User).options(selectinload(User.roles))
+        select(User).options(selectinload(User.roles), selectinload(User.project))
         .where(or_(User.id == person_id, User.origin_user_id == person_id))
         .order_by(User.origin_user_id.is_(None).desc(), User.created_at)
     )
@@ -583,6 +590,10 @@ async def _set_single_role(db: AsyncSession, user: User, role: str) -> None:
     existing = await db.execute(select(UserRole).where(UserRole.user_id == user.id))
     for ur in existing.scalars().all():
         await db.delete(ur)
+    # Flush the deletes before inserting so a re-added (user_id, role) pair
+    # can never collide with the outgoing row on uq_user_role within one
+    # unit-of-work flush.
+    await db.flush()
     user.active_role = role
     db.add(UserRole(user_id=user.id, role=role))
 
@@ -886,11 +897,13 @@ async def edit_user(
         user.establishment_id = body.establishment_id
     if body.department_id is not None:
         user.department_id = body.department_id
-    if body.role is not None:
-        # Re-submitting a user's existing role is a no-op that skips
-        # catalog validation entirely — only an actual role change is
-        # checked against the roles table.
-        role = body.role if body.role == user.active_role else await _validate_assignable_role(db, body.role)
+    # Re-submitting a user's existing role is a true no-op — skip catalog
+    # validation AND the UserRole delete+reinsert entirely. Rewriting the
+    # same (user_id, role) row tripped uq_user_role on commit (INSERT of the
+    # identical pair racing the DELETE in one flush) → 500. Only an actual
+    # role change touches the roles table or the user_roles rows.
+    if body.role is not None and body.role != user.active_role:
+        role = await _validate_assignable_role(db, body.role)
         if (
             role != SystemRole.SUPER_ADMIN
             and user.active_role == SystemRole.SUPER_ADMIN

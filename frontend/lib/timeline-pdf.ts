@@ -28,6 +28,13 @@ export interface TimelinePdfFile {
   current_holder_info: PersonInfo | null;
 }
 
+export interface TimelinePdfMyNote {
+  sequence: number;
+  is_current: boolean;
+  updated_at: string;
+  content: string;
+}
+
 function personLine(p?: PersonInfo | null, fallback = "System"): string {
   if (!p) return `<span class="tl-muted">${escapeHtml(fallback)}</span>`;
   const meta = [p.designation, p.department_name].filter(Boolean).join(" · ");
@@ -141,9 +148,24 @@ const TIMELINE_STYLE = `
     border-top: 2px solid #0D6E6E; margin-top: 18px; padding-top: 7px;
     font-size: 9px; letter-spacing: 0.5px; color: #7C8A8A; text-align: center;
   }
+
+  .tl-doc .mynotes { border: 1px solid #BFDEDB; border-left: 4px solid #0D6E6E; background: #EEF6F5; border-radius: 4px; padding: 10px 12px; margin-bottom: 16px; }
+  .tl-doc .mynotes-head { font-size: 11px; font-weight: 700; letter-spacing: 0.5px; text-transform: uppercase; color: #0A5757; margin-bottom: 8px; }
+  .tl-doc .mynote { margin-bottom: 8px; }
+  .tl-doc .mynote:last-child { margin-bottom: 0; }
+  .tl-doc .mynote-meta { font-size: 10px; font-weight: 700; color: #4A4A4A; margin-bottom: 4px; }
+  .tl-doc .mynote-time { font-weight: 400; color: #7C8A8A; margin-left: 6px; }
+  .tl-doc .mynote-body { font-size: 12px; line-height: 1.55; color: #1A1A1A; background: #ffffff; border: 1px solid #BFDEDB; border-radius: 3px; padding: 7px 10px; }
+  .tl-doc .mynote-body p { margin: 0 0 5px 0; }
+  .tl-doc .mynote-body p:last-child { margin-bottom: 0; }
 `;
 
-function buildBody(file: TimelinePdfFile, events: TimelinePdfEvent[], logoUrl: string): string {
+function buildBody(
+  file: TimelinePdfFile,
+  events: TimelinePdfEvent[],
+  logoUrl: string,
+  myNotes: TimelinePdfMyNote[] = [],
+): string {
   const generated = escapeHtml(formatDate(new Date(), "datetime"));
   const holder = file.current_holder_info
     ? escapeHtml(
@@ -157,6 +179,19 @@ function buildBody(file: TimelinePdfFile, events: TimelinePdfEvent[], logoUrl: s
   const rows = events.length
     ? events.map(eventBlock).join("")
     : `<p class="tl-empty">No timeline events recorded.</p>`;
+
+  const realMyNotes = myNotes.filter((n) => hasRealNotesheetContent(n.content));
+  const myNotesBlock = realMyNotes.length
+    ? `<div class="mynotes">
+         <div class="mynotes-head">Your notes on this file</div>
+         ${realMyNotes.map((n) => `
+           <div class="mynote">
+             <div class="mynote-meta">Note ${n.sequence}${n.is_current ? " &middot; current holding" : ""}
+               <span class="mynote-time">${escapeHtml(formatDate(n.updated_at, "datetime"))} IST</span></div>
+             <div class="mynote-body">${toSafeNotesheetHtml(n.content)}</div>
+           </div>`).join("")}
+       </div>`
+    : "";
 
   return `
   <table class="letterhead" cellpadding="0" cellspacing="0">
@@ -184,6 +219,8 @@ function buildBody(file: TimelinePdfFile, events: TimelinePdfEvent[], logoUrl: s
     </table>
   </div>
 
+  ${myNotesBlock}
+
   <div class="timeline">${rows}</div>
 
   <div class="footer">Assam Veterinary and Fishery University &bull; eFMS &mdash; File Timeline</div>
@@ -197,7 +234,11 @@ function buildBody(file: TimelinePdfFile, events: TimelinePdfEvent[], logoUrl: s
  *  ("Preparing your PDF…") rather than off-screen: html2canvas reliably
  *  captures a laid-out, visible node, whereas a `left:-99999px` node often
  *  rasterises blank. The cover is removed only after the PDF is produced. */
-export async function downloadTimelinePdf(file: TimelinePdfFile, events: TimelinePdfEvent[]): Promise<void> {
+export async function downloadTimelinePdf(
+  file: TimelinePdfFile,
+  events: TimelinePdfEvent[],
+  myNotes: TimelinePdfMyNote[] = [],
+): Promise<void> {
   const logoUrl = `${window.location.origin}/avfu_letterhead_logo.png`;
 
   // Preload the crest so html2canvas captures it rather than a blank box.
@@ -222,7 +263,7 @@ export async function downloadTimelinePdf(file: TimelinePdfFile, events: Timelin
   const doc = document.createElement("div");
   doc.className = "tl-doc";
   doc.style.cssText = "width:794px;max-width:100%;background:#ffffff;";
-  doc.innerHTML = `<style>${TIMELINE_STYLE}</style>${buildBody(file, events, logoUrl)}`;
+  doc.innerHTML = `<style>${TIMELINE_STYLE}</style>${buildBody(file, events, logoUrl, myNotes)}`;
   cover.appendChild(doc);
   document.body.appendChild(cover);
 

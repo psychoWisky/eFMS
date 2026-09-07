@@ -209,12 +209,18 @@ export function EFMSTopNav({ sidebarWidth }: { sidebarWidth: number }) {
                     {myProfiles.map((p) => {
                       const isCurrent = p.id === user?.id;
                       const isDisabled = p.is_active === false;
+                      // For a project (PI) profile, show the project name under
+                      // the "<Name> PI…" line so a person with several PI
+                      // profiles can tell them apart at a glance.
+                      const projectSub = p.project_name
+                        ? `${p.project_number ? `PI${p.project_number} · ` : ""}${p.project_name}`
+                        : null;
                       return (
                         <button
                           key={p.id}
                           disabled={isCurrent || isDisabled || switchingId === p.id}
                           onClick={() => handleSwitchProfile(p.id)}
-                          title={isDisabled ? "This project profile is no longer active." : undefined}
+                          title={isDisabled ? "This project profile is no longer active." : projectSub ?? undefined}
                           className={cn(
                             "w-full flex items-center gap-3 px-4 py-2 text-sm text-left",
                             isCurrent ? "text-[#0D6E6E] font-semibold" : "text-[#1A1A2E]",
@@ -222,8 +228,13 @@ export function EFMSTopNav({ sidebarWidth }: { sidebarWidth: number }) {
                           )}
                         >
                           {switchingId === p.id ? <Loader2 size={14} className="animate-spin shrink-0" /> : isDisabled ? <Lock size={14} className="shrink-0" /> : <Repeat size={14} className="shrink-0" />}
-                          <span className="truncate">{p.full_name}</span>
-                          {isCurrent && <span className="ml-auto text-xs text-gray-400 shrink-0">Current</span>}
+                          <span className="min-w-0 flex-1">
+                            <span className="block truncate">{p.full_name}</span>
+                            {projectSub && (
+                              <span className="block truncate text-xs text-[#9CA3AF] font-normal">{projectSub}</span>
+                            )}
+                          </span>
+                          {isCurrent && <span className="ml-auto text-xs text-gray-400 shrink-0 self-center">Current</span>}
                         </button>
                       );
                     })}

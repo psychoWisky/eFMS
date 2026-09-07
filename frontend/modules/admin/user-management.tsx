@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 import { SearchableSelect } from "@/components/shared/searchable-select";
 import { paginate, TablePagination } from "@/components/shared/table-pagination";
+import { useTableSearchSort, TableSearchInput, SortTh } from "@/components/shared/table-controls";
 
 interface Establishment { id: string; name: string; code: string | null; is_active: boolean; }
 interface Department { id: string; name: string; code: string | null; establishment_id: string | null; is_active: boolean; }
@@ -30,6 +31,22 @@ interface AdminUser {
 }
 
 type StatusFilter = "all" | "active" | "inactive";
+
+const adminUserRowText = (u: AdminUser) =>
+  [u.full_name, u.email, u.designation, u.department_name, u.establishment_name,
+   u.employee_code, u.mobile, u.active_role?.replace(/_/g, " "), u.is_active ? "active" : "inactive"]
+    .filter(Boolean).join(" ");
+const adminUserSortValue = (u: AdminUser, key: string): string | number | null => {
+  switch (key) {
+    case "name": return u.full_name;
+    case "email": return u.email;
+    case "designation": return u.designation ?? "";
+    case "department": return u.department_name ?? "";
+    case "role": return u.active_role ?? "";
+    case "status": return u.is_active ? "active" : "inactive";
+    default: return null;
+  }
+};
 
 const DEACTIVATION_REASON_OPTIONS = [
   { value: "retired", label: "Retired" },
@@ -622,6 +639,7 @@ export function UserManagementSection() {
     queryKey: ["user-management-users", statusFilter],
     queryFn: async () => (await api.get(`/auth/admin/users?status=${statusFilter}`)).data,
   });
+  const t = useTableSearchSort(users, adminUserRowText, adminUserSortValue, { key: "name", dir: "asc" });
   const { data: establishments = [] } = useQuery<Establishment[]>({
     queryKey: ["admin-establishments-all"], queryFn: async () => (await api.get("/admin/establishments/all")).data,
   });
@@ -650,9 +668,15 @@ export function UserManagementSection() {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <h2 className="text-lg font-bold text-gray-800">Users ({users.length})</h2>
-        <div className="flex items-center gap-2">
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <h2 className="text-lg font-bold text-gray-800">Users ({t.view.length})</h2>
+        <div className="flex items-center gap-2 flex-wrap">
+          <TableSearchInput
+            value={t.query}
+            onChange={(v) => { t.setQuery(v); setPage(1); }}
+            placeholder="Search name, email, dept, role…"
+            className="w-full sm:w-64"
+          />
           <select
             value={statusFilter}
             onChange={(e) => { setStatusFilter(e.target.value as StatusFilter); setPage(1); }}
@@ -679,15 +703,21 @@ export function UserManagementSection() {
       {isLoading ? (
         <div className="flex items-center gap-2 text-gray-400 py-8"><Loader2 size={16} className="animate-spin" /> Loading…</div>
       ) : (() => {
-        const { pageRows, total, totalPages, page: safePage, start } = paginate(users, page);
+        const { pageRows, total, totalPages, page: safePage, start } = paginate(t.view, page);
         return (
         <div className="bg-white rounded-xl border border-gray-200">
           <div className="overflow-x-auto">
           <table className="w-full text-sm min-w-[900px]">
             <thead className="bg-gray-50 border-b">
-              <tr>{["Name", "Email", "Designation", "Department", "Role", "Status", "Actions"].map((h) => (
-                <th key={h} className="text-left px-4 py-3 font-semibold text-gray-600 whitespace-nowrap">{h}</th>
-              ))}</tr>
+              <tr>
+                <SortTh label="Name" sortKey="name" state={t} />
+                <SortTh label="Email" sortKey="email" state={t} />
+                <SortTh label="Designation" sortKey="designation" state={t} />
+                <SortTh label="Department" sortKey="department" state={t} />
+                <SortTh label="Role" sortKey="role" state={t} />
+                <SortTh label="Status" sortKey="status" state={t} />
+                <th className="text-left px-4 py-3 text-xs font-semibold uppercase tracking-wide text-gray-500 whitespace-nowrap">Actions</th>
+              </tr>
             </thead>
             <tbody className="divide-y divide-gray-50">
               {pageRows.map((u) => (

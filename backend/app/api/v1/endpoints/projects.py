@@ -41,6 +41,9 @@ class ProjectCreate(BaseModel):
     funding_agency: Optional[str] = None
     start_date: Optional[date] = None
     end_date: Optional[date] = None
+    # Optional: assign a PI (create the project profile) in the same step.
+    # Omit it to keep the existing two-step flow — create now, Assign later.
+    assign_user_id: Optional[UUID] = None
 
 
 class ProjectOut(BaseModel):
@@ -155,9 +158,22 @@ async def create_project(body: ProjectCreate, db: AsyncSession = Depends(get_db)
         created_by=user.id,
     )
     db.add(p)
+    await db.flush()
+
+    # Optional one-step assignment — same validation and profile creation as
+    # POST /projects/{id}/assign. If assign_user_id is omitted the project is
+    # simply created unassigned and the Assign button handles it later.
+    profile_name: Optional[str] = None
+    if body.assign_user_id is not None:
+        origin = await db.get(User, body.assign_user_id)
+        _assert_assignable(origin)
+        profile = await _create_project_profile(db, origin, p)
+        p.current_profile_id = profile.id
+        profile_name = profile.full_name
+
     await db.commit()
     await db.refresh(p)
-    return _project_out(p)
+    return _project_out(p, profile_name)
 
 
 @router.get("", response_model=list[ProjectOut])

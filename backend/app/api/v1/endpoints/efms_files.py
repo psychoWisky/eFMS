@@ -493,8 +493,21 @@ async def list_files(
         # default "All Files" list, and Docket, which has its own separate
         # endpoint entirely) is left exactly as before.
         people = await person_info_map({f.current_holder_id for f in files}, db)
+        # was_reopened overlay — a file that has a Docket row with
+        # released_at set but is_released now False was released by its
+        # creator and later reopened. One batched query; My Files badges it.
+        from app.models.efms_extra import Docket
+        reopened_ids = set((await db.execute(
+            select(Docket.file_id).where(
+                Docket.file_id.in_([f.id for f in files]),
+                Docket.released_at.is_not(None),
+                Docket.is_released == False,
+            )
+        )).scalars().all())
         for payload, f in zip(payloads, files):
             payload.current_holder_info = people.get(f.current_holder_id) if f.current_holder_id else None
+            payload.was_reopened = f.id in reopened_ids
+            payload.has_been_forwarded = len(f.route_entries) > 0
     return payloads
 
 
@@ -660,6 +673,42 @@ async def track_initial_notesheet(file_id: UUID, db: AsyncSession = Depends(get_
         "has_notesheet": has_notesheet,
         "accessible": accessible,
     }
+
+
+@router.get("/{file_id}/track/my-notes", response_model=list[HolderNotesheetOut])
+async def track_my_holder_notes(
+    file_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_verified_user),
+):
+    """The authenticated caller's OWN holding-period Notesheet(s) for this
+    file, oldest holding-period first — for Tracking History, so a past
+    participant who is no longer the current holder (and is neither the
+    creator nor an admin) can still read back what THEY themselves wrote
+    while holding this file.
+
+    Reachable by any tracking-eligible viewer (_assert_tracking_access,
+    the same boundary as track_file / track/notesheet). Content is always
+    included: it is the caller's own writing, never another person's
+    contribution, so no remark-visibility rule applies. Returns [] when
+    the caller has never held this file."""
+    f = await _load_file(file_id, db)
+    await _assert_tracking_access(f, user, db)
+    rows = (await db.execute(
+        select(HolderNote)
+        .where(HolderNote.file_id == file_id, HolderNote.user_id == user.id)
+        .order_by(HolderNote.sequence)
+    )).scalars().all()
+    if not rows:
+        return []
+    people = await person_info_map({user.id}, db)
+    out = []
+    for n in rows:
+        item = HolderNotesheetOut.model_validate(n)
+        item.user_info = people.get(user.id)
+        item.accessible = True
+        out.append(item)
+    return out
 
 
 @router.get("/{file_id}", response_model=FileOut)
@@ -876,6 +925,23 @@ async def _finalize_current_holder_note(db: AsyncSession, file_id: UUID, user_id
         note.is_current = False
 
 
+async def _finalize_any_current_holder_note(db: AsyncSession, file_id: UUID) -> None:
+    """Close out whichever holding-period row is currently editable for this
+    file, no matter whose it is. Used on release, where the person releasing
+    (always the creator) may not be the person who currently holds the file
+    — e.g. the file was forwarded onward and is released from the creator's
+    My Files while another user still holds it. Passing the releaser's id to
+    _finalize_current_holder_note would leave that other holder's is_current
+    row orphaned, and a later reopen + first save would then hit the
+    "already has a current holder's Notesheet open" 409. At most one such
+    row can exist per file (uq_holder_note_current_per_file)."""
+    note = (await db.execute(
+        select(HolderNote).where(HolderNote.file_id == file_id, HolderNote.is_current == True)
+    )).scalar_one_or_none()
+    if note:
+        note.is_current = False
+
+
 async def _start_holding_period(db: AsyncSession, file_id: UUID, user_id: UUID) -> HolderNote:
     """Create the next holding-period HolderNote row for user_id — a NEW
     row every time, even if this same user has held this file before, so an
@@ -1037,6 +1103,15 @@ async def save_my_holder_notesheet(
         note.content = body.content
     else:
         note.content = body.content
+
+    # Touch updated_at so a file the current holder just worked on floats to
+    # the top of their Docket / the creator's My Files. The workflow
+    # `status` is deliberately NOT changed here — "forwarded ever = active,
+    # never forwarded = draft" is the rule, and it's derived at read time
+    # (see list_files' has_been_forwarded / the Docket has_unsent_holder_note
+    # flag) rather than mutated on the row.
+    f.updated_at = datetime.now(timezone.utc)
+
     await db.commit()
     await db.refresh(note)
     people = await person_info_map({user.id}, db)

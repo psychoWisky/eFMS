@@ -110,6 +110,16 @@ class FileOut(BaseModel):
     created_at: datetime
     updated_at: datetime
     is_released: bool = False
+    # True only in the My Files (outbox) list: the file was released by its
+    # creator and later reopened (Docket row exists with released_at set but
+    # is_released now False). Lets My Files badge it as "Reopened". Always
+    # False everywhere else.
+    was_reopened: bool = False
+    # My Files (outbox) list only: whether this file has ever been forwarded
+    # (has at least one RouteEntry). My Files shows "draft" for a file the
+    # creator has never forwarded and the real workflow status otherwise —
+    # this is the flag it keys that off. Always False elsewhere.
+    has_been_forwarded: bool = False
     released_at: Optional[datetime] = None
     released_by_info: Optional[PersonInfo] = None
     creator_info: Optional[PersonInfo] = None

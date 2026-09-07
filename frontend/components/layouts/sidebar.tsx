@@ -37,21 +37,33 @@ export function EFMSSidebar({ collapsed, canToggle, onToggle }: SidebarProps) {
       className="fixed left-0 top-0 h-full bg-white border-r border-gray-200 z-30 flex flex-col overflow-hidden"
       style={{ boxShadow: "2px 0 8px rgba(0,0,0,.04)" }}
     >
-      <div className={cn("flex items-center h-16 border-b border-gray-200 flex-shrink-0", collapsed ? "justify-center px-2" : "gap-3 px-4")}>
-        <div className="w-9 h-9 rounded-xl overflow-hidden flex items-center justify-center flex-shrink-0 bg-white">
-          <Image
-            src="/avfu_logo.png"
-            alt="AVFU Logo"
-            width={36}
-            height={36}
-            className="object-contain w-full h-full"
-          />
-        </div>
+      <div
+        className={cn(
+          "flex flex-col items-center justify-center border-b border-gray-200 flex-shrink-0 bg-gradient-to-b from-[#F0F7F7] to-white",
+          collapsed ? "px-1 py-3 gap-0" : "px-4 py-5 gap-1.5",
+        )}
+      >
+        <Image
+          src="/avfu_logo.png"
+          alt="AVFU Logo"
+          width={200}
+          height={200}
+          priority
+          className={cn(
+            "object-contain flex-shrink-0 transition-all duration-200 drop-shadow-sm",
+            collapsed ? "w-[64px] h-[64px]" : "w-[168px] h-[168px]",
+          )}
+        />
         <AnimatePresence>
           {!collapsed && (
-            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
-              <p className="text-base font-bold text-[#1A1A2E]">eFMS</p>
-              <p className="text-xs text-gray-500">File Management</p>
+            <motion.div
+              initial={{ opacity: 0, y: -4 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -4 }}
+              className="text-center leading-tight"
+            >
+              <p className="text-lg font-bold tracking-tight text-[#1A1A2E]">eFMS</p>
+              <p className="text-[11px] uppercase tracking-wide text-gray-500">File Management</p>
             </motion.div>
           )}
         </AnimatePresence>

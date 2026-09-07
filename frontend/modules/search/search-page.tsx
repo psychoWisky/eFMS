@@ -9,12 +9,28 @@ import { FileClassificationBadge } from "@/components/shared/file-classification
 import { PageHeader } from "@/components/shared/page-header";
 import { SearchableSelect } from "@/components/shared/searchable-select";
 import { paginate, TablePagination } from "@/components/shared/table-pagination";
+import { useTableSearchSort, TableSearchInput, SortTh } from "@/components/shared/table-controls";
 
 interface SearchResult {
   id: string; ref_number: string; subject: string; category: string;
   status: string; priority: string; created_at: string; updated_at: string;
   is_released: boolean;
 }
+
+const resultRowText = (f: SearchResult) =>
+  [f.ref_number, f.subject, f.category, f.is_released ? "released" : f.status, f.priority, formatDate(f.created_at)]
+    .filter(Boolean).join(" ");
+const resultSortValue = (f: SearchResult, key: string): string | number | Date | null => {
+  switch (key) {
+    case "ref_number": return f.ref_number;
+    case "subject": return f.subject;
+    case "category": return f.category;
+    case "status": return f.is_released ? "released" : f.status;
+    case "priority": return f.priority;
+    case "created": return new Date(f.created_at);
+    default: return null;
+  }
+};
 
 const STATUS_COLOR: Record<string, string> = {
   draft:    "bg-gray-100 text-gray-600",
@@ -53,7 +69,9 @@ export function EFMSSearchPage() {
   });
 
   const results = status === "released" ? rawResults.filter((r) => r.is_released) : rawResults;
-  const { pageRows, total, totalPages, page: safePage, start } = paginate(results, page);
+  // Refine the returned results further (search every column) + sort.
+  const t = useTableSearchSort(results, resultRowText, resultSortValue, { key: "created", dir: "desc" });
+  const { pageRows, total, totalPages, page: safePage, start } = paginate(t.view, page);
 
   function handleSearch(e: React.FormEvent) {
     e.preventDefault();
@@ -124,16 +142,26 @@ export function EFMSSearchPage() {
             </div>
           ) : (
             <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
-              <div className="px-6 py-4 border-b border-gray-100">
-                <p className="text-sm text-gray-500">{results.length} result{results.length !== 1 ? "s" : ""} found</p>
+              <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between gap-3 flex-wrap">
+                <p className="text-sm text-gray-500">{t.view.length} of {results.length} result{results.length !== 1 ? "s" : ""}</p>
+                <TableSearchInput
+                  value={t.query}
+                  onChange={(v) => { t.setQuery(v); setPage(1); }}
+                  placeholder="Filter results…"
+                  className="w-full sm:w-64"
+                />
               </div>
               <div className="w-full overflow-x-auto">
               <table className="w-full min-w-[820px]">
                 <thead className="bg-gray-50 border-b border-gray-200">
                   <tr>
-                    {["Ref Number","Subject","Category","Status","Priority","Created","Action"].map((h) => (
-                      <th key={h} className="text-left px-4 py-3 text-xs font-semibold uppercase tracking-wide text-gray-500 whitespace-nowrap">{h}</th>
-                    ))}
+                    <SortTh label="Ref Number" sortKey="ref_number" state={t} />
+                    <SortTh label="Subject" sortKey="subject" state={t} />
+                    <SortTh label="Category" sortKey="category" state={t} />
+                    <SortTh label="Status" sortKey="status" state={t} />
+                    <SortTh label="Priority" sortKey="priority" state={t} />
+                    <SortTh label="Created" sortKey="created" state={t} />
+                    <th className="text-left px-4 py-3 text-xs font-semibold uppercase tracking-wide text-gray-500 whitespace-nowrap">Action</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100">

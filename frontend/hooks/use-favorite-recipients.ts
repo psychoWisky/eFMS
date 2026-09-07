@@ -5,6 +5,7 @@
 // response every picker already fetches — no separate "list favorites" call.
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/services/api";
+import { truncate } from "@/lib/utils";
 import type { SearchableSelectGroup, SearchableSelectOption } from "@/components/shared/searchable-select";
 
 export interface FavoritableUser {
@@ -55,7 +56,13 @@ export function useFavoriteRecipients() {
 
   function personLabel(u: FavoritableUser): string {
     const base = u.employee_code ? `${u.full_name} (${u.employee_code})` : u.full_name;
-    return u.is_project_profile ? `${base} · Project #${u.project_number}` : base;
+    if (!u.is_project_profile) return base;
+    // Show the PI number AND a short project title so the sender can tell
+    // which project a "<Name> PI…" profile belongs to. Title is trimmed so
+    // the option row stays a sensible length.
+    const pi = `PI${u.project_number ?? ""}`;
+    const title = u.project_name ? truncate(u.project_name, 32) : "";
+    return title ? `${base} · ${pi} — ${title}` : `${base} · ${pi}`;
   }
 
   /** Partition an already-fetched user list into Favorite / All Recipients

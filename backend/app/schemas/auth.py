@@ -39,6 +39,11 @@ class UserBrief(BaseModel):
     # login response (get_current_user already rejects inactive users
     # before one could be issued), so existing consumers are unaffected.
     is_active: bool = True
+    # Populated only for a project (PI) profile, so the profile switcher can
+    # show which project a "<Name> PI…" identity belongs to. Both stay None
+    # for a normal person identity — existing consumers ignore them.
+    project_number: Optional[str] = None
+    project_name: Optional[str] = None
 
     model_config = {"from_attributes": True}
 

@@ -2,13 +2,13 @@
 // New File -> "Use Existing Released File": lets the creator reopen one of
 // their own released files. Reuses the same file record — no new file is
 // created here; the backend flips is_released/status/current_holder_id only.
-import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/services/api";
 import { toast } from "sonner";
 import { showSuccess } from "@/lib/alert";
-import { ChevronLeft, Search, Unlock, Loader2, FolderOpen } from "lucide-react";
-import { formatDate, matchesRefSuffix } from "@/lib/utils";
+import { ChevronLeft, Unlock, Loader2, FolderOpen } from "lucide-react";
+import { formatDate } from "@/lib/utils";
+import { useTableSearchSort, TableSearchInput, SortTh } from "@/components/shared/table-controls";
 
 interface MyReleasedFile {
   docket_id: string;
@@ -19,6 +19,18 @@ interface MyReleasedFile {
   released_at: string | null;
 }
 
+const relRowText = (f: MyReleasedFile) =>
+  [f.ref_number, f.subject, f.category, f.released_at ? formatDate(f.released_at) : ""].filter(Boolean).join(" ");
+const relSortValue = (f: MyReleasedFile, key: string): string | number | Date | null => {
+  switch (key) {
+    case "ref_number": return f.ref_number;
+    case "subject": return f.subject;
+    case "category": return f.category;
+    case "released": return f.released_at ? new Date(f.released_at) : null;
+    default: return null;
+  }
+};
+
 export function ReopenFilePicker({
   onBack,
   onReopened,
@@ -27,7 +39,6 @@ export function ReopenFilePicker({
   onReopened: (fileId: string) => void;
 }) {
   const qc = useQueryClient();
-  const [search, setSearch] = useState("");
 
   const { data: files = [], isLoading } = useQuery<MyReleasedFile[]>({
     queryKey: ["released-mine"],
@@ -50,7 +61,7 @@ export function ReopenFilePicker({
     },
   });
 
-  const filtered = files.filter((f) => matchesRefSuffix(f.ref_number, search));
+  const t = useTableSearchSort(files, relRowText, relSortValue, { key: "released", dir: "desc" });
 
   return (
     <div>
@@ -60,21 +71,18 @@ export function ReopenFilePicker({
       <h2 className="text-xl font-bold text-gray-900 mb-1">Use Existing Released File</h2>
       <p className="text-base text-gray-500 mb-5">Select one of your own released files to reopen and continue its workflow.</p>
 
-      <div className="relative max-w-sm mb-4">
-        <Search size={16} className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400" />
-        <input
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          placeholder="Search by file number…"
-          className="w-full border border-gray-300 rounded-xl pl-10 pr-4 py-2.5 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]"
-        />
-      </div>
+      <TableSearchInput
+        value={t.query}
+        onChange={t.setQuery}
+        placeholder="Search file no., subject, category…"
+        className="max-w-sm mb-4"
+      />
 
       {isLoading ? (
         <div className="flex items-center justify-center py-16 gap-3 text-gray-400">
           <Loader2 size={22} className="animate-spin" /> Loading…
         </div>
-      ) : filtered.length === 0 ? (
+      ) : t.view.length === 0 ? (
         <div className="bg-white rounded-2xl border border-gray-200 p-12 text-center">
           <FolderOpen size={40} className="mx-auto mb-3 text-gray-200" />
           <p className="text-lg font-semibold text-gray-600">
@@ -83,26 +91,29 @@ export function ReopenFilePicker({
         </div>
       ) : (
         <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
-          <table className="w-full">
+          <div className="w-full overflow-x-auto">
+          <table className="w-full min-w-[720px]">
             <thead className="bg-gray-50 border-b border-gray-200">
               <tr>
-                {["Ref Number", "Subject", "Category", "Released On", "Action"].map((h) => (
-                  <th key={h} className="text-left px-5 py-4 text-base font-semibold text-gray-600">{h}</th>
-                ))}
+                <SortTh label="Ref Number" sortKey="ref_number" state={t} />
+                <SortTh label="Subject" sortKey="subject" state={t} />
+                <SortTh label="Category" sortKey="category" state={t} />
+                <SortTh label="Released On" sortKey="released" state={t} />
+                <th className="text-left px-4 py-3 text-xs font-semibold uppercase tracking-wide text-gray-500 whitespace-nowrap">Action</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
-              {filtered.map((f) => (
+              {t.view.map((f) => (
                 <tr key={f.docket_id} className="hover:bg-gray-50">
-                  <td className="px-5 py-4">
+                  <td className="px-4 py-3">
                     <span className="font-mono text-sm font-bold text-[#0D6E6E] bg-[#E6F4F4] px-2 py-1 rounded">{f.ref_number}</span>
                   </td>
-                  <td className="px-5 py-4 max-w-xs">
-                    <p className="text-base font-semibold text-gray-900 truncate">{f.subject}</p>
+                  <td className="px-4 py-3 max-w-xs">
+                    <p className="text-sm font-semibold text-gray-900 truncate">{f.subject}</p>
                   </td>
-                  <td className="px-5 py-4 text-base text-gray-600">{f.category}</td>
-                  <td className="px-5 py-4 text-base text-gray-500">{f.released_at ? formatDate(f.released_at, "relative") : "—"}</td>
-                  <td className="px-5 py-4">
+                  <td className="px-4 py-3 text-sm text-gray-600">{f.category}</td>
+                  <td className="px-4 py-3 text-sm text-gray-500">{f.released_at ? formatDate(f.released_at, "relative") : "—"}</td>
+                  <td className="px-4 py-3">
                     <button
                       onClick={() => reopenMutation.mutate(f.file_id)}
                       disabled={reopenMutation.isPending}
@@ -115,6 +126,7 @@ export function ReopenFilePicker({
               ))}
             </tbody>
           </table>
+          </div>
         </div>
       )}
     </div>

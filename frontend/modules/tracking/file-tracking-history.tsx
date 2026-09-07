@@ -5,13 +5,40 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/services/api";
-import { cn, formatDate, matchesRefSuffix, resolveDateRange, fileStatusBadgeClass, fileStatusLabel, type DateRangePreset } from "@/lib/utils";
+import { cn, formatDate, resolveDateRange, fileStatusBadgeClass, fileStatusLabel, type DateRangePreset } from "@/lib/utils";
 import { PersonBadge, type PersonInfo } from "@/components/shared/person-badge";
 import { FileClassificationBadge } from "@/components/shared/file-classification-badge";
-import { Search, Eye, Loader2, History } from "lucide-react";
+import { Eye, Loader2, History } from "lucide-react";
 import { TimelineModal } from "./timeline-modal";
 import { PageHeader } from "@/components/shared/page-header";
 import { paginate, TablePagination } from "@/components/shared/table-pagination";
+import { useTableSearchSort, TableSearchInput, SortTh } from "@/components/shared/table-controls";
+
+const personName = (p: PersonInfo | null | undefined) => p?.full_name ?? "";
+
+function trackingRowText(f: TrackingItem): string {
+  return [
+    f.ref_number, f.subject, fileStatusLabel(f.status), f.priority,
+    personName(f.current_holder_info), personName(f.from_user_info), personName(f.to_user_info),
+    f.current_holder_info?.designation, f.current_holder_info?.department_name,
+    f.forwarded_at ? formatDate(f.forwarded_at, "datetime") : "",
+    formatDate(f.updated_at, "datetime"),
+  ].filter(Boolean).join(" ");
+}
+function trackingSortValue(f: TrackingItem, key: string): string | number | Date | null {
+  switch (key) {
+    case "ref_number": return f.ref_number;
+    case "subject": return f.subject;
+    case "status": return fileStatusLabel(f.status);
+    case "priority": return f.priority;
+    case "holder": return personName(f.current_holder_info);
+    case "from": return personName(f.from_user_info);
+    case "to": return personName(f.to_user_info);
+    case "forwarded": return f.forwarded_at ? new Date(f.forwarded_at) : null;
+    case "updated": return new Date(f.updated_at);
+    default: return null;
+  }
+}
 
 interface TrackingItem {
   file_id: string; ref_number: string; subject: string; status: string; priority: string;
@@ -39,7 +66,6 @@ export function FileTrackingHistoryPage() {
   const [rangeId, setRangeId] = useState<DateRangePreset | "custom" | "all">("all");
   const [customFrom, setCustomFrom] = useState("");
   const [customTo, setCustomTo] = useState("");
-  const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
   const [timelineItem, setTimelineItem] = useState<TrackingItem | null>(null);
 
@@ -57,10 +83,9 @@ export function FileTrackingHistoryPage() {
     },
   });
 
-  // Ref-number search stays entirely client-side, reusing the one shared
-  // matchesRefSuffix() implementation — no second matching algorithm.
-  const filtered = items.filter((f) => matchesRefSuffix(f.ref_number, search));
-  const { pageRows, total, totalPages, page: safePage, start } = paginate(filtered, page);
+  // Search spans every column; headers sort. Both client-side.
+  const t = useTableSearchSort(items, trackingRowText, trackingSortValue, { key: "updated", dir: "desc" });
+  const { pageRows, total, totalPages, page: safePage, start } = paginate(t.view, page);
 
   return (
     <div className="min-h-screen bg-[#F5F7FA]">
@@ -99,16 +124,17 @@ export function FileTrackingHistoryPage() {
           </div>
         )}
 
-        {/* Ref number search */}
-        <div className="relative max-w-xs">
-          <Search size={16} className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400" />
-          <input value={search} onChange={(e) => { setSearch(e.target.value); setPage(1); }} placeholder="Search by file number…"
-            className="w-full border border-gray-300 rounded-xl pl-10 pr-4 py-2.5 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]" />
-        </div>
+        {/* Search — every column */}
+        <TableSearchInput
+          value={t.query}
+          onChange={(v) => { t.setQuery(v); setPage(1); }}
+          placeholder="Search file no., subject, status, people…"
+          className="max-w-sm"
+        />
 
         {isLoading ? (
           <div className="flex items-center justify-center py-16 gap-3 text-gray-400"><Loader2 size={22} className="animate-spin" /> Loading…</div>
-        ) : filtered.length === 0 ? (
+        ) : t.view.length === 0 ? (
           <div className="bg-white rounded-2xl border border-gray-200 p-12 text-center">
             <History size={40} className="mx-auto mb-3 text-gray-200" />
             <p className="text-lg font-semibold text-gray-600">{items.length === 0 ? "No files found for this range." : "No files match your search."}</p>
@@ -119,9 +145,16 @@ export function FileTrackingHistoryPage() {
             <table className="w-full min-w-[1100px]">
               <thead className="bg-gray-50 border-b border-gray-200">
                 <tr>
-                  {["File Number", "Subject", "Status", "Classification", "Current Holder", "From", "To", "Forwarded", "Last Action", "Action"].map((h) => (
-                    <th key={h} className="text-left px-4 py-3 text-xs font-semibold uppercase tracking-wide text-gray-500 whitespace-nowrap">{h}</th>
-                  ))}
+                  <SortTh label="File Number" sortKey="ref_number" state={t} />
+                  <SortTh label="Subject" sortKey="subject" state={t} />
+                  <SortTh label="Status" sortKey="status" state={t} />
+                  <SortTh label="Classification" sortKey="priority" state={t} />
+                  <SortTh label="Current Holder" sortKey="holder" state={t} />
+                  <SortTh label="From" sortKey="from" state={t} />
+                  <SortTh label="To" sortKey="to" state={t} />
+                  <SortTh label="Forwarded" sortKey="forwarded" state={t} />
+                  <SortTh label="Last Action" sortKey="updated" state={t} />
+                  <th className="text-left px-4 py-3 text-xs font-semibold uppercase tracking-wide text-gray-500 whitespace-nowrap">Action</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">

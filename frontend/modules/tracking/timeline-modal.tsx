@@ -26,7 +26,7 @@ import { cn, formatDate, hasRealNotesheetContent } from "@/lib/utils";
 import { toSafeNotesheetHtml, NOTESHEET_PROSE_CLASS } from "@/lib/notesheet-html";
 import { downloadTimelinePdf } from "@/lib/timeline-pdf";
 import { PersonBadge, type PersonInfo } from "@/components/shared/person-badge";
-import { X, FileText, ArrowRight, PenLine, Unlock, Loader2, Lock, Download } from "lucide-react";
+import { X, FileText, ArrowRight, PenLine, Unlock, Loader2, Lock, Download, Clock } from "lucide-react";
 
 interface TrackingItem {
   file_id: string; ref_number: string; subject: string; status: string; priority: string;
@@ -49,6 +49,10 @@ interface TrackEntry {
 }
 
 interface InitialNotesheet { content: string | null; has_notesheet: boolean; accessible: boolean; }
+
+// The viewer's OWN holding-period notes for this file (GET /track/my-notes)
+// — shown even when the file was created / is held by others.
+interface MyHolderNote { id: string; content: string; sequence: number; is_current: boolean; updated_at: string; }
 
 interface TimelineEvent {
   key: string;
@@ -152,8 +156,13 @@ export function TimelineModal({ item, onClose }: { item: TrackingItem; onClose: 
     queryKey: ["tracking-file-notesheet", item.file_id],
     queryFn: async () => (await api.get(`/efms/files/${item.file_id}/track/notesheet`)).data,
   });
+  const { data: myNotes = [] } = useQuery<MyHolderNote[]>({
+    queryKey: ["tracking-file-my-notes", item.file_id],
+    queryFn: async () => (await api.get(`/efms/files/${item.file_id}/track/my-notes`)).data,
+  });
 
   const isLoading = loadingTrack || loadingNotesheet;
+  const myRealNotes = myNotes.filter((n) => hasRealNotesheetContent(n.content));
   const events = buildTimeline(item, trackEntries, initialNotesheet);
 
   return (
@@ -171,7 +180,7 @@ export function TimelineModal({ item, onClose }: { item: TrackingItem; onClose: 
                 onClick={async () => {
                   setDownloading(true);
                   try {
-                    await downloadTimelinePdf(item, events);
+                    await downloadTimelinePdf(item, events, myRealNotes);
                   } catch {
                     toast.error("Could not generate the timeline PDF. Please try again.");
                   } finally {
@@ -196,6 +205,34 @@ export function TimelineModal({ item, onClose }: { item: TrackingItem; onClose: 
         </div>
 
         <div className="overflow-y-auto px-6 py-5 flex-1">
+          {/* Your own notes on this file — visible even when it was
+              created by, or is currently held by, someone else. */}
+          {myRealNotes.length > 0 && (
+            <div className="mb-5 rounded-xl border border-[#0D6E6E]/25 bg-[#F0F7F7] overflow-hidden">
+              <div className="px-4 py-2.5 border-b border-[#0D6E6E]/15">
+                <p className="text-sm font-bold text-[#0A5757]">
+                  Your notes on this file
+                  <span className="ml-2 text-xs font-semibold bg-white border border-[#0D6E6E]/20 text-[#0D6E6E] px-1.5 py-0.5 rounded-full">
+                    {myRealNotes.length}
+                  </span>
+                </p>
+              </div>
+              <div className="px-4 py-3 space-y-3">
+                {myRealNotes.map((n) => (
+                  <div key={n.id}>
+                    <div className="flex items-center gap-2 mb-1.5 text-xs text-gray-500">
+                      <span className="font-semibold text-gray-700">Note {n.sequence}</span>
+                      {n.is_current && <span className="text-[#0D6E6E] font-semibold">· current holding</span>}
+                      <span className="ml-auto flex items-center gap-1"><Clock size={11} className="text-gray-400" />{formatDate(n.updated_at, "datetime")}</span>
+                    </div>
+                    <div className={cn("bg-white border border-[#BFDEDB] rounded-lg px-3.5 py-2.5", NOTESHEET_PROSE_CLASS)}
+                      dangerouslySetInnerHTML={{ __html: toSafeNotesheetHtml(n.content) }} />
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           {isLoading ? (
             <div className="flex items-center justify-center py-16 gap-3 text-gray-400"><Loader2 className="animate-spin" size={22} /> Loading…</div>
           ) : events.length === 0 ? (

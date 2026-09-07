@@ -5,8 +5,8 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useRouter } from "next/navigation";
 import { api } from "@/services/api";
 import { useUser, useActiveRole } from "@/stores/auth.store";
-import { cn, formatDate, matchesRefSuffix, truncate } from "@/lib/utils";
-import { Inbox, FolderOpen, FilePlus2, Loader2, Unlock, Eye, EyeOff, Clock, Search, FilePlus, FolderSearch } from "lucide-react";
+import { cn, formatDate, truncate } from "@/lib/utils";
+import { Inbox, FolderOpen, FilePlus2, Loader2, Unlock, Eye, Clock, FilePlus, FolderSearch, RotateCcw } from "lucide-react";
 import { toast } from "sonner";
 import { confirmAction, showSuccess } from "@/lib/alert";
 import { guardedNavigate } from "@/hooks/use-unsaved-changes-guard";
@@ -16,11 +16,14 @@ import { PersonBadge, type PersonInfo } from "@/components/shared/person-badge";
 import { FileClassificationBadge } from "@/components/shared/file-classification-badge";
 import { PageHeader } from "@/components/shared/page-header";
 import { paginate, TablePagination } from "@/components/shared/table-pagination";
+import { useTableSearchSort, TableSearchInput, SortTh } from "@/components/shared/table-controls";
 
 interface EfmsFile {
   id: string; ref_number: string; subject: string; category: string;
   status: string; priority: string; created_at: string; updated_at: string;
   recipient_name: string | null; created_by: string; is_released: boolean;
+  was_reopened?: boolean;
+  has_been_forwarded?: boolean;
   current_holder_id: string | null; current_holder_info: PersonInfo | null;
 }
 interface DocketItem {
@@ -28,11 +31,69 @@ interface DocketItem {
   status: string; priority: string; created_by: string;
   current_holder_id: string | null; updated_at: string; created_at: string;
   can_release: boolean; from_user_name: string | null; from_user_info?: PersonInfo | null;
+  has_unsent_edits?: boolean;
 }
 interface ReleasedItem {
   docket_id: string; file_id: string; ref_number: string; subject: string;
   category: string; released_at: string | null;
 }
+
+const docketRowText = (f: DocketItem) =>
+  [f.ref_number, f.subject, f.category, f.priority, f.from_user_info?.full_name ?? f.from_user_name,
+   f.from_user_info?.designation, f.from_user_info?.department_name,
+   f.has_unsent_edits ? "draft saved" : "",
+   formatDate(f.updated_at, "relative")]
+    .filter(Boolean).join(" ");
+const docketSortValue = (f: DocketItem, key: string): string | number | Date | null => {
+  switch (key) {
+    case "ref": return f.ref_number;
+    case "subject": return f.subject;
+    case "from": return f.from_user_info?.full_name ?? f.from_user_name ?? "";
+    case "priority": return f.priority;
+    case "received": return new Date(f.updated_at);
+    default: return null;
+  }
+};
+
+// My Files status rule:
+//   - released                            -> "released"
+//   - the creator currently holds it      -> "draft"
+//     (a fresh never-forwarded draft, OR a file they reopened after
+//      release — it's back in their hands and not yet sent on)
+//   - otherwise (it's out with someone)   -> "active"
+const myFileDisplayStatus = (f: EfmsFile) => {
+  if (f.is_released) return "released";
+  if (f.current_holder_id && f.current_holder_id === f.created_by) return "draft";
+  return "active";
+};
+
+const myFileRowText = (f: EfmsFile) =>
+  [f.ref_number, f.subject, f.category, myFileDisplayStatus(f),
+   f.was_reopened && !f.is_released ? "reopened" : "",
+   f.current_holder_info?.full_name, formatDate(f.created_at, "relative")].filter(Boolean).join(" ");
+const myFileSortValue = (f: EfmsFile, key: string): string | number | Date | null => {
+  switch (key) {
+    case "subject": return f.subject;
+    case "category": return f.category;
+    case "ref": return f.ref_number;
+    case "created": return new Date(f.created_at);
+    case "status": return myFileDisplayStatus(f);
+    case "holder": return f.current_holder_info?.full_name ?? "";
+    default: return null;
+  }
+};
+
+const relRowText = (d: ReleasedItem) =>
+  [d.ref_number, d.subject, d.category, d.released_at ? formatDate(d.released_at, "relative") : ""].filter(Boolean).join(" ");
+const relSortValue = (d: ReleasedItem, key: string): string | number | Date | null => {
+  switch (key) {
+    case "ref": return d.ref_number;
+    case "subject": return d.subject;
+    case "category": return d.category;
+    case "released": return d.released_at ? new Date(d.released_at) : null;
+    default: return null;
+  }
+};
 
 type Section = "docket" | "files" | "new";
 
@@ -66,8 +127,6 @@ export function EFMSDashboard() {
     } catch { /* ignore corrupt/inaccessible storage */ }
   }, [user?.id]);
   const [newFileMode, setNewFileMode] = useState<"choice" | "create" | "reopen">("choice");
-  const [docketSearch, setDocketSearch] = useState("");
-  const [myFilesSearch, setMyFilesSearch] = useState("");
   const [docketPage, setDocketPage] = useState(1);
   const [myFilesPage, setMyFilesPage] = useState(1);
   const [releasedPage, setReleasedPage] = useState(1);
@@ -103,6 +162,7 @@ export function EFMSDashboard() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["my-docket"] });
       qc.invalidateQueries({ queryKey: ["docket-released-mine"] });
+      qc.invalidateQueries({ queryKey: ["efms-files-outbox"] });
       showSuccess("File released to your department.");
     },
     onError: (err: unknown) => {
@@ -111,14 +171,30 @@ export function EFMSDashboard() {
     },
   });
 
-  // Search matches only the trailing numeric segment of the ref number
-  // (e.g. "0003" in AVFU/AGRO/2026/GEN/0003), leading-zero insensitive.
-  const filteredDocketItems = docketItems.filter((f) => matchesRefSuffix(f.ref_number, docketSearch));
-  const filteredMyFiles = myFiles.filter((f) => matchesRefSuffix(f.ref_number, myFilesSearch));
+  // Reopen (reactivate) a released file — original creator only. Same
+  // POST /docket/{id}/reopen used by "Use Existing Released File".
+  const reopenMutation = useMutation({
+    mutationFn: (fileId: string) => api.post(`/docket/${fileId}/reopen`, {}),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["my-docket"] });
+      qc.invalidateQueries({ queryKey: ["docket-released-mine"] });
+      qc.invalidateQueries({ queryKey: ["efms-files-outbox"] });
+      showSuccess("File reopened — it is active again and back with you.");
+    },
+    onError: (err: unknown) => {
+      const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      toast.error(msg ?? "Could not reopen file.");
+    },
+  });
 
-  const docketPaged = paginate(filteredDocketItems, docketPage);
-  const myFilesPaged = paginate(filteredMyFiles, myFilesPage);
-  const releasedPaged = paginate(releasedFiles, releasedPage);
+  // Every column is searchable; every header sorts. All client-side.
+  const docketT = useTableSearchSort(docketItems, docketRowText, docketSortValue, { key: "received", dir: "desc" });
+  const myFilesT = useTableSearchSort(myFiles, myFileRowText, myFileSortValue, { key: "created", dir: "desc" });
+  const releasedT = useTableSearchSort(releasedFiles, relRowText, relSortValue, { key: "released", dir: "desc" });
+
+  const docketPaged = paginate(docketT.view, docketPage);
+  const myFilesPaged = paginate(myFilesT.view, myFilesPage);
+  const releasedPaged = paginate(releasedT.view, releasedPage);
 
   const SECTIONS: { id: Section; label: string; icon: React.ElementType; count?: number }[] = [
     { id: "docket", label: "Docket",   icon: Inbox,      count: docketItems.length },
@@ -175,11 +251,12 @@ export function EFMSDashboard() {
               </p>
             </div>
 
-            <div className="relative max-w-xs">
-              <Search size={16} className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400" />
-              <input value={docketSearch} onChange={(e) => { setDocketSearch(e.target.value); setDocketPage(1); }} placeholder="Search by file number…"
-                className="w-full border border-gray-300 rounded-xl pl-10 pr-4 py-2.5 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]" />
-            </div>
+            <TableSearchInput
+              value={docketT.query}
+              onChange={(v) => { docketT.setQuery(v); setDocketPage(1); }}
+              placeholder="Search file no., subject, from, priority…"
+              className="max-w-sm"
+            />
 
             {loadDocket ? (
               <div className="flex items-center justify-center py-16 gap-3 text-gray-400"><Loader2 size={22} className="animate-spin" /> Loading…</div>
@@ -189,7 +266,7 @@ export function EFMSDashboard() {
                 <p className="text-lg font-semibold text-gray-600">Your docket is empty</p>
                 <p className="text-sm text-gray-400 mt-1">Files forwarded to you will appear here.</p>
               </div>
-            ) : filteredDocketItems.length === 0 ? (
+            ) : docketT.view.length === 0 ? (
               <div className="bg-white rounded-2xl border border-gray-200 p-12 text-center">
                 <p className="text-sm text-gray-400">No files match your search.</p>
               </div>
@@ -202,9 +279,12 @@ export function EFMSDashboard() {
                 <table className="w-full min-w-[900px]">
                   <thead className="bg-gray-50 border-b border-gray-200">
                     <tr>
-                      {["Ref Number", "Subject", "From", "Priority", "Received", "Action"].map((h) => (
-                        <th key={h} className="text-left px-4 py-3 text-xs font-semibold uppercase tracking-wide text-gray-500">{h}</th>
-                      ))}
+                      <SortTh label="Ref Number" sortKey="ref" state={docketT} />
+                      <SortTh label="Subject" sortKey="subject" state={docketT} />
+                      <SortTh label="From" sortKey="from" state={docketT} />
+                      <SortTh label="Priority" sortKey="priority" state={docketT} />
+                      <SortTh label="Received" sortKey="received" state={docketT} />
+                      <th className="text-left px-4 py-3 text-xs font-semibold uppercase tracking-wide text-gray-500">Action</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-100">
@@ -219,6 +299,14 @@ export function EFMSDashboard() {
                           </td>
                           <td className="px-4 py-3 max-w-xs">
                             <p className="text-sm font-semibold text-gray-900 truncate">{f.subject}</p>
+                            {f.has_unsent_edits && (
+                              <span
+                                className="mt-1 inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-[#FBEFD9] text-[#8A5A11] border border-[#E7C88A]"
+                                title="You have saved notesheet edits on this file that you haven't forwarded yet."
+                              >
+                                <FilePlus size={11} /> Draft saved
+                              </span>
+                            )}
                           </td>
                           <td className="px-4 py-3 text-sm text-gray-600"><PersonBadge person={f.from_user_info} compact /></td>
                           <td className="px-4 py-3"><FileClassificationBadge priority={f.priority} /></td>
@@ -275,11 +363,12 @@ export function EFMSDashboard() {
               <p className="text-sm text-gray-500 mt-0.5">Files you have created.</p>
             </div>
 
-            <div className="relative max-w-xs">
-              <Search size={16} className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400" />
-              <input value={myFilesSearch} onChange={(e) => { setMyFilesSearch(e.target.value); setMyFilesPage(1); }} placeholder="Search by file number…"
-                className="w-full border border-gray-300 rounded-xl pl-10 pr-4 py-2.5 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]" />
-            </div>
+            <TableSearchInput
+              value={myFilesT.query}
+              onChange={(v) => { myFilesT.setQuery(v); setMyFilesPage(1); }}
+              placeholder="Search subject, category, file no., status, holder…"
+              className="max-w-sm"
+            />
 
             {loadFiles ? (
               <div className="flex items-center justify-center py-10 gap-3 text-gray-400"><Loader2 size={22} className="animate-spin" /> Loading…</div>
@@ -289,7 +378,7 @@ export function EFMSDashboard() {
                 <p className="text-lg font-semibold text-gray-600">No files yet</p>
                 <button onClick={() => setSection("new")} className="mt-4 px-5 py-2.5 bg-[#0D6E6E] text-white rounded-xl text-base font-semibold hover:bg-[#178F8F]">Create your first file</button>
               </div>
-            ) : filteredMyFiles.length === 0 ? (
+            ) : myFilesT.view.length === 0 ? (
               <div className="bg-white rounded-2xl border border-gray-200 p-10 text-center">
                 <p className="text-sm text-gray-400">No files match your search.</p>
               </div>
@@ -299,16 +388,24 @@ export function EFMSDashboard() {
                 <table className="w-full min-w-[960px]">
                   <thead className="bg-gray-50 border-b border-gray-200">
                     <tr>
-                      {["Note ID", "Subject", "File Category", "File / Doc Number", "Created At", "Status", "Current Holder", "Action"].map((h) => (
-                        <th key={h} className="text-left px-4 py-3 text-xs font-semibold uppercase tracking-wide text-gray-500">{h}</th>
-                      ))}
+                      <th className="text-left px-4 py-3 text-xs font-semibold uppercase tracking-wide text-gray-500">Note ID</th>
+                      <SortTh label="Subject" sortKey="subject" state={myFilesT} />
+                      <SortTh label="File Category" sortKey="category" state={myFilesT} />
+                      <SortTh label="File / Doc Number" sortKey="ref" state={myFilesT} />
+                      <SortTh label="Created At" sortKey="created" state={myFilesT} />
+                      <SortTh label="Status" sortKey="status" state={myFilesT} />
+                      <SortTh label="Current Holder" sortKey="holder" state={myFilesT} />
+                      <th className="text-left px-4 py-3 text-xs font-semibold uppercase tracking-wide text-gray-500">Action</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-100">
                     {myFilesPaged.pageRows.map((f, idx) => {
-                      // Released overrides the underlying workflow status for display —
-                      // users only ever see Draft, Active, or Released here.
-                      const displayStatus = f.is_released ? "released" : f.status;
+                      // My Files status rule: released wins; then a file the
+                      // creator has NEVER forwarded always reads "draft"
+                      // (regardless of the raw workflow status); anything
+                      // forwarded at least once reads its real status
+                      // (active / reopened badge handled separately).
+                      const displayStatus = myFileDisplayStatus(f);
                       return (
                       <tr key={f.id} className="hover:bg-gray-50">
                         <td className="px-4 py-3 text-sm text-gray-500 font-mono">{(myFilesPaged.start + idx + 1).toString().padStart(4, "0")}</td>
@@ -319,9 +416,19 @@ export function EFMSDashboard() {
                         </td>
                         <td className="px-4 py-3 text-sm text-gray-500">{formatDate(f.created_at, "relative")}</td>
                         <td className="px-4 py-3">
-                          <span className={cn("px-2 py-1 rounded-full text-sm font-medium", STATUS_COLOR[displayStatus] ?? "bg-gray-100")}>
-                            {displayStatus}
-                          </span>
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <span className={cn("px-2 py-1 rounded-full text-sm font-medium", STATUS_COLOR[displayStatus] ?? "bg-gray-100")}>
+                              {displayStatus}
+                            </span>
+                            {f.was_reopened && !f.is_released && (
+                              <span
+                                className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-[#FBEFD9] text-[#8A5A11] border border-[#E7C88A]"
+                                title="This file was released and later reopened by you."
+                              >
+                                <RotateCcw size={11} /> Reopened
+                              </span>
+                            )}
+                          </div>
                         </td>
                         <td className="px-4 py-3">
                           {f.current_holder_id ? (
@@ -333,11 +440,45 @@ export function EFMSDashboard() {
                           )}
                         </td>
                         <td className="px-4 py-3">
-                          <div className="flex items-center gap-2">
+                          <div className="flex items-center gap-2 flex-wrap">
                             <button onClick={() => { markRead(f.id); router.push(`/files/${f.id}`); }}
                               className="flex items-center gap-1 px-3 py-1.5 bg-[#0D6E6E] text-white rounded-lg text-sm font-medium hover:bg-[#178F8F]">
                               <Eye size={14} /> View
                             </button>
+                            {/* Creator holds it and it isn't released yet — Release
+                                moved here from the Docket (creator files no longer
+                                appear in Docket). */}
+                            {!f.is_released && f.current_holder_id === f.created_by && (
+                              <button
+                                onClick={async () => {
+                                  const confirmed = await confirmAction({
+                                    title: "Release Notesheet?",
+                                    text: "Are you sure you want to release this notesheet? You will no longer be able to edit it after release.",
+                                    confirmText: "Release",
+                                    danger: true,
+                                  });
+                                  if (confirmed) releaseMutation.mutate(f.id);
+                                }}
+                                disabled={releaseMutation.isPending}
+                                className="flex items-center gap-1 px-3 py-1.5 border border-teal-300 text-teal-700 rounded-lg text-sm font-medium hover:bg-teal-50 disabled:opacity-50">
+                                <Unlock size={14} /> Release
+                              </button>
+                            )}
+                            {f.is_released && (
+                              <button
+                                onClick={async () => {
+                                  const confirmed = await confirmAction({
+                                    title: "Reopen this released file?",
+                                    text: "It becomes active again and comes back to you. You can edit and forward it as normal.",
+                                    confirmText: "Reopen",
+                                  });
+                                  if (confirmed) reopenMutation.mutate(f.id);
+                                }}
+                                disabled={reopenMutation.isPending}
+                                className="flex items-center gap-1 px-3 py-1.5 border border-amber-300 text-amber-700 rounded-lg text-sm font-medium hover:bg-amber-50 disabled:opacity-50">
+                                <RotateCcw size={14} /> Reopen
+                              </button>
+                            )}
                             <button onClick={() => router.push(`/files/${f.id}`)}
                               className="flex items-center gap-1 px-2 py-1.5 text-gray-600 border border-gray-200 rounded-lg text-sm hover:bg-gray-50">
                               <Clock size={14} /> Track
@@ -364,13 +505,24 @@ export function EFMSDashboard() {
                   <div className="flex items-center justify-center py-10 gap-3 text-gray-400 mt-3"><Loader2 size={22} className="animate-spin" /> Loading…</div>
                 ) : (
                   <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden mt-3">
+                    <div className="px-4 py-3 border-b border-gray-100">
+                      <TableSearchInput
+                        value={releasedT.query}
+                        onChange={(v) => { releasedT.setQuery(v); setReleasedPage(1); }}
+                        placeholder="Search released files…"
+                        className="max-w-sm"
+                      />
+                    </div>
                     <div className="w-full overflow-x-auto">
                     <table className="w-full min-w-[800px]">
                       <thead className="bg-gray-50 border-b border-gray-200">
                         <tr>
-                          {["Ref Number", "Subject", "Category", "Released", "Status", "Action"].map((h) => (
-                            <th key={h} className="text-left px-4 py-3 text-xs font-semibold uppercase tracking-wide text-gray-500">{h}</th>
-                          ))}
+                          <SortTh label="Ref Number" sortKey="ref" state={releasedT} />
+                          <SortTh label="Subject" sortKey="subject" state={releasedT} />
+                          <SortTh label="Category" sortKey="category" state={releasedT} />
+                          <SortTh label="Released" sortKey="released" state={releasedT} />
+                          <th className="text-left px-4 py-3 text-xs font-semibold uppercase tracking-wide text-gray-500">Status</th>
+                          <th className="text-left px-4 py-3 text-xs font-semibold uppercase tracking-wide text-gray-500">Action</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-gray-100">
@@ -387,10 +539,25 @@ export function EFMSDashboard() {
                               <span className={cn("px-2 py-1 rounded-full text-sm font-medium", STATUS_COLOR.released)}>released</span>
                             </td>
                             <td className="px-4 py-3">
-                              <button onClick={() => router.push(`/files/${d.file_id}`)}
-                                className="flex items-center gap-1 px-3 py-1.5 bg-[#0D6E6E] text-white rounded-lg text-sm font-medium hover:bg-[#178F8F]">
-                                <Eye size={14} /> View
-                              </button>
+                              <div className="flex items-center gap-2">
+                                <button onClick={() => router.push(`/files/${d.file_id}`)}
+                                  className="flex items-center gap-1 px-3 py-1.5 bg-[#0D6E6E] text-white rounded-lg text-sm font-medium hover:bg-[#178F8F]">
+                                  <Eye size={14} /> View
+                                </button>
+                                <button
+                                  onClick={async () => {
+                                    const confirmed = await confirmAction({
+                                      title: "Reopen this released file?",
+                                      text: "The file becomes Active again and returns to you as the current holder.",
+                                      confirmText: "Reopen",
+                                    });
+                                    if (confirmed) reopenMutation.mutate(d.file_id);
+                                  }}
+                                  disabled={reopenMutation.isPending}
+                                  className="flex items-center gap-1 px-3 py-1.5 border border-teal-300 text-teal-700 rounded-lg text-sm font-medium hover:bg-teal-50 disabled:opacity-50">
+                                  <RotateCcw size={14} /> Reopen
+                                </button>
+                              </div>
                             </td>
                           </tr>
                         ))}
