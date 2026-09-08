@@ -56,6 +56,23 @@ export function useAttachmentQueue(maxFiles = 10) {
     if (rejected > 0) {
       toast.error(`${rejected} file${rejected > 1 ? "s were" : " was"} rejected — unsupported file type.`);
     }
+
+    // How many of the accepted files actually fit under the cap (the rest
+    // are dropped by the slice below).
+    const room = Math.max(0, maxFiles - items.length);
+    const added = Math.min(accepted.length, room);
+    if (added > 0) {
+      const names = accepted.slice(0, added).map((a) => a.name).join(", ");
+      toast.success(
+        added === 1
+          ? `"${names}" added — it will upload when you save the file.`
+          : `${added} files added — they will upload when you save the file.`
+      );
+    }
+    if (added < accepted.length) {
+      toast.error(`Attachment limit is ${maxFiles} — ${accepted.length - added} file(s) not added.`);
+    }
+
     setItems((prev) => [...prev, ...accepted].slice(0, maxFiles));
   }
 

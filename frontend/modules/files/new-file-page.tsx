@@ -116,6 +116,10 @@ export function NewFileForm({ onSuccess }: NewFileFormProps) {
   // makes one additional call to the SAME existing POST /{id}/route
   // endpoint the file page's own Forward button already uses — no second,
   // parallel forwarding implementation.
+  // Set by doCreateFile so the mutation's success dialog can report how
+  // many attachments actually uploaded (and warn about any that failed).
+  const uploadResultRef = useRef<{ succeeded: number; failed: string[] }>({ succeeded: 0, failed: [] });
+
   async function doCreateFile(): Promise<string> {
     const noteContent = editor?.getHTML() ?? "";
     const selectedUser = allUsers.find((u) => u.id === recipientId);
@@ -134,13 +138,21 @@ export function NewFileForm({ onSuccess }: NewFileFormProps) {
     // navigation the way a genuinely-retryable save would — it's reported
     // to the user instead of silently swallowed (unlike the ordinary
     // uploadAll used nowhere else in this flow anymore).
-    const { failed } = await attachmentQueue.uploadAllReporting(fileId);
+    const { succeeded, failed } = await attachmentQueue.uploadAllReporting(fileId);
+    uploadResultRef.current = { succeeded, failed: failed.map((f) => f.name) };
     if (failed.length > 0) {
       toast.error(
-        `File saved, but ${failed.length} attachment${failed.length > 1 ? "s" : ""} failed to upload: ${failed.map((f) => f.name).join(", ")}. You can add them again from the file page.`
+        `${failed.length} attachment${failed.length > 1 ? "s" : ""} failed to upload: ${failed.map((f) => f.name).join(", ")}. You can add them again from the file page.`
       );
     }
     return fileId;
+  }
+
+  /** "…and N file(s) uploaded" suffix for the create-success dialog. */
+  function uploadSummaryLine(): string | undefined {
+    const { succeeded } = uploadResultRef.current;
+    if (succeeded <= 0) return undefined;
+    return `${succeeded} attachment${succeeded > 1 ? "s" : ""} uploaded successfully.`;
   }
 
   function resetFormAfterSuccess() {
@@ -162,7 +174,7 @@ export function NewFileForm({ onSuccess }: NewFileFormProps) {
   const createFile = useMutation({
     mutationFn: doCreateFile,
     onSuccess: () => {
-      showSuccess("File created and submitted successfully.");
+      showSuccess("File created and submitted successfully.", uploadSummaryLine());
       qc.invalidateQueries({ queryKey: ["efms-files"] });
       qc.invalidateQueries({ queryKey: ["efms-files-outbox"] });
       onSuccess?.();
@@ -186,7 +198,7 @@ export function NewFileForm({ onSuccess }: NewFileFormProps) {
       return fileId;
     },
     onSuccess: () => {
-      showSuccess("File created and forwarded successfully.");
+      showSuccess("File created and forwarded successfully.", uploadSummaryLine());
       qc.invalidateQueries({ queryKey: ["efms-files"] });
       qc.invalidateQueries({ queryKey: ["efms-files-outbox"] });
       qc.invalidateQueries({ queryKey: ["my-docket"] });
