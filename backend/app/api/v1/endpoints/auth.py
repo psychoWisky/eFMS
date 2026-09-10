@@ -475,14 +475,59 @@ async def switch_profile(
     person_id = _resolve_person_id(current_user)
     # selectinload(User.roles): _issue_tokens -> build_user_brief reads
     # target.roles, which a plain db.get() would lazy-load outside of an
-    # async-safe context.
-    target = await db.scalar(select(User).options(selectinload(User.roles)).where(User.id == body.profile_user_id))
+    # async-safe context. selectinload(User.project) too, so the returned
+    # UserBrief carries project_number/project_name for the dashboard's
+    # "Workspace" header when switching INTO a project (PI) profile.
+    target = await db.scalar(
+        select(User)
+        .options(selectinload(User.roles), selectinload(User.project))
+        .where(User.id == body.profile_user_id)
+    )
     if not target or (target.id != person_id and target.origin_user_id != person_id):
         raise HTTPException(status_code=403, detail="This profile does not belong to you.")
     if not target.is_active:
         raise HTTPException(status_code=403, detail="This profile is no longer active.")
 
     resp = await _issue_tokens(target, db)
+    await db.commit()
+    return resp
+
+
+class SwitchRoleBody(BaseModel):
+    role: str
+
+
+@router.post("/switch-role", response_model=TokenResponse)
+async def switch_role(
+    body: SwitchRoleBody,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Switch the caller's ACTIVE role to another role they hold (see
+    user_roles). Re-issues the token pair with the new active_role — from
+    every other screen's perspective identical to having logged in with
+    that role. Works for a real person identity AND for one of their
+    project (PI) profiles: a PI profile inherits the origin person's full
+    role set at assign time, so it can switch roles too. A role the caller
+    does not hold is rejected 403 — authorized against user_roles, never
+    trusted."""
+    # get_current_user already returns the caller with roles eager-loaded
+    # from this same session — no extra query needed.
+    me = current_user
+    target = next((ur for ur in me.roles if ur.role == body.role), None)
+    if target is None:
+        raise HTTPException(status_code=403, detail="You do not hold this role.")
+    if body.role != me.active_role:
+        me.active_role = body.role
+        # Apply this role's organizational context to the session. NULL on
+        # the role row means "keep the user's own value" — so switching to a
+        # role that was added without an explicit dept/estb is a no-op for
+        # those fields, matching single-role behaviour.
+        if target.department_id is not None:
+            me.department_id = target.department_id
+        if target.establishment_id is not None:
+            me.establishment_id = target.establishment_id
+    resp = await _issue_tokens(me, db)
     await db.commit()
     return resp
 
@@ -509,6 +554,14 @@ async def get_me(current_user: User = Depends(get_current_user)):
 
 # ── Admin: User Management ────────────────────────────────────────────────────
 
+class RoleContextOut(BaseModel):
+    """One role a user holds, with its optional org context — pre-fills the
+    Edit User form's Role N rows."""
+    role: str
+    department_id: Optional[UUID] = None
+    establishment_id: Optional[UUID] = None
+
+
 class AdminUserOut(BaseModel):
     id: UUID
     email: str
@@ -525,6 +578,9 @@ class AdminUserOut(BaseModel):
     department_id: Optional[UUID]
     department_name: Optional[str] = None
     active_role: Optional[str] = None
+    # Every role this user holds (multi-role users), active_role first, each
+    # with its per-role department/establishment context.
+    roles: list[RoleContextOut] = []
     is_active: bool
     must_change_password: bool
     can_sign: bool
@@ -532,10 +588,23 @@ class AdminUserOut(BaseModel):
     deactivation_remarks: Optional[str] = None
     deactivated_at: Optional[datetime] = None
     deactivated_by: Optional[UUID] = None
+    # Set on a successor account after an ownership transfer — the id of the
+    # user it replaced.
+    account_predecessor_id: Optional[UUID] = None
     model_config = {"from_attributes": True}
 
     @classmethod
     def from_user(cls, u: "User") -> "AdminUserOut":
+        by_name = {r.role: r for r in u.roles}
+        order = ([u.active_role] if u.active_role in by_name else []) + [n for n in by_name if n != u.active_role]
+        ordered = [
+            RoleContextOut(
+                role=n,
+                department_id=by_name[n].department_id,
+                establishment_id=by_name[n].establishment_id,
+            )
+            for n in order
+        ]
         return cls(
             id=u.id, email=u.email,
             first_name=u.first_name, middle_name=u.middle_name, last_name=u.last_name, full_name=u.full_name,
@@ -547,6 +616,7 @@ class AdminUserOut(BaseModel):
             department_id=u.department_id,
             department_name=u.department.name if u.department else None,
             active_role=u.active_role,
+            roles=ordered,
             is_active=u.is_active,
             must_change_password=u.must_change_password,
             can_sign=u.can_sign,
@@ -554,6 +624,7 @@ class AdminUserOut(BaseModel):
             deactivation_remarks=u.deactivation_remarks,
             deactivated_at=u.deactivated_at,
             deactivated_by=u.deactivated_by,
+            account_predecessor_id=u.account_predecessor_id,
         )
 
 
@@ -598,6 +669,43 @@ async def _set_single_role(db: AsyncSession, user: User, role: str) -> None:
     db.add(UserRole(user_id=user.id, role=role))
 
 
+async def _set_role_set(db: AsyncSession, user: User, roles: list["RoleAssignment"]) -> list[str]:
+    """Replace the user's UserRole rows with exactly `roles` (deduped by
+    role name, order preserved). Each entry carries an optional
+    department_id / establishment_id — the organizational context that role
+    is exercised in; NULL falls back to the user record's own values at
+    switch time. The first entry's role becomes active_role, unless the
+    user's current active_role is still in the set (a plain "add a role"
+    edit must not silently switch their working context). Existing rows are
+    updated in place (role name is the key); the delta is deleted/inserted,
+    so uq_user_role is never hit by a same-pair delete+reinsert race."""
+    seen: set[str] = set()
+    want: list["RoleAssignment"] = []
+    for r in roles:
+        if r.role and r.role not in seen:
+            seen.add(r.role)
+            want.append(r)
+    want_names = [r.role for r in want]
+    have = {
+        ur.role: ur
+        for ur in (await db.execute(select(UserRole).where(UserRole.user_id == user.id))).scalars().all()
+    }
+    for name, ur in have.items():
+        if name not in seen:
+            await db.delete(ur)
+    await db.flush()
+    for r in want:
+        ur = have.get(r.role)
+        if ur is None:
+            ur = UserRole(user_id=user.id, role=r.role)
+            db.add(ur)
+        ur.department_id = r.department_id
+        ur.establishment_id = r.establishment_id
+    if user.active_role not in want_names:
+        user.active_role = want_names[0] if want_names else None
+    return want_names
+
+
 @router.get("/admin/users", response_model=List[AdminUserOut])
 async def list_admin_users(
     status_filter: str = Query("all", alias="status", pattern="^(all|active|inactive)$"),
@@ -607,7 +715,9 @@ async def list_admin_users(
     # Person-centric screen — project profiles (User.origin_user_id set)
     # are managed exclusively through the Projects screen instead, so they
     # never appear here as if they were independent people to manage.
-    q = select(User).options(selectinload(User.department), selectinload(User.establishment)).where(User.origin_user_id.is_(None))
+    q = select(User).options(
+        selectinload(User.department), selectinload(User.establishment), selectinload(User.roles),
+    ).where(User.origin_user_id.is_(None))
     if status_filter == "active":
         q = q.where(User.is_active == True)
     elif status_filter == "inactive":
@@ -724,10 +834,29 @@ async def download_bulk_user_sample(_: User = Depends(_super_admin_only)):
     buf = io.StringIO()
     writer = csv.writer(buf)
     writer.writerow(_BULK_CSV_COLUMNS)
-    writer.writerow([
-        "John", "", "Doe", "john.doe@example.com", "9876543210", "EMP001",
-        "1990-01-15", "Assistant Registrar", "", "", "efms_officer", "true", "",
-    ])
+    # Several worked examples covering the common cases:
+    #  - required-only vs. every column filled
+    #  - blank middle_name (optional)
+    #  - blank temp_password (a strong one is generated & returned per row)
+    #  - is_active true / false
+    #  - establishment_id / department_id are optional; leave blank OR paste
+    #    the exact UUID from Admin > Establishments / Departments.
+    sample_rows = [
+        # first, middle, last, email, mobile, emp_code, dob, designation,
+        # establishment_id, department_id, role, is_active, temp_password
+        ["Anita", "", "Sharma", "anita.sharma@example.com", "9876500001", "EMP101",
+         "1988-04-12", "Assistant Registrar", "", "", "registrar", "true", ""],
+        ["Bhaskar", "Jyoti", "Kalita", "bhaskar.kalita@example.com", "9876500002", "EMP102",
+         "1990-11-03", "Accounts Officer", "", "", "efms_officer", "true", ""],
+        ["Chandra", "", "Das", "chandra.das@example.com", "9876500003", "",
+         "", "Head of Department", "", "", "hod", "true", ""],
+        ["Deepa", "", "Nair", "deepa.nair@example.com", "9876500004", "EMP104",
+         "1995-07-21", "Research Associate", "", "", "faculty", "true", "Temp@1234"],
+        ["Ehsan", "", "Ali", "ehsan.ali@example.com", "9876500005", "EMP105",
+         "1985-02-28", "Dispatch Clerk", "", "", "dispatch_officer", "false", ""],
+    ]
+    for r in sample_rows:
+        writer.writerow(r)
     # UTF-8 BOM so Excel opens the file with the correct encoding by default.
     csv_bytes = buf.getvalue().encode("utf-8-sig")
     return Response(
@@ -848,6 +977,15 @@ async def bulk_create_users(
     return BulkUserUploadResult(total=len(results), created=created_count, failed=len(results) - created_count, results=results)
 
 
+class RoleAssignment(BaseModel):
+    """One role a user holds, with the organizational context it is
+    exercised in. department_id / establishment_id are optional — NULL means
+    "use the user's own department / establishment for this role"."""
+    role: str
+    department_id: Optional[UUID] = None
+    establishment_id: Optional[UUID] = None
+
+
 class EditUserRequest(BaseModel):
     first_name: Optional[str] = None
     middle_name: Optional[str] = None
@@ -859,7 +997,12 @@ class EditUserRequest(BaseModel):
     designation: Optional[str] = None
     establishment_id: Optional[UUID] = None
     department_id: Optional[UUID] = None
+    # `role` sets a single role (legacy — still accepted; plain string).
+    # `roles` sets the full set the user may switch between, each with its
+    # own optional department/establishment. The first entry's role becomes
+    # active_role. Send one or the other, not both.
     role: Optional[str] = None
+    roles: Optional[list[RoleAssignment]] = None
 
 
 @router.patch("/admin/users/{uid}", response_model=AdminUserOut)
@@ -897,12 +1040,38 @@ async def edit_user(
         user.establishment_id = body.establishment_id
     if body.department_id is not None:
         user.department_id = body.department_id
-    # Re-submitting a user's existing role is a true no-op — skip catalog
-    # validation AND the UserRole delete+reinsert entirely. Rewriting the
-    # same (user_id, role) row tripped uq_user_role on commit (INSERT of the
-    # identical pair racing the DELETE in one flush) → 500. Only an actual
-    # role change touches the roles table or the user_roles rows.
-    if body.role is not None and body.role != user.active_role:
+    # Multi-role edit (`roles`): the full set the user may switch between,
+    # each with its own optional department/establishment context.
+    # Single-role edit (`role`): legacy one-role form, still supported.
+    if body.roles is not None:
+        if not body.roles:
+            raise HTTPException(400, "A user must have at least one role.")
+        # Validate each role name against the catalog; keep the context.
+        validated: list[RoleAssignment] = []
+        for ra in body.roles:
+            canonical = await _validate_assignable_role(db, ra.role)
+            validated.append(RoleAssignment(
+                role=canonical, department_id=ra.department_id, establishment_id=ra.establishment_id,
+            ))
+        names = {ra.role for ra in validated}
+        losing_super = (
+            user.active_role == SystemRole.SUPER_ADMIN
+            and SystemRole.SUPER_ADMIN not in names
+            and user.is_active
+            and await _count_other_active_super_admins(db, uid) == 0
+        )
+        if losing_super:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "Cannot remove Super Admin from the only active Super Admin. Assign Super Admin to another user first.",
+            )
+        await _set_role_set(db, user, validated)
+    elif body.role is not None and body.role != user.active_role:
+        # Re-submitting a user's existing role is a true no-op — skip catalog
+        # validation AND the UserRole delete+reinsert entirely. Rewriting the
+        # same (user_id, role) row tripped uq_user_role on commit (INSERT of
+        # the identical pair racing the DELETE in one flush) → 500. Only an
+        # actual role change touches the roles table or the user_roles rows.
         role = await _validate_assignable_role(db, body.role)
         if (
             role != SystemRole.SUPER_ADMIN
@@ -978,6 +1147,110 @@ async def set_user_status(
     await db.commit()
     return AdminUserOut.from_user(await _load_user(db, uid))
 
+
+class TransferOwnershipRequest(BaseModel):
+    """Hand a leaving user's entire working identity to a successor.
+    `successor_id` must be an existing, active, non-project-profile user
+    other than the leaver."""
+    successor_id: UUID
+    reason_type: Optional[str] = None   # defaults to "retired" if blank
+    remarks: Optional[str] = None
+
+
+@router.post("/admin/users/{uid}/transfer-ownership", response_model=AdminUserOut)
+async def transfer_ownership(
+    uid: UUID,
+    body: TransferOwnershipRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(_super),
+):
+    """Ownership transfer (super admin only). The user `uid` (the leaver)
+    is deactivated permanently; `successor_id` (B) inherits everything:
+
+      * B.account_predecessor_id -> A.id, so every file-access check treats
+        B as A too (their created files, holding-period notes, routing
+        history they were part of).
+      * Every file A currently HOLDS is re-pointed to B (current_holder_id),
+        and a route entry 'Account ownership transferred: A -> B' is added so
+        the hand-off shows in the file's timeline. B's holding-period note
+        row for each such file is created lazily on first save, exactly like
+        any normal Forward recipient.
+
+    A is not reusable afterwards. Historical attribution (who created / who
+    noted / who forwarded) is never rewritten — it still names A."""
+    from app.models.efms import EfmsFile, RouteEntry, RouteAction
+    from app.api.v1.endpoints.efms_files import _finalize_current_holder_note
+
+    leaver = await _load_user(db, uid)
+    _assert_not_project_profile(leaver)
+    if str(body.successor_id) == str(uid):
+        raise HTTPException(400, "The successor must be a different user.")
+
+    successor = await db.scalar(
+        select(User).options(selectinload(User.roles)).where(User.id == body.successor_id)
+    )
+    if not successor:
+        raise HTTPException(404, "Successor not found.")
+    if successor.origin_user_id is not None:
+        raise HTTPException(400, "The successor cannot be a project profile.")
+    if not successor.is_active:
+        raise HTTPException(400, "The successor account is inactive.")
+
+    if (
+        leaver.active_role == SystemRole.SUPER_ADMIN
+        and leaver.is_active
+        and await _count_other_active_super_admins(db, uid) == 0
+    ):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "Cannot transfer the only active Super Admin. Assign Super Admin to another user first.",
+        )
+
+    # 1. Re-point every file the leaver currently holds -> successor,
+    #    finalizing the leaver's open holding-period note and recording a
+    #    route entry for the hand-off.
+    held = (await db.execute(
+        select(EfmsFile).where(EfmsFile.current_holder_id == leaver.id)
+    )).scalars().all()
+    note = (body.remarks or "").strip() or f"Account ownership transferred: {leaver.full_name} → {successor.full_name}"
+    for f in held:
+        await _finalize_current_holder_note(db, f.id, leaver.id)
+        for e in (await db.execute(
+            select(RouteEntry).where(RouteEntry.file_id == f.id, RouteEntry.is_current == True)
+        )).scalars().all():
+            e.is_current = False
+        db.add(RouteEntry(
+            file_id=f.id,
+            from_user_id=leaver.id,
+            to_user_id=successor.id,
+            from_role=f.current_holder_role or leaver.active_role,
+            to_role=successor.active_role,
+            action=RouteAction.forward,
+            remarks=note,
+            is_current=True,
+        ))
+        f.current_holder_id = successor.id
+        # The file moves into the successor's current-role workspace.
+        f.current_holder_role = successor.active_role
+
+    # 2. Link the accounts so access checks follow the chain.
+    successor.account_predecessor_id = leaver.id
+
+    # 3. Deactivate the leaver (kept forever for attribution).
+    reason_map = {r.value: r for r in DeactivationReasonType}
+    reason = reason_map.get((body.reason_type or "").strip()) or DeactivationReasonType.RETIRED
+    leaver.is_active = False
+    leaver.deactivation_reason_type = reason
+    leaver.deactivation_remarks = (body.remarks or "").strip() or None
+    leaver.deactivated_at = datetime.now(timezone.utc)
+    leaver.deactivated_by = current_user.id
+    # Revoke the leaver's sessions so their token can't act post-transfer.
+    await db.execute(
+        update(RefreshToken).where(RefreshToken.user_id == leaver.id, RefreshToken.revoked == False).values(revoked=True)
+    )
+
+    await db.commit()
+    return AdminUserOut.from_user(await _load_user(db, uid))
 
 
 # Super Admin password-reset-for-another-user is intentionally NOT

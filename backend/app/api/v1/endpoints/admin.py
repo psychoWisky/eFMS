@@ -60,12 +60,18 @@ class UserOut(BaseModel):
     is_project_profile: bool = False
     project_number: Optional[str] = None
     project_name: Optional[str] = None
+    # The specific role this recipient entry represents. For a single-role
+    # user it equals active_role. For a multi-role user the picker returns
+    # one entry PER role, each with its own `role` — the sender forwards to
+    # "<person> — <role>", and the file lands in that role's Docket only.
+    role: Optional[str] = None
     model_config = {"from_attributes": True}
 
     @classmethod
-    def from_user(cls, u: User):
+    def from_user(cls, u: User, role: Optional[str] = None):
         return cls(id=u.id, email=u.email, full_name=u.full_name,
                    active_role=u.active_role,
+                   role=role if role is not None else u.active_role,
                    designation=getattr(u, "designation", None),
                    department_name=u.department.name if u.department else None,
                    employee_code=getattr(u, "employee_code", None),
@@ -242,7 +248,10 @@ async def list_users(
         q = q.where(User.establishment_id == establishment_id)
     if department_id:
         q = q.where(User.department_id == department_id)
-    r = await db.execute(q.options(selectinload(User.department), selectinload(User.project)).order_by(User.first_name))
+    r = await db.execute(
+        q.options(selectinload(User.department), selectinload(User.project), selectinload(User.roles))
+        .order_by(User.first_name)
+    )
     users = r.scalars().all()
 
     # One batched query for the caller's favorites — same "batch everything,
@@ -254,11 +263,17 @@ async def list_users(
 
     out = []
     for u in users:
-        item = UserOut.from_user(u)
-        if u.id in favorites:
-            item.is_favorite = True
-            item.favorite_created_at = favorites[u.id]
-        out.append(item)
+        # One entry per role the user holds (multi-role). A project profile
+        # or a single-role user yields exactly one entry, unchanged from
+        # before. SUPER_ADMIN role is filtered out at the query level.
+        held = [ur.role for ur in u.roles if ur.role != SystemRole.SUPER_ADMIN]
+        roles = held or ([u.active_role] if u.active_role else [None])
+        for role in roles:
+            item = UserOut.from_user(u, role=role)
+            if u.id in favorites:
+                item.is_favorite = True
+                item.favorite_created_at = favorites[u.id]
+            out.append(item)
     return out
 
 

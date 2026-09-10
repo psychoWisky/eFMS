@@ -2,7 +2,7 @@
 // Shared Tiptap WYSIWYG editor — the notesheet-authoring component reused by
 // both New File creation and Draft editing, so the extension set, paste
 // cleanup, and toolbar are defined in exactly one place.
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useEditor, EditorContent } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import TextAlign from "@tiptap/extension-text-align";
@@ -11,7 +11,7 @@ import { Table } from "@tiptap/extension-table";
 import { TableRow } from "@tiptap/extension-table-row";
 import { TableCell } from "@tiptap/extension-table-cell";
 import { TableHeader } from "@tiptap/extension-table-header";
-import { Bold, Italic, Underline as UIcon, AlignLeft, AlignCenter, AlignRight, List, ListOrdered, Grid2x2 } from "lucide-react";
+import { Bold, Italic, Underline as UIcon, AlignLeft, AlignCenter, AlignRight, List, ListOrdered, Grid2x2, Highlighter } from "lucide-react";
 
 // This project has no @tailwindcss/typography plugin, so the bare "prose"
 // class applies no styling — Tailwind's Preflight reset otherwise strips
@@ -25,6 +25,7 @@ export const NOTESHEET_EDITOR_CONTENT_CLASS =
   "[&_h2]:text-xl [&_h2]:font-bold [&_h2]:mt-4 [&_h2]:mb-2 " +
   "[&_h3]:text-lg [&_h3]:font-semibold [&_h3]:mt-3 [&_h3]:mb-1 " +
   "[&_p]:mb-3 [&_strong]:font-bold " +
+  "[&_mark]:rounded [&_mark]:px-0.5 [&_mark]:text-inherit " +
   "[&_ul]:list-disc [&_ul]:pl-6 [&_ul]:mb-3 [&_ol]:list-decimal [&_ol]:pl-6 [&_ol]:mb-3 [&_li]:mb-1 " +
   "[&_table]:border-collapse [&_table]:my-3 [&_td]:border [&_td]:border-gray-300 [&_td]:p-2 [&_th]:border [&_th]:border-gray-300 [&_th]:p-2 [&_th]:bg-gray-50";
 
@@ -54,7 +55,7 @@ export function useRichTextEditor({ content, onChange, editable = true }: {
   const editor = useEditor({
     extensions: [
       StarterKit,
-      Highlight,
+      Highlight.configure({ multicolor: true }),
       TextAlign.configure({ types: ["heading", "paragraph"] }),
       Table.configure({ resizable: true }),
       TableRow,
@@ -77,6 +78,63 @@ export function useRichTextEditor({ content, onChange, editable = true }: {
   return editor;
 }
 
+// Text-background (highlight) swatches offered by the toolbar's highlighter
+// button. `value` is what TipTap's Highlight mark stores as its colour.
+const HIGHLIGHT_COLORS: { label: string; value: string }[] = [
+  { label: "Yellow", value: "#FEF08A" },
+  { label: "Green", value: "#BBF7D0" },
+  { label: "Pink", value: "#FBCFE8" },
+  { label: "Blue", value: "#BFDBFE" },
+  { label: "Grey", value: "#E5E7EB" },
+];
+
+function HighlightMenu({ editor }: { editor: NonNullable<ReturnType<typeof useRichTextEditor>> }) {
+  const [open, setOpen] = useState(false);
+  const active = editor.isActive("highlight");
+  return (
+    <div className="relative">
+      <button
+        type="button"
+        title="Highlight text"
+        onMouseDown={(e) => { e.preventDefault(); setOpen((o) => !o); }}
+        className={`p-2 rounded-lg transition-colors ${active ? "bg-[#0D6E6E] text-white" : "text-gray-600 hover:bg-gray-200"}`}
+      >
+        <Highlighter size={15} />
+      </button>
+      {open && (
+        <>
+          <div className="fixed inset-0 z-10" onMouseDown={() => setOpen(false)} />
+          <div className="absolute z-20 mt-1 left-0 flex items-center gap-1.5 bg-white border border-gray-200 rounded-xl shadow-lg p-2">
+            {HIGHLIGHT_COLORS.map((c) => (
+              <button
+                key={c.value}
+                type="button"
+                title={c.label}
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  editor.chain().focus().setHighlight({ color: c.value }).run();
+                  setOpen(false);
+                }}
+                className="w-6 h-6 rounded-md border border-gray-300 hover:scale-110 transition-transform"
+                style={{ backgroundColor: c.value }}
+              />
+            ))}
+            <div className="w-px bg-gray-200 self-stretch mx-0.5" />
+            <button
+              type="button"
+              title="Remove highlight"
+              onMouseDown={(e) => { e.preventDefault(); editor.chain().focus().unsetHighlight().run(); setOpen(false); }}
+              className="px-2 h-6 text-xs font-medium text-gray-600 rounded-md hover:bg-gray-100"
+            >
+              Clear
+            </button>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 export function RichTextToolbar({ editor }: { editor: ReturnType<typeof useRichTextEditor> }) {
   if (!editor) return null;
   return (
@@ -91,6 +149,7 @@ export function RichTextToolbar({ editor }: { editor: ReturnType<typeof useRichT
           <Icon size={15} />
         </button>
       ))}
+      <HighlightMenu editor={editor} />
       <div className="w-px bg-gray-200 mx-1" />
       {[
         { icon: AlignLeft, cmd: () => editor.chain().focus().setTextAlign("left").run() },

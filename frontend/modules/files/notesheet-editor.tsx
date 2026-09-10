@@ -20,7 +20,7 @@ import { FileClassificationBadge, FileClassificationBanner } from "@/components/
 import { SearchableSelect } from "@/components/shared/searchable-select";
 import { useRichTextEditor, RichTextToolbar } from "@/components/shared/rich-text-editor";
 import { EditorContent } from "@tiptap/react";
-import { useFavoriteRecipients } from "@/hooks/use-favorite-recipients";
+import { useFavoriteRecipients, splitRecipientValue } from "@/hooks/use-favorite-recipients";
 import { useRecipientFilter } from "@/hooks/use-recipient-filter";
 import { OfficeSectionFilter } from "@/components/shared/office-section-filter";
 import { useAttachmentQueue } from "@/hooks/use-attachment-queue";
@@ -29,7 +29,7 @@ import { ATTACHMENT_TAGS, CUSTOM_TAG_VALUE, ALLOWED_ATTACHMENT_ACCEPT, getFileEx
 import { AttachmentPreviewModal } from "@/components/shared/attachment-preview-modal";
 import { toSafeNotesheetHtml, NOTESHEET_PROSE_CLASS } from "@/lib/notesheet-html";
 
-const DRAFT_EDIT_WINDOW_MS = 30 * 60 * 1000;
+const DRAFT_EDIT_WINDOW_MS = 24 * 60 * 60 * 1000;
 const ATTACHMENT_DELETE_WINDOW_MS = 5 * 60 * 1000;
 
 interface RouteEntry { id: string; from_user_id: string | null; to_user_id: string | null; action: string; remarks: string | null; is_current: boolean; created_at: string; from_user_info?: PersonInfo | null; to_user_info?: PersonInfo | null; }
@@ -99,7 +99,7 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
   // The whole rail starts collapsed to a thin "Expand" strip (like the
   // app sidebar) and only opens when the user explicitly expands it.
   const [railManual, setRailManual] = useState<boolean | null>(null);
-  const { toggleFavorite, buildGroups } = useFavoriteRecipients();
+  const { toggleFavorite, buildGroups, personLabel } = useFavoriteRecipients();
   // Draft editing (30-minute window)
   const [editingDraft, setEditingDraft] = useState(false);
   const [draftSubject, setDraftSubject] = useState("");
@@ -254,7 +254,7 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
   // and the subsequent-forward panel — the endpoint and payload shape are
   // unchanged; only what populates `remarks`/`to_user_id` differs by caller.
   const submitAction = useMutation({
-    mutationFn: (data: { action: string; remarks?: string; to_user_id?: string | null }) =>
+    mutationFn: (data: { action: string; remarks?: string; to_user_id?: string | null; to_role?: string }) =>
       api.post(`/efms/files/${fileId}/route`, data),
   });
 
@@ -278,7 +278,10 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
   // picker (needsRecipientPicker), which lets the user pick/change one even
   // though the rest of the draft is locked.
   async function handleFirstForward(recipientId?: string) {
-    const target = recipientId ?? file?.recipient_id;
+    const { userId: pickedId, role: pickedRole } = recipientId
+      ? splitRecipientValue(recipientId)
+      : { userId: undefined, role: undefined };
+    const target = pickedId ?? file?.recipient_id;
     if (!target) return;
     // Client-side mirror of the backend's own check (route_file) — the
     // backend re-validates this on every forward regardless, so this is
@@ -291,7 +294,7 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
       // No remarks field exists at first-forward — omitted (not "") so the
       // backend/timeline never mistake "nothing was ever written" for
       // "content exists but you can't see it."
-      await submitAction.mutateAsync({ action: actionType, to_user_id: target });
+      await submitAction.mutateAsync({ action: actionType, to_user_id: target, to_role: pickedRole });
       await afterForwardSuccess();
     } catch (err) {
       const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
@@ -309,7 +312,8 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
   // pattern as every other forward/delete action.
   async function handleSubmitAction() {
     if (!toUserId) { toast.warning("Please select a person to forward to."); return; }
-    const selected = users.find((u) => u.id === toUserId);
+    const { userId: toUid, role: toRole } = splitRecipientValue(toUserId);
+    const selected = users.find((u) => u.id === toUid);
     const confirmed = await confirmAction({
       title: "Forward File",
       html: `Are you sure you want to forward this file to <strong>${escapeHtml(selected?.full_name ?? "the selected recipient")}</strong>?`,
@@ -330,7 +334,7 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
     try {
       // Omit (not "") when the holder never wrote anything — same reasoning
       // as handleFirstForward above.
-      await submitAction.mutateAsync({ action: actionType, remarks: noteContent || undefined, to_user_id: toUserId || null });
+      await submitAction.mutateAsync({ action: actionType, remarks: noteContent || undefined, to_user_id: toUid || null, to_role: toRole });
       await afterForwardSuccess();
     } catch (err) {
       const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
@@ -536,7 +540,9 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
         category: draftCategory,
         priority: draftPriority,
         department_id: draftDepartmentId || null,
-        recipient_id: draftRecipientId || null,
+        // The draft only stores a recipient hint (user, not role) — the
+        // role is chosen when the file is actually Forwarded.
+        recipient_id: splitRecipientValue(draftRecipientId).userId || null,
       });
       await updateNotesheetMutation.mutateAsync(draftNotesheet);
       showSuccess("Draft updated.");
@@ -718,7 +724,7 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
   // silently keeping a hidden, filtered-out pick — same behavior as New
   // File creation's identical effect, kept consistent across both.
   useEffect(() => {
-    if (!loadingUsers && draftRecipientId && !users.some((u) => u.id === draftRecipientId)) {
+    if (!loadingUsers && draftRecipientId && !users.some((u) => u.id === splitRecipientValue(draftRecipientId).userId)) {
       setDraftRecipientId("");
     }
   }, [users, loadingUsers, draftRecipientId]);
@@ -746,7 +752,7 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
     draftDepartmentId !== draftBaseline.departmentId ||
     draftCategory !== draftBaseline.category ||
     draftPriority !== draftBaseline.priority ||
-    draftRecipientId !== draftBaseline.recipientId ||
+    splitRecipientValue(draftRecipientId).userId !== draftBaseline.recipientId ||
     draftNotesheet !== draftBaseline.notesheet
   );
   const myNoteDirty = canEditHolderNotesheet && myNoteContent !== myNoteBaseline;
@@ -1164,7 +1170,103 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
 
         {/* Tab content */}
         <div className="flex-1 overflow-y-auto">
-          {activeTab === "notesheet" && (
+          {activeTab === "notesheet" && editingDraft && (
+            // Edit Draft takes over the whole page — same wide layout the
+            // New File creation screen uses (2-col field grid + full-width
+            // notesheet editor), instead of being squeezed into the 336px
+            // side rail. Attachments keep their own card below the fields.
+            <div className="w-full max-w-[1100px] mx-auto p-[15px] space-y-5">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h2 className="text-xl font-bold text-[#1A1A2E]">Edit Draft</h2>
+                  <p className="text-sm text-gray-500 mt-0.5">Update the file details and notesheet, then save.</p>
+                </div>
+                <span className="text-xs text-amber-600 bg-amber-50 border border-amber-200 rounded-full px-3 py-1">24-hour editing window</span>
+              </div>
+
+              <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-6 space-y-4">
+                <div>
+                  <label className="block text-sm font-semibold text-gray-700 mb-1.5">Subject</label>
+                  <input value={draftSubject} onChange={(e) => setDraftSubject(e.target.value)}
+                    className="w-full border border-gray-300 rounded-xl px-4 py-2.5 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]" />
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                  <div>
+                    <label className="block text-sm font-semibold text-gray-700 mb-1.5">Department</label>
+                    <SearchableSelect
+                      options={departments.map((d) => ({ value: d.id, label: d.name }))}
+                      value={draftDepartmentId}
+                      onChange={setDraftDepartmentId}
+                      placeholder="None"
+                      searchPlaceholder="Search departments…"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-semibold text-gray-700 mb-1.5">Category</label>
+                    <SearchableSelect
+                      options={categories.filter((c) => c.is_active !== false).map((c) => ({ value: c.name, label: c.name }))}
+                      value={draftCategory}
+                      onChange={setDraftCategory}
+                      clearable={false}
+                      placeholder="Select category…"
+                      searchPlaceholder="Search categories…"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-semibold text-gray-700 mb-1.5">Priority</label>
+                    <SearchableSelect
+                      options={priorities.filter((p) => p.is_active !== false).map((p) => ({ value: p.name, label: p.label ?? p.name }))}
+                      value={draftPriority}
+                      onChange={setDraftPriority}
+                      clearable={false}
+                      placeholder="Select priority…"
+                      searchPlaceholder="Search priorities…"
+                    />
+                  </div>
+                </div>
+                <OfficeSectionFilter
+                  officeId={officeId}
+                  sectionId={sectionId}
+                  offices={offices}
+                  sections={sections}
+                  onOfficeChange={setOfficeId}
+                  onSectionChange={setSectionId}
+                />
+                <div>
+                  <label className="block text-sm font-semibold text-gray-700 mb-1.5">Recipient</label>
+                  <SearchableSelect
+                    groups={buildGroups(users, personLabel)}
+                          widePanel
+                    value={draftRecipientId}
+                    onChange={setDraftRecipientId}
+                    isFavorite={(v) => !!users.find((u) => u.id === splitRecipientValue(v).userId)?.is_favorite}
+                    onToggleFavorite={(v) => { const uid = splitRecipientValue(v).userId; const u = users.find((x) => x.id === uid); if (u) toggleFavorite(uid, !!u.is_favorite); }}
+                    placeholder="No recipient yet…"
+                    searchPlaceholder="Search users…"
+                  />
+                </div>
+              </div>
+
+              <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
+                <div className="px-6 py-3.5 border-b border-gray-200">
+                  <h3 className="text-base font-bold text-gray-900">Notesheet</h3>
+                </div>
+                <RichTextToolbar editor={draftEditor} />
+                <EditorContent editor={draftEditor} className="min-h-[420px] text-base" />
+              </div>
+
+              <div className="flex gap-2 justify-end">
+                <button onClick={() => guardNavigation(() => setEditingDraft(false))}
+                  className="px-5 py-2.5 text-sm border border-gray-200 rounded-xl hover:bg-gray-50 font-medium">Cancel</button>
+                <button onClick={handleSaveDraft} disabled={updateFileMutation.isPending || updateNotesheetMutation.isPending || !editDraftDirty}
+                  className="px-6 py-2.5 text-sm rounded-xl font-bold flex items-center justify-center gap-2 bg-[#0D6E6E] text-white hover:bg-[#178F8F] disabled:opacity-50">
+                  {(updateFileMutation.isPending || updateNotesheetMutation.isPending) ? <Loader2 size={15} className="animate-spin" /> : <Save size={15} />}
+                  {(updateFileMutation.isPending || updateNotesheetMutation.isPending) ? "Saving…" : "Save Changes"}
+                </button>
+              </div>
+            </div>
+          )}
+          {activeTab === "notesheet" && !editingDraft && (
             <div className="w-full p-[15px] flex flex-col lg:flex-row gap-4 items-start">
               {/* MAIN (wide, centred): My Notesheet (top, if current holder)
                   -> Notesheet History (newest holding-period first) ->
@@ -1340,7 +1442,7 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                       [&_h1]:text-2xl [&_h1]:font-bold [&_h1]:mt-4 [&_h1]:mb-2
                       [&_h2]:text-xl [&_h2]:font-bold [&_h2]:mt-4 [&_h2]:mb-2
                       [&_h3]:text-lg [&_h3]:font-semibold [&_h3]:mt-3 [&_h3]:mb-1
-                      [&_p]:mb-3 [&_ol]:pl-6 [&_ul]:pl-6 [&_li]:mb-1 [&_strong]:font-bold"
+                      [&_p]:mb-3 [&_ol]:pl-6 [&_ul]:pl-6 [&_li]:mb-1 [&_strong]:font-bold [&_mark]:rounded [&_mark]:px-0.5 [&_mark]:text-inherit"
                       dangerouslySetInnerHTML={{ __html: file.notesheet.content }} />
                   ) : (
                     <div className="px-6 py-10 text-center text-gray-400">
@@ -1354,98 +1456,15 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                   (draft, window closed) / Forward panel (subsequent holders).
                   Sticks alongside the notesheet on wide screens; drops below
                   it on narrow ones. */}
-              <div className="w-full lg:w-[336px] shrink-0 lg:sticky lg:top-4 space-y-5">
-                {editingDraft ? (
-                  <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-5 space-y-4">
-                    <div className="flex items-center justify-between">
-                      <h2 className="text-base font-bold text-gray-800">Edit Draft</h2>
-                      <span className="text-xs text-amber-600 bg-amber-50 border border-amber-200 rounded-full px-2 py-0.5">30-min window</span>
-                    </div>
-                    <div>
-                      <label className="block text-sm font-semibold text-gray-700 mb-1.5">Subject</label>
-                      <input value={draftSubject} onChange={(e) => setDraftSubject(e.target.value)}
-                        className="w-full border border-gray-300 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]" />
-                    </div>
-                    <div>
-                      <label className="block text-sm font-semibold text-gray-700 mb-1.5">Department</label>
-                      <SearchableSelect
-                        options={departments.map((d) => ({ value: d.id, label: d.name }))}
-                        value={draftDepartmentId}
-                        onChange={setDraftDepartmentId}
-                        placeholder="None"
-                        searchPlaceholder="Search departments…"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-sm font-semibold text-gray-700 mb-1.5">Category</label>
-                      <SearchableSelect
-                        options={categories.filter((c) => c.is_active !== false).map((c) => ({ value: c.name, label: c.name }))}
-                        value={draftCategory}
-                        onChange={setDraftCategory}
-                        clearable={false}
-                        placeholder="Select category…"
-                        searchPlaceholder="Search categories…"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-sm font-semibold text-gray-700 mb-1.5">Priority</label>
-                      <SearchableSelect
-                        options={priorities.filter((p) => p.is_active !== false).map((p) => ({ value: p.name, label: p.label ?? p.name }))}
-                        value={draftPriority}
-                        onChange={setDraftPriority}
-                        clearable={false}
-                        placeholder="Select priority…"
-                        searchPlaceholder="Search priorities…"
-                      />
-                    </div>
-                    <OfficeSectionFilter
-                      officeId={officeId}
-                      sectionId={sectionId}
-                      offices={offices}
-                      sections={sections}
-                      onOfficeChange={setOfficeId}
-                      onSectionChange={setSectionId}
-                    />
-                    <div>
-                      <label className="block text-sm font-semibold text-gray-700 mb-1.5">Recipient</label>
-                      <SearchableSelect
-                        groups={buildGroups(users, (u) => u.full_name + (u.designation ? ` — ${u.designation}` : ""))}
-                        value={draftRecipientId}
-                        onChange={setDraftRecipientId}
-                        isFavorite={(id) => !!users.find((u) => u.id === id)?.is_favorite}
-                        onToggleFavorite={(id) => {
-                          const u = users.find((u) => u.id === id);
-                          if (u) toggleFavorite(id, !!u.is_favorite);
-                        }}
-                        placeholder="No recipient yet…"
-                        searchPlaceholder="Search users…"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-sm font-semibold text-gray-700 mb-1.5">Notesheet</label>
-                      <div className="border border-gray-200 rounded-xl overflow-hidden">
-                        <RichTextToolbar editor={draftEditor} />
-                        <EditorContent editor={draftEditor} className="min-h-[220px] text-sm" />
-                      </div>
-                    </div>
-                    <div className="flex gap-2 pt-1">
-                      <button onClick={() => guardNavigation(() => setEditingDraft(false))}
-                        className="flex-1 py-2.5 text-sm border border-gray-200 rounded-xl hover:bg-gray-50 font-medium">Cancel</button>
-                      <button onClick={handleSaveDraft} disabled={updateFileMutation.isPending || updateNotesheetMutation.isPending || !editDraftDirty}
-                        className="flex-1 py-2.5 text-sm rounded-xl font-bold flex items-center justify-center gap-2 bg-[#0D6E6E] text-white hover:bg-[#178F8F] disabled:opacity-50">
-                        {(updateFileMutation.isPending || updateNotesheetMutation.isPending) ? <Loader2 size={15} className="animate-spin" /> : <Save size={15} />}
-                        {(updateFileMutation.isPending || updateNotesheetMutation.isPending) ? "Saving…" : "Save Changes"}
-                      </button>
-                    </div>
-                  </div>
-                ) : needsRecipientPicker ? (
+              <div className="w-full lg:w-[420px] xl:w-[460px] shrink-0 lg:sticky lg:top-4 space-y-5">
+                {needsRecipientPicker ? (
                   <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-5 space-y-4">
                     <div className="flex items-center justify-between">
                       <h2 className="text-base font-bold text-gray-800">Select Recipient</h2>
                       <span className="text-xs text-gray-500 bg-gray-50 border border-gray-200 rounded-full px-2 py-0.5">Editing locked</span>
                     </div>
                     <p className="text-sm text-gray-500">
-                      The 30-minute editing window has closed, so the subject, category, priority and notesheet
+                      The 24-hour editing window has closed, so the subject, category, priority and notesheet
                       are now read-only. You can still choose who to forward this file to.
                     </p>
                     <OfficeSectionFilter
@@ -1462,14 +1481,12 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                         <p className="text-sm text-amber-600 bg-amber-50 rounded-xl p-3">No users available.</p>
                       ) : (
                         <SearchableSelect
-                          groups={buildGroups(users, (u) => u.full_name + (u.designation ? ` — ${u.designation}` : "") + (u.department_name ? ` (${u.department_name})` : ""))}
+                          groups={buildGroups(users, personLabel)}
+                          widePanel
                           value={toUserId}
                           onChange={setToUserId}
-                          isFavorite={(id) => !!users.find((u) => u.id === id)?.is_favorite}
-                          onToggleFavorite={(id) => {
-                            const u = users.find((u) => u.id === id);
-                            if (u) toggleFavorite(id, !!u.is_favorite);
-                          }}
+                          isFavorite={(v) => !!users.find((u) => u.id === splitRecipientValue(v).userId)?.is_favorite}
+                          onToggleFavorite={(v) => { const uid = splitRecipientValue(v).userId; const u = users.find((x) => x.id === uid); if (u) toggleFavorite(uid, !!u.is_favorite); }}
                           placeholder="Select…"
                           searchPlaceholder="Search users…"
                         />
@@ -1507,14 +1524,12 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                         <p className="text-sm text-amber-600 bg-amber-50 rounded-xl p-3">No users available.</p>
                       ) : (
                         <SearchableSelect
-                          groups={buildGroups(users, (u) => u.full_name + (u.designation ? ` — ${u.designation}` : "") + (u.department_name ? ` (${u.department_name})` : ""))}
+                          groups={buildGroups(users, personLabel)}
+                          widePanel
                           value={toUserId}
                           onChange={setToUserId}
-                          isFavorite={(id) => !!users.find((u) => u.id === id)?.is_favorite}
-                          onToggleFavorite={(id) => {
-                            const u = users.find((u) => u.id === id);
-                            if (u) toggleFavorite(id, !!u.is_favorite);
-                          }}
+                          isFavorite={(v) => !!users.find((u) => u.id === splitRecipientValue(v).userId)?.is_favorite}
+                          onToggleFavorite={(v) => { const uid = splitRecipientValue(v).userId; const u = users.find((x) => x.id === uid); if (u) toggleFavorite(uid, !!u.is_favorite); }}
                           placeholder="Select…"
                           searchPlaceholder="Search users…"
                         />

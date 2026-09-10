@@ -12,7 +12,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/services/api";
 import { toast } from "sonner";
 import { confirmAction, showSuccess } from "@/lib/alert";
-import { Plus, FolderKanban, CheckCircle2, RotateCcw, UserPlus, Repeat } from "lucide-react";
+import { Plus, FolderKanban, CheckCircle2, RotateCcw, UserPlus, Repeat, UserPen } from "lucide-react";
 import { SearchableSelect } from "@/components/shared/searchable-select";
 
 interface Project {
@@ -37,6 +37,13 @@ interface AdminUser {
   is_active: boolean;
 }
 
+interface DeptOpt { id: string; name: string; is_active: boolean; }
+interface RoleOpt { id: string; name: string; is_system: boolean; }
+
+const prettyRole = (name: string) =>
+  ({ efms_officer: "eFMS Officer", efms_admin: "eFMS Admin", super_admin: "Super Admin" } as Record<string, string>)[name]
+  ?? name.split("_").map((w) => w[0]?.toUpperCase() + w.slice(1)).join(" ");
+
 const INPUT = "w-full border border-gray-300 rounded-lg px-3 py-2.5 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]";
 const LABEL = "block text-sm font-semibold text-gray-600 mb-1";
 
@@ -48,6 +55,14 @@ export function ProjectManagementSection() {
   const [createAssignUserId, setCreateAssignUserId] = useState("");
   const [assignTarget, setAssignTarget] = useState<{ project: Project; mode: "assign" | "reassign" } | null>(null);
   const [assignUserId, setAssignUserId] = useState("");
+  // Edit-PI-profile dialog state (super admin: rename / re-designate the
+  // project's current PI profile).
+  const [editProfileTarget, setEditProfileTarget] = useState<Project | null>(null);
+  const [profileForm, setProfileForm] = useState({
+    first_name: "", middle_name: "", last_name: "", designation: "",
+    mobile: "", department_id: "", role: "", can_sign: false,
+  });
+  const [profileLoading, setProfileLoading] = useState(false);
 
   const { data: projects = [], isLoading } = useQuery<Project[]>({
     queryKey: ["projects"],
@@ -64,6 +79,19 @@ export function ProjectManagementSection() {
     // Create Project form, so it always loads on this screen.
   });
   const candidates = eligibleUsers.filter((u) => u.active_role !== "super_admin");
+
+  // For the Edit-PI modal's Department + Role selects.
+  const { data: departments = [] } = useQuery<DeptOpt[]>({
+    queryKey: ["admin-departments-all"],
+    queryFn: async () => (await api.get("/admin/departments/all")).data,
+  });
+  const { data: roles = [] } = useQuery<RoleOpt[]>({
+    queryKey: ["admin-roles"],
+    queryFn: async () => (await api.get("/auth/admin/roles")).data,
+  });
+  const roleOptions = roles
+    .filter((r) => r.name !== "super_admin")
+    .map((r) => ({ value: r.name, label: prettyRole(r.name) }));
 
   async function act(fn: () => Promise<unknown>) {
     try {
@@ -114,6 +142,46 @@ export function ProjectManagementSection() {
 
   async function handleReactivate(p: Project) {
     act(() => api.patch(`/projects/${p.id}/reactivate`, {}));
+  }
+
+  async function openEditProfile(p: Project) {
+    setEditProfileTarget(p);
+    setProfileLoading(true);
+    try {
+      const { data } = await api.get(`/projects/${p.id}/profile`);
+      setProfileForm({
+        first_name: data.first_name ?? "",
+        middle_name: data.middle_name ?? "",
+        last_name: data.last_name ?? "",
+        designation: data.designation ?? "",
+        mobile: data.mobile ?? "",
+        department_id: data.department_id ?? "",
+        role: data.active_role ?? "",
+        can_sign: !!data.can_sign,
+      });
+    } catch {
+      toast.error("Could not load the PI profile.");
+      setEditProfileTarget(null);
+    } finally {
+      setProfileLoading(false);
+    }
+  }
+
+  async function handleEditProfileSubmit() {
+    if (!editProfileTarget || !profileForm.first_name.trim()) return;
+    await act(() =>
+      api.patch(`/projects/${editProfileTarget.id}/profile`, {
+        first_name: profileForm.first_name.trim(),
+        middle_name: profileForm.middle_name.trim() || null,
+        last_name: profileForm.last_name.trim() || null,
+        designation: profileForm.designation.trim() || null,
+        mobile: profileForm.mobile.trim() || null,
+        department_id: profileForm.department_id || undefined,
+        role: profileForm.role || undefined,
+        can_sign: profileForm.can_sign,
+      }),
+    );
+    setEditProfileTarget(null);
   }
 
   return (
@@ -175,10 +243,16 @@ export function ProjectManagementSection() {
                     <UserPlus size={13} /> Assign
                   </button>
                 ) : p.status === "active" ? (
-                  <button onClick={() => setAssignTarget({ project: p, mode: "reassign" })}
-                    className="flex items-center gap-1 px-3 py-1.5 border border-gray-300 text-gray-700 rounded-lg text-xs font-semibold hover:bg-gray-50">
-                    <Repeat size={13} /> Reassign
-                  </button>
+                  <>
+                    <button onClick={() => openEditProfile(p)}
+                      className="flex items-center gap-1 px-3 py-1.5 border border-gray-300 text-gray-700 rounded-lg text-xs font-semibold hover:bg-gray-50">
+                      <UserPen size={13} /> Edit PI
+                    </button>
+                    <button onClick={() => setAssignTarget({ project: p, mode: "reassign" })}
+                      className="flex items-center gap-1 px-3 py-1.5 border border-gray-300 text-gray-700 rounded-lg text-xs font-semibold hover:bg-gray-50">
+                      <Repeat size={13} /> Reassign
+                    </button>
+                  </>
                 ) : null}
                 {p.status === "active" ? (
                   <button onClick={() => handleComplete(p)}
@@ -224,6 +298,89 @@ export function ProjectManagementSection() {
                 {assignTarget.mode === "assign" ? "Assign" : "Reassign"}
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {editProfileTarget && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-6" onClick={() => setEditProfileTarget(null)}>
+          <div className="bg-white rounded-2xl p-6 max-w-lg w-full shadow-2xl max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+            <h3 className="text-lg font-bold text-gray-900 mb-1">
+              Edit PI Profile — #{editProfileTarget.project_number}
+            </h3>
+            <p className="text-sm text-gray-500 mb-4">
+              Edit every field of the current PI profile for &quot;{editProfileTarget.name}&quot;. The project
+              link and the underlying person are not changed here — use Reassign for that.
+            </p>
+            {profileLoading ? (
+              <p className="text-sm text-gray-400 py-6 text-center">Loading profile…</p>
+            ) : (
+              <>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <div>
+                    <label className={LABEL}>First name *</label>
+                    <input value={profileForm.first_name} onChange={(e) => setProfileForm((s) => ({ ...s, first_name: e.target.value }))}
+                      placeholder="e.g. Dr. A. Sharma" className={INPUT} />
+                  </div>
+                  <div>
+                    <label className={LABEL}>Middle name</label>
+                    <input value={profileForm.middle_name} onChange={(e) => setProfileForm((s) => ({ ...s, middle_name: e.target.value }))}
+                      className={INPUT} />
+                  </div>
+                  <div>
+                    <label className={LABEL}>Last name</label>
+                    <input value={profileForm.last_name} onChange={(e) => setProfileForm((s) => ({ ...s, last_name: e.target.value }))}
+                      placeholder={`e.g. PI${editProfileTarget.project_number}`} className={INPUT} />
+                  </div>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-3">
+                  <div>
+                    <label className={LABEL}>Designation</label>
+                    <input value={profileForm.designation} onChange={(e) => setProfileForm((s) => ({ ...s, designation: e.target.value }))}
+                      placeholder="e.g. Principal Investigator" className={INPUT} />
+                  </div>
+                  <div>
+                    <label className={LABEL}>Mobile</label>
+                    <input value={profileForm.mobile} onChange={(e) => setProfileForm((s) => ({ ...s, mobile: e.target.value }))}
+                      placeholder="e.g. 9000000001" className={INPUT} />
+                  </div>
+                  <div>
+                    <label className={LABEL}>Department</label>
+                    <SearchableSelect
+                      options={departments.filter((d) => d.is_active !== false).map((d) => ({ value: d.id, label: d.name }))}
+                      value={profileForm.department_id}
+                      onChange={(v) => setProfileForm((s) => ({ ...s, department_id: v }))}
+                      placeholder="None"
+                      searchPlaceholder="Search departments…"
+                    />
+                  </div>
+                  <div>
+                    <label className={LABEL}>Role</label>
+                    <SearchableSelect
+                      options={roleOptions}
+                      value={profileForm.role}
+                      onChange={(v) => setProfileForm((s) => ({ ...s, role: v }))}
+                      clearable={false}
+                      placeholder="Select role…"
+                      searchPlaceholder="Search roles…"
+                    />
+                  </div>
+                </div>
+                <label className="flex items-center gap-2 mt-4 text-sm font-medium text-gray-700 cursor-pointer">
+                  <input type="checkbox" checked={profileForm.can_sign}
+                    onChange={(e) => setProfileForm((s) => ({ ...s, can_sign: e.target.checked }))}
+                    className="w-4 h-4 rounded border-gray-300 text-[#0D6E6E] focus:ring-[#0D6E6E]" />
+                  Can sign (e-signature permission)
+                </label>
+                <div className="flex gap-3 mt-5">
+                  <button onClick={() => setEditProfileTarget(null)} className="flex-1 px-4 py-2.5 text-sm border border-gray-200 rounded-lg hover:bg-gray-50 font-medium">Cancel</button>
+                  <button onClick={handleEditProfileSubmit} disabled={!profileForm.first_name.trim()}
+                    className="flex-1 px-4 py-2.5 text-sm bg-[#0D6E6E] text-white rounded-lg font-semibold hover:bg-[#178F8F] disabled:opacity-50">
+                    Save
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         </div>
       )}

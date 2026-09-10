@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from typing import Optional, List
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
+from sqlalchemy import select, func, or_
 from pydantic import BaseModel
 
 from app.db.base import get_db
@@ -39,6 +39,10 @@ async def my_docket(db: AsyncSession = Depends(get_db), user: User = Depends(get
             EfmsFile.current_holder_id == user.id,
             EfmsFile.created_by != user.id,
             EfmsFile.status != FileStatus.draft,
+            # Multi-role: only files that landed in THIS role's workspace.
+            # NULL current_holder_role = a legacy / single-role file — show
+            # it regardless of the caller's active role.
+            or_(EfmsFile.current_holder_role.is_(None), EfmsFile.current_holder_role == user.active_role),
         )
         .order_by(EfmsFile.updated_at.desc())
     )
@@ -140,6 +144,7 @@ async def release_file(file_id: UUID, db: AsyncSession = Depends(get_db), user: 
 
     # Clear current_holder so the file leaves everyone's docket
     file.current_holder_id = None
+    file.current_holder_role = None
     await db.commit()
     return {"released": True}
 
@@ -181,6 +186,8 @@ async def reopen_file(file_id: UUID, db: AsyncSession = Depends(get_db), user: U
     docket.is_released = False
     file.status = FileStatus.active
     file.current_holder_id = user.id
+    # Back in the creator's current-role workspace.
+    file.current_holder_role = user.active_role
     await db.commit()
     return {"reopened": True}
 

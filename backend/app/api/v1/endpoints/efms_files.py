@@ -17,7 +17,7 @@ import os, aiofiles
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Request
 from fastapi.responses import FileResponse, Response
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, or_, func, func
+from sqlalchemy import select, or_, and_, func
 from sqlalchemy.orm import selectinload
 from app.core.config import settings
 
@@ -64,11 +64,11 @@ from app.api.v1.endpoints.admin import create_notification
 # normal file-level authorization; they are all normal users for this purpose.
 
 # A Draft file (metadata + notesheet) is editable for only this long after creation.
-DRAFT_EDIT_WINDOW = timedelta(minutes=30)
+DRAFT_EDIT_WINDOW = timedelta(hours=24)
 
 # An uploaded attachment may only be deleted by its uploader within this long
 # of the upload — reuses the same "created_at + window" pattern as DRAFT_EDIT_WINDOW.
-ATTACHMENT_DELETE_WINDOW = timedelta(minutes=5)
+ATTACHMENT_DELETE_WINDOW = timedelta(hours=24)
 
 # Reused wherever a real .docx (native or converted-from-.doc) is served/stored,
 # so the exact MIME string only lives in one place.
@@ -173,6 +173,27 @@ async def _load_file(file_id: UUID, db: AsyncSession) -> EfmsFile:
     return f
 
 
+async def _identity_chain_ids(user: User, db: AsyncSession) -> set[UUID]:
+    """The user's own id plus every account they succeeded via ownership
+    transfer (account_predecessor_id), following the chain. This is the set
+    of user-ids the file-access checks treat as "this person" — so a
+    successor sees everything their predecessor(s) could: files they
+    created, holding-period notes they wrote, routing history they were in.
+    Cheap: chains are at most a few links and this is only called on a
+    single file-open / tracking-view.
+
+    A project profile resolves through its origin first (origin_user_id),
+    matching how the rest of the app treats a PI profile as "just that
+    person for authorization"."""
+    ids: set[UUID] = set()
+    cursor: Optional[UUID] = user.origin_user_id or user.id
+    while cursor and cursor not in ids:
+        ids.add(cursor)
+        row = await db.execute(select(User.account_predecessor_id).where(User.id == cursor))
+        cursor = row.scalar_one_or_none()
+    return ids
+
+
 async def _has_full_file_access(f: EfmsFile, user: User, db: AsyncSession) -> bool:
     """True for an admin, the CURRENT holder (file.current_holder_id ==
     user.id, and nothing else), or a department member viewing a file
@@ -236,7 +257,9 @@ async def _authorize_file_open(f: EfmsFile, user: User, db: AsyncSession) -> str
     History, not this one)."""
     if await _has_full_file_access(f, user, db):
         return "full"
-    if f.created_by == user.id:
+    # The creator — or a successor who inherited the creator's account via
+    # an ownership transfer — gets the restricted read-only view.
+    if f.created_by in await _identity_chain_ids(user, db):
         return "creator_restricted"
     raise HTTPException(status_code=403, detail="You don't have access to view this file.")
 
@@ -255,10 +278,14 @@ async def _assert_tracking_access(f: EfmsFile, user: User, db: AsyncSession) -> 
     returns the initial notesheet or attachments."""
     if user.is_super_admin:
         return
-    if f.created_by == user.id or f.current_holder_id == user.id:
+    # "This person" = the caller plus any account they succeeded via an
+    # ownership transfer. A successor sees the predecessor's tracking
+    # history exactly as the predecessor would have.
+    chain = await _identity_chain_ids(user, db)
+    if f.created_by in chain or f.current_holder_id in chain:
         return
     was_participant = any(
-        e.from_user_id == user.id or e.to_user_id == user.id
+        e.from_user_id in chain or e.to_user_id in chain
         for e in f.route_entries
     )
     if was_participant:
@@ -467,16 +494,30 @@ async def list_files(
 
     is_admin = user.is_super_admin
 
+    # Multi-role workspace scoping: a role's Docket / My Files only show
+    # files stamped with that role. NULL role on a file = legacy / single-
+    # role — always visible. `is_admin` skips scoping entirely.
+    _in_role_hold = or_(EfmsFile.current_holder_role.is_(None), EfmsFile.current_holder_role == user.active_role)
+    _in_role_created = or_(EfmsFile.creator_role.is_(None), EfmsFile.creator_role == user.active_role)
+
     if inbox:
         # Inbox: files where user is current holder (files forwarded to them)
         q = q.where(EfmsFile.current_holder_id == user.id)
+        if not is_admin:
+            q = q.where(_in_role_hold)
     elif outbox:
         from app.models.efms_extra import Docket
         released_sub = select(Docket.file_id).where(Docket.is_released == True).scalar_subquery()
         q = q.where(EfmsFile.created_by == user.id, EfmsFile.id.not_in(released_sub))
+        if not is_admin:
+            q = q.where(_in_role_created)
     elif not is_admin:
-        # Regular users see files they created OR files forwarded to them
-        q = q.where(or_(EfmsFile.created_by == user.id, EfmsFile.current_holder_id == user.id))
+        # Regular users see files they created OR files forwarded to them —
+        # in each case scoped to the role they're currently acting as.
+        q = q.where(or_(
+            and_(EfmsFile.created_by == user.id, _in_role_created),
+            and_(EfmsFile.current_holder_id == user.id, _in_role_hold),
+        ))
 
     if status:
         q = q.where(EfmsFile.status == status)
@@ -777,6 +818,11 @@ async def create_file(
         recipient_name=recipient_name,
         created_by=user.id,
         current_holder_id=user.id,
+        # The file belongs to the creator's current-role workspace (multi-
+        # role users). While it is still a Draft the creator also holds it,
+        # so both role fields start the same.
+        creator_role=user.active_role,
+        current_holder_role=user.active_role,
         status=FileStatus.draft,
     )
     db.add(efms_file)
@@ -802,7 +848,7 @@ async def update_file(
     if f.status != FileStatus.draft:
         raise HTTPException(status_code=400, detail="Metadata can only be edited while the file is a Draft.")
     if _draft_edit_expired(f):
-        raise HTTPException(status_code=400, detail="Draft editing window (30 minutes) has expired.")
+        raise HTTPException(status_code=400, detail="Draft editing window (24 hours) has expired.")
 
     update_data = body.model_dump(exclude_none=True)
     # recipient_id is authoritative — always re-resolve recipient_name from the
@@ -879,7 +925,7 @@ async def save_notesheet(
         if f.created_by != user.id and not user.is_super_admin:
             raise HTTPException(status_code=403, detail="Only the file creator can edit this notesheet.")
         if _draft_edit_expired(f):
-            raise HTTPException(status_code=400, detail="Draft editing window (30 minutes) has expired.")
+            raise HTTPException(status_code=400, detail="Draft editing window (24 hours) has expired.")
     else:
         raise HTTPException(status_code=400, detail="Notesheet cannot be edited at this file stage.")
     if not f.notesheet:
@@ -1899,6 +1945,24 @@ async def route_file(
         if to_user and not to_user.is_active:
             raise HTTPException(status_code=400, detail="Cannot forward a file to an inactive recipient.")
 
+    # Resolve the recipient's target role (multi-role users). The sender
+    # picked "<person> — <role>" in the recipient list; `to_role` carries
+    # that. Validate it against the roles the recipient actually holds; fall
+    # back to their active_role. NULL for a single-role recipient with no
+    # user_roles rows (legacy) — treated as "any role" downstream.
+    to_role: Optional[str] = None
+    if body.action == RouteAction.forward and body.to_user_id:
+        _rec = await db.scalar(
+            select(User).options(selectinload(User.roles)).where(User.id == body.to_user_id)
+        )
+        _held = {ur.role for ur in _rec.roles} if _rec else set()
+        if body.to_role and body.to_role in _held:
+            to_role = body.to_role
+        elif _rec and _rec.active_role in _held:
+            to_role = _rec.active_role
+        elif _rec:
+            to_role = _rec.active_role  # single-role recipient, no user_roles row
+
     for entry in f.route_entries:
         entry.is_current = False
 
@@ -1906,6 +1970,8 @@ async def route_file(
         file_id=file_id,
         from_user_id=user.id,
         to_user_id=body.to_user_id,
+        from_role=user.active_role,
+        to_role=to_role,
         action=body.action,
         # Normalize "" to NULL: an empty string is not the same thing as "no
         # remark" downstream — track_file's `has_remark = e.remarks is not
@@ -1935,6 +2001,8 @@ async def route_file(
         await _finalize_current_holder_note(db, file_id, user.id)
         await _start_holding_period(db, file_id, body.to_user_id)
         f.current_holder_id = body.to_user_id
+        # The file now lives in this recipient's <to_role> workspace.
+        f.current_holder_role = to_role
     elif body.action == RouteAction.dispatch:
         f.status = FileStatus.dispatched
 
@@ -2073,7 +2141,7 @@ async def delete_attachment(
     if not f or f.current_holder_id != user.id:
         raise HTTPException(status_code=403, detail="You can only delete attachments while you are the current holder of this file.")
     if _attachment_delete_expired(att):
-        raise HTTPException(status_code=400, detail="Attachment deletion window (5 minutes) has expired.")
+        raise HTTPException(status_code=400, detail="Attachment deletion window (24 hours) has expired.")
     # Remove file from disk
     dest = os.path.join(os.path.abspath(settings.UPLOAD_DIR), att.stored_name)
     if os.path.exists(dest):

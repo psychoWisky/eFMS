@@ -213,10 +213,21 @@ export function EFMSDashboard() {
     });
   }
 
+  // The workspace context: a project profile shows its project; otherwise the
+  // active role IS the workspace (switching roles = switching workspace).
+  const roleLabel = role ? role.replace(/_/g, " ").replace(/\b\w/g, (m) => m.toUpperCase()) : "";
+  const workspaceContext = user?.project_name
+    ? `${user.project_name}${user.project_number ? ` (PI${user.project_number})` : ""}`
+    : roleLabel;
+
   return (
     <div className="min-h-screen bg-[#F5F7FA]">
       <PageHeader
-        title="eFMS Workspace"
+        title={
+          workspaceContext
+            ? <>eFMS Workspace <span className="text-[#4A5568] font-semibold">— {workspaceContext}</span></>
+            : "eFMS Workspace"
+        }
         subtitle={<>{user?.full_name} · <span className="capitalize">{role?.replace("_", " ")}</span></>}
       />
 

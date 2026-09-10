@@ -79,6 +79,9 @@ const TIMELINE_STYLE = `
     font-size: 13px; line-height: 1.6; color: #1A1A1A; background: #ffffff;
   }
   .tl-doc strong, .tl-doc b { font-weight: 700; }
+  /* Highlighted text from the notesheet editor. TipTap also writes an
+     inline background-color; this is the fallback + rounding for the PDF. */
+  .tl-doc mark { background-color: #FEF08A; color: inherit; border-radius: 3px; padding: 0 1px; }
 
   .tl-doc .letterhead { width: 100%; border-collapse: collapse; }
   .tl-doc .lh-logo-cell { width: 88px; vertical-align: middle; padding: 0; }

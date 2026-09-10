@@ -10,7 +10,7 @@ import { Loader2, Upload, X, FileText, Send, AlertTriangle, CheckCircle2, Save, 
 import { PersonBadge } from "@/components/shared/person-badge";
 import { SearchableSelect } from "@/components/shared/searchable-select";
 import { useRichTextEditor, RichTextToolbar } from "@/components/shared/rich-text-editor";
-import { useFavoriteRecipients } from "@/hooks/use-favorite-recipients";
+import { useFavoriteRecipients, splitRecipientValue } from "@/hooks/use-favorite-recipients";
 import { useRecipientFilter } from "@/hooks/use-recipient-filter";
 import { useAttachmentQueue, resolveAttachmentTag } from "@/hooks/use-attachment-queue";
 import { useUnsavedChangesGuard } from "@/hooks/use-unsaved-changes-guard";
@@ -65,7 +65,7 @@ export function NewFileForm({ onSuccess }: NewFileFormProps) {
   // for the filtered list to finish loading first, so an in-flight refetch
   // doesn't transiently clear a still-valid selection.
   useEffect(() => {
-    if (!loadingUsers && recipientId && !allUsers.some((u) => u.id === recipientId)) {
+    if (!loadingUsers && recipientId && !allUsers.some((u) => u.id === splitRecipientValue(recipientId).userId)) {
       setRecipientId("");
     }
   }, [allUsers, loadingUsers, recipientId]);
@@ -122,13 +122,14 @@ export function NewFileForm({ onSuccess }: NewFileFormProps) {
 
   async function doCreateFile(): Promise<string> {
     const noteContent = editor?.getHTML() ?? "";
-    const selectedUser = allUsers.find((u) => u.id === recipientId);
+    const { userId: recUserId } = splitRecipientValue(recipientId);
+    const selectedUser = allUsers.find((u) => u.id === recUserId);
     const res = await api.post("/efms/files", {
       subject,
       category,
       priority,
       is_confidential: isConfidential,
-      recipient_id: recipientId || undefined,
+      recipient_id: recUserId || undefined,
       recipient_name: selectedUser?.full_name,
       initial_content: noteContent,
     });
@@ -194,7 +195,8 @@ export function NewFileForm({ onSuccess }: NewFileFormProps) {
   const createAndForwardFile = useMutation({
     mutationFn: async () => {
       const fileId = await doCreateFile();
-      await api.post(`/efms/files/${fileId}/route`, { action: "forward", to_user_id: recipientId });
+      const { userId: recUserId, role: recRole } = splitRecipientValue(recipientId);
+      await api.post(`/efms/files/${fileId}/route`, { action: "forward", to_user_id: recUserId, to_role: recRole });
       return fileId;
     },
     onSuccess: () => {
@@ -269,7 +271,7 @@ export function NewFileForm({ onSuccess }: NewFileFormProps) {
     onDiscard: handleDiscardNewFile,
   });
 
-  const selectedRecipient = allUsers.find((u) => u.id === recipientId);
+  const selectedRecipient = allUsers.find((u) => u.id === splitRecipientValue(recipientId).userId);
 
   const fieldLabel = "block text-sm font-semibold text-gray-700 mb-1.5";
   const fieldHint = "text-xs text-gray-400 mb-1.5";
@@ -391,12 +393,14 @@ export function NewFileForm({ onSuccess }: NewFileFormProps) {
               ) : (
                 <SearchableSelect
                   groups={buildGroups(allUsers, personLabel)}
+                  widePanel
                   value={recipientId}
                   onChange={setRecipientId}
-                  isFavorite={(id) => !!allUsers.find((u) => u.id === id)?.is_favorite}
-                  onToggleFavorite={(id) => {
-                    const u = allUsers.find((u) => u.id === id);
-                    if (u) toggleFavorite(id, !!u.is_favorite);
+                  isFavorite={(v) => !!allUsers.find((u) => u.id === splitRecipientValue(v).userId)?.is_favorite}
+                  onToggleFavorite={(v) => {
+                    const uid = splitRecipientValue(v).userId;
+                    const u = allUsers.find((x) => x.id === uid);
+                    if (u) toggleFavorite(uid, !!u.is_favorite);
                   }}
                   placeholder="No recipient yet…"
                   searchPlaceholder="Search by name or employee code…"

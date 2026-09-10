@@ -3,6 +3,7 @@ from typing import Any, Optional
 import re
 import secrets
 import string
+import uuid
 import bcrypt
 from jose import JWTError, jwt
 from app.core.config import settings
@@ -57,7 +58,11 @@ def create_access_token(subject: Any, extra_claims: dict | None = None) -> str:
 
 def create_refresh_token(subject: Any) -> str:
     expire = datetime.now(timezone.utc) + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
-    payload = {"sub": str(subject), "exp": expire, "type": "refresh"}
+    # `jti`: a random per-token id so two refresh tokens minted for the same
+    # user within the same second (e.g. login then an immediate role/profile
+    # switch) are never byte-identical — their SHA-256 hashes would otherwise
+    # collide on refresh_tokens.token_hash's UNIQUE constraint.
+    payload = {"sub": str(subject), "exp": expire, "type": "refresh", "jti": uuid.uuid4().hex}
     return jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
 
 

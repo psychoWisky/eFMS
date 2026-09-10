@@ -54,4 +54,6 @@ class GoogleOAuthRequest(BaseModel):
 
 
 class SwitchRoleRequest(BaseModel):
-    role: SystemRole
+    # A role NAME the caller already holds (see user_roles). Not restricted
+    # to the SystemRole enum — custom roles from Role Management are valid.
+    role: str

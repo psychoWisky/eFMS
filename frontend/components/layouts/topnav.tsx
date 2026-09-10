@@ -9,7 +9,7 @@ import { api } from "@/services/api";
 import { toast } from "sonner";
 import { cn, getInitials, formatDate } from "@/lib/utils";
 import { ManageFavoritesDialog } from "@/components/shared/manage-favorites-dialog";
-import { useMyProfiles, switchToProfile } from "@/hooks/use-my-profiles";
+import { useMyProfiles, switchToProfile, switchToRole } from "@/hooks/use-my-profiles";
 
 interface Notification { id: string; title: string; message: string | null; type: string; file_id: string | null; is_read: boolean; }
 
@@ -117,6 +117,26 @@ export function EFMSTopNav({ sidebarWidth }: { sidebarWidth: number }) {
     }
   };
 
+  // Same token-swap as handleSwitchProfile, for a multi-role person picking
+  // a different role they already hold. Keyed by role name (`role:<name>`)
+  // so it can't collide with a profile id in switchingId.
+  const handleSwitchRole = async (role: string) => {
+    if (role === activeRole) { setMenuOpen(false); return; }
+    setSwitchingId(`role:${role}`);
+    try {
+      const { access_token, refresh_token, user: newUser } = await switchToRole(role);
+      setAuth(newUser, access_token, refresh_token);
+      qc.clear();
+      setMenuOpen(false);
+      router.replace("/dashboard");
+    } catch (err) {
+      const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      toast.error(msg ?? "Could not switch role.");
+    } finally {
+      setSwitchingId(null);
+    }
+  };
+
   return (
     <header
       className="fixed top-0 right-0 h-16 bg-white border-b border-[#D1D9E0] z-20 flex items-center justify-between px-6"
@@ -196,43 +216,70 @@ export function EFMSTopNav({ sidebarWidth }: { sidebarWidth: number }) {
             {menuOpen && (
               <motion.div initial={{ opacity: 0, y: 8, scale: 0.95 }} animate={{ opacity: 1, y: 0, scale: 1 }}
                 exit={{ opacity: 0, y: 8, scale: 0.95 }} transition={{ duration: 0.15 }}
-                className="absolute right-0 top-full mt-2 w-52 bg-white rounded-xl shadow-2xl border border-[#D1D9E0] py-1 z-50"
+                className="absolute right-0 top-full mt-2 w-[360px] max-w-[calc(100vw-2rem)] max-h-[80vh] overflow-y-auto bg-white rounded-2xl shadow-2xl border border-[#D1D9E0] py-1.5 z-50"
                 onMouseLeave={() => setMenuOpen(false)}>
                 <div className="px-4 py-3 border-b border-[#D1D9E0]">
-                  <p className="text-sm font-semibold text-[#1A1A2E]">{user?.full_name}</p>
-                  <p className="text-xs text-[#4A5568] mt-0.5">{user?.email}</p>
+                  <p className="text-sm font-semibold text-[#1A1A2E] break-words">{user?.full_name}</p>
+                  <p className="text-xs text-[#4A5568] mt-0.5 break-all">{user?.email}</p>
                   <p className="text-xs text-[#0D6E6E] font-medium mt-0.5">{activeRole ? roleLabel(activeRole) : ""}</p>
                 </div>
+                {(user?.roles?.length ?? 0) > 1 && (
+                  <div className="border-t border-[#D1D9E0] mt-1 pt-1.5 pb-1">
+                    <p className="px-4 pb-1 text-[11px] font-semibold text-[#9CA3AF] uppercase tracking-wider">Switch Role</p>
+                    {(user?.roles ?? []).map((r) => {
+                      const isCurrent = r === activeRole;
+                      const busy = switchingId === `role:${r}`;
+                      return (
+                        <button
+                          key={r}
+                          disabled={isCurrent || busy}
+                          onClick={() => handleSwitchRole(r)}
+                          className={cn(
+                            "w-full flex items-center gap-3 px-4 py-2.5 text-sm text-left",
+                            isCurrent ? "text-[#0D6E6E] font-semibold bg-[#F0F7F7]" : "text-[#1A1A2E] hover:bg-[#F0F7F7]",
+                            "disabled:hover:bg-transparent",
+                          )}
+                        >
+                          {busy ? <Loader2 size={15} className="animate-spin shrink-0" /> : <Repeat size={15} className="shrink-0 text-[#9CA3AF]" />}
+                          <span className="flex-1 break-words">{roleLabel(r)}</span>
+                          {isCurrent && <span className="ml-auto text-xs text-gray-400 shrink-0 self-center">Current</span>}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
                 {myProfiles.length > 1 && (
-                  <div className="border-t border-[#D1D9E0] mt-1 py-1">
-                    <p className="px-4 pt-1.5 pb-1 text-xs font-semibold text-[#9CA3AF] uppercase tracking-wide">Switch Profile</p>
+                  <div className="border-t border-[#D1D9E0] mt-1 pt-1.5 pb-1">
+                    <p className="px-4 pb-1 text-[11px] font-semibold text-[#9CA3AF] uppercase tracking-wider">Switch Profile</p>
                     {myProfiles.map((p) => {
                       const isCurrent = p.id === user?.id;
                       const isDisabled = p.is_active === false;
-                      // For a project (PI) profile, show the project name under
-                      // the "<Name> PI…" line so a person with several PI
-                      // profiles can tell them apart at a glance.
-                      const projectSub = p.project_name
-                        ? `${p.project_number ? `PI${p.project_number} · ` : ""}${p.project_name}`
-                        : null;
+                      const piLabel = p.project_number ? `PI${p.project_number}` : null;
+                      // Full project name, no truncation. For a project profile
+                      // the primary line is "PI3 · Soil Health Survey"; for the
+                      // own account it's the person's name.
+                      const primary = piLabel
+                        ? [piLabel, p.project_name].filter(Boolean).join(" · ")
+                        : p.full_name;
                       return (
                         <button
                           key={p.id}
                           disabled={isCurrent || isDisabled || switchingId === p.id}
                           onClick={() => handleSwitchProfile(p.id)}
-                          title={isDisabled ? "This project profile is no longer active." : projectSub ?? undefined}
                           className={cn(
-                            "w-full flex items-center gap-3 px-4 py-2 text-sm text-left",
-                            isCurrent ? "text-[#0D6E6E] font-semibold" : "text-[#1A1A2E]",
-                            isDisabled ? "opacity-40 cursor-not-allowed" : "hover:bg-[#F0F7F7]"
+                            "w-full flex items-start gap-3 px-4 py-2.5 text-sm text-left",
+                            isCurrent ? "text-[#0D6E6E] font-semibold bg-[#F0F7F7]" : "text-[#1A1A2E]",
+                            isDisabled ? "opacity-40 cursor-not-allowed" : "hover:bg-[#F0F7F7]",
                           )}
                         >
-                          {switchingId === p.id ? <Loader2 size={14} className="animate-spin shrink-0" /> : isDisabled ? <Lock size={14} className="shrink-0" /> : <Repeat size={14} className="shrink-0" />}
+                          <span className="shrink-0 mt-0.5">
+                            {switchingId === p.id ? <Loader2 size={15} className="animate-spin" /> : isDisabled ? <Lock size={15} className="text-[#9CA3AF]" /> : <Repeat size={15} className="text-[#9CA3AF]" />}
+                          </span>
                           <span className="min-w-0 flex-1">
-                            <span className="block truncate">{p.full_name}</span>
-                            {projectSub && (
-                              <span className="block truncate text-xs text-[#9CA3AF] font-normal">{projectSub}</span>
-                            )}
+                            <span className="block break-words">{primary}</span>
+                            <span className="block text-xs text-[#9CA3AF] font-normal">
+                              {piLabel ? (isDisabled ? "Project profile · inactive" : "Project profile") : "Your account"}
+                            </span>
                           </span>
                           {isCurrent && <span className="ml-auto text-xs text-gray-400 shrink-0 self-center">Current</span>}
                         </button>

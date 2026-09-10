@@ -54,6 +54,11 @@ class EfmsFile(Base, UUIDMixin, TimestampMixin):
     current_holder_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
     recipient_id  = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
     recipient_name = Column(String(200), nullable=True)
+    # Per-role workspace scoping (multi-role users). NULL = "any role" (the
+    # single-role era, and single-role users today). creator_role scopes
+    # My Files, current_holder_role scopes the Docket.
+    creator_role         = Column(String(50), nullable=True)
+    current_holder_role  = Column(String(50), nullable=True)
 
     creator       = relationship("User", foreign_keys=[created_by])
     current_holder = relationship("User", foreign_keys=[current_holder_id])
@@ -159,6 +164,10 @@ class RouteEntry(Base, UUIDMixin, TimestampMixin):
     action        = Column(PgEnum(RouteAction, name="route_action_enum"), nullable=False)
     remarks       = Column(Text)
     is_current    = Column(Boolean, default=True)
+    # The sender's / recipient's role at this hop (multi-role users).
+    # NULL = "any role". to_role is what a recipient's Docket filters on.
+    from_role     = Column(String(50), nullable=True)
+    to_role       = Column(String(50), nullable=True)
 
     file          = relationship("EfmsFile", back_populates="route_entries")
     from_user     = relationship("User", foreign_keys=[from_user_id])

@@ -22,4 +22,4 @@ export const NOTESHEET_PROSE_CLASS = "prose prose-sm max-w-none leading-relaxed 
   "[&_h1]:text-lg [&_h1]:font-bold [&_h1]:mt-2 [&_h1]:mb-1 " +
   "[&_h2]:text-base [&_h2]:font-bold [&_h2]:mt-2 [&_h2]:mb-1 " +
   "[&_h3]:text-sm [&_h3]:font-semibold [&_h3]:mt-1.5 [&_h3]:mb-1 " +
-  "[&_p]:mb-2 [&_ol]:pl-5 [&_ul]:pl-5 [&_li]:mb-0.5 [&_strong]:font-bold";
+  "[&_p]:mb-2 [&_ol]:pl-5 [&_ul]:pl-5 [&_li]:mb-0.5 [&_strong]:font-bold [&_mark]:rounded [&_mark]:px-0.5 [&_mark]:text-inherit";

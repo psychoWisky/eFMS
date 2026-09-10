@@ -38,12 +38,16 @@ interface SearchableSelectProps {
   isFavorite?: (value: string) => boolean;
   onToggleFavorite?: (value: string) => void;
   showFavoriteToggle?: boolean;
+  /** Let the open panel grow past the trigger width to fit long option
+   * labels (e.g. recipient rows). Off by default so the panel stays inside
+   * narrow containers like a modal column. */
+  widePanel?: boolean;
 }
 
 export function SearchableSelect({
   options, groups, value, onChange, placeholder = "Select…", searchPlaceholder = "Search…",
   emptyMessage = "No options found.", disabled = false, clearable = true, className,
-  isFavorite, onToggleFavorite, showFavoriteToggle,
+  isFavorite, onToggleFavorite, showFavoriteToggle, widePanel = false,
 }: SearchableSelectProps) {
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
@@ -107,7 +111,13 @@ export function SearchableSelect({
       </button>
 
       {open && !disabled && (
-        <div className="absolute z-20 mt-1.5 w-full bg-white border border-gray-200 rounded-xl shadow-lg overflow-hidden">
+        // Panel grows to fit the widest option (labels like "Name (code) ·
+        // PI74 — Project Title" no longer truncate on open), but never
+        // narrower than the trigger and never wider than the viewport.
+        <div className={cn(
+          "absolute z-20 mt-1.5 left-0 bg-white border border-gray-200 rounded-xl shadow-lg overflow-hidden",
+          widePanel ? "min-w-full w-max max-w-[min(640px,92vw)]" : "w-full",
+        )}>
           <div className="p-2 border-b border-gray-100">
             <div className="relative">
               <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
@@ -142,7 +152,7 @@ export function SearchableSelect({
                         type="button"
                         onClick={() => select(o.value)}
                         className={cn(
-                          "flex-1 min-w-0 text-left px-3 py-2 text-sm truncate",
+                          "flex-1 min-w-0 text-left px-3 py-2 text-sm whitespace-normal break-words",
                           o.value === value && "text-[#0D6E6E] font-semibold",
                         )}
                       >

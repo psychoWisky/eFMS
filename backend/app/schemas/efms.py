@@ -181,6 +181,10 @@ class HolderNotesheetUpdate(BaseModel):
 class RouteAction_(BaseModel):
     action: RouteAction
     to_user_id: Optional[UUID] = None
+    # Which of the recipient's roles this forward targets (multi-role
+    # users). NULL = the recipient's current active_role. The file lands in
+    # that role's Docket only.
+    to_role: Optional[str] = None
     remarks: Optional[str] = None
 
 

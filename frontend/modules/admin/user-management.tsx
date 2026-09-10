@@ -11,7 +11,7 @@ import { showSuccess } from "@/lib/alert";
 import { useActiveRole } from "@/stores/auth.store";
 import {
   Plus, Loader2, X, Copy, RefreshCw, Eye, EyeOff, Pencil,
-  Power, PowerOff, ShieldAlert, Upload, Download, CheckCircle2, XCircle, ClipboardCopy,
+  Power, PowerOff, ShieldAlert, Upload, Download, CheckCircle2, XCircle, ClipboardCopy, ArrowRightLeft,
 } from "lucide-react";
 import { SearchableSelect } from "@/components/shared/searchable-select";
 import { paginate, TablePagination } from "@/components/shared/table-pagination";
@@ -25,7 +25,9 @@ interface AdminUser {
   mobile: string | null; employee_code: string | null; date_of_birth: string | null; designation: string | null;
   establishment_id: string | null; establishment_name: string | null;
   department_id: string | null; department_name: string | null;
-  active_role: string | null; is_active: boolean; must_change_password: boolean; can_sign: boolean;
+  active_role: string | null;
+  roles?: { role: string; department_id: string | null; establishment_id: string | null }[];
+  is_active: boolean; must_change_password: boolean; can_sign: boolean;
   deactivation_reason_type: string | null; deactivation_remarks: string | null;
   deactivated_at: string | null; deactivated_by: string | null;
 }
@@ -362,7 +364,25 @@ function EditUserModal({ user, onClose, establishments, departments, roleOptions
     designation: user.designation ?? "", establishment_id: user.establishment_id ?? "",
     department_id: user.department_id ?? "", role: user.active_role ?? "efms_officer", is_active: user.is_active,
   });
+  // Additional roles beyond the primary (form.role), each with its own org
+  // context. Pre-seeded from the user's current role set minus the primary.
+  // Sending `roles` (primary + these) uses the multi-role edit path.
+  const [extraRoles, setExtraRoles] = useState<
+    { role: string; department_id: string; establishment_id: string }[]
+  >(
+    (user.roles ?? [])
+      .filter((r) => r.role !== (user.active_role ?? ""))
+      .map((r) => ({
+        role: r.role,
+        department_id: r.department_id ?? "",
+        establishment_id: r.establishment_id ?? "",
+      })),
+  );
   const [error, setError] = useState("");
+
+  // Role names not yet used by the primary or any additional row — the only
+  // ones a Role N dropdown may offer.
+  const usedRoles = new Set<string>([form.role, ...extraRoles.map((r) => r.role)]);
 
   const save = useMutation({
     mutationFn: () => api.patch(`/auth/admin/users/${user.id}`, {
@@ -370,7 +390,18 @@ function EditUserModal({ user, onClose, establishments, departments, roleOptions
       mobile: form.mobile, employee_code: form.employee_code || null,
       date_of_birth: form.date_of_birth || null, designation: form.designation,
       establishment_id: form.establishment_id || null, department_id: form.department_id || null,
-      role: form.role,
+      // Primary role first (its context is the user record's own dept/estb),
+      // then each additional role with its own optional context.
+      roles: [
+        { role: form.role, department_id: form.department_id || null, establishment_id: form.establishment_id || null },
+        ...extraRoles
+          .filter((r) => r.role && r.role !== form.role)
+          .map((r) => ({
+            role: r.role,
+            department_id: r.department_id || null,
+            establishment_id: r.establishment_id || null,
+          })),
+      ],
     }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["user-management-users"] });
@@ -385,14 +416,82 @@ function EditUserModal({ user, onClose, establishments, departments, roleOptions
 
   return (
     <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-6" onClick={onClose}>
-      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-xl max-h-[90vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-3xl max-h-[90vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
         <div className="px-6 py-5 border-b border-gray-200 flex items-center justify-between shrink-0">
           <h3 className="text-xl font-bold text-gray-900">Edit User</h3>
           <button onClick={onClose} className="text-gray-400 hover:text-gray-600"><X size={20} /></button>
         </div>
-        <div className="overflow-y-auto px-6 py-5 flex-1">
+        <div className="overflow-y-auto overflow-x-hidden px-6 py-5 flex-1">
           {error && <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-xl text-red-700 text-sm">{error}</div>}
           <UserFields form={form} setForm={setForm} establishments={establishments} departments={departments} roleOptions={roleOptions} />
+          <div className="mt-5 border-t border-gray-100 pt-4">
+            <div className="flex items-center justify-between mb-2">
+              <label className={LABEL}>
+                Additional roles <span className="font-normal text-gray-400">(this person can switch between them; each can have its own dept / establishment)</span>
+              </label>
+            </div>
+            <div className="space-y-3">
+              {extraRoles.map((row, i) => {
+                // A Role N dropdown offers roles not used by the primary or
+                // any OTHER additional row (this row's own current pick stays
+                // selectable so it displays).
+                const otherUsed = new Set<string>([form.role, ...extraRoles.filter((_, j) => j !== i).map((r) => r.role)]);
+                const opts = roleOptions.filter((o) => !otherUsed.has(o.value) || o.value === row.role);
+                const setRow = (patch: Partial<typeof row>) =>
+                  setExtraRoles((s) => s.map((r, j) => (j === i ? { ...r, ...patch } : r)));
+                return (
+                  <div key={i} className="rounded-xl border border-gray-200 p-3 bg-gray-50/60">
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-xs font-bold text-gray-500 uppercase tracking-wide">Role {i + 1}</span>
+                      <button type="button" onClick={() => setExtraRoles((s) => s.filter((_, j) => j !== i))}
+                        className="text-gray-400 hover:text-red-500"><X size={15} /></button>
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                      <div>
+                        <label className="block text-xs font-semibold text-gray-500 mb-1">Role</label>
+                        <SearchableSelect
+                          options={opts}
+                          value={row.role}
+                          onChange={(v) => setRow({ role: v })}
+                          clearable={false}
+                          placeholder="Select role…"
+                          searchPlaceholder="Search roles…"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-semibold text-gray-500 mb-1">Department</label>
+                        <SearchableSelect
+                          options={departments.filter((d) => d.is_active !== false).map((d) => ({ value: d.id, label: d.name }))}
+                          value={row.department_id}
+                          onChange={(v) => setRow({ department_id: v })}
+                          placeholder="Same as user"
+                          searchPlaceholder="Search departments…"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-semibold text-gray-500 mb-1">Establishment</label>
+                        <SearchableSelect
+                          options={establishments.filter((e) => e.is_active !== false).map((e) => ({ value: e.id, label: e.name }))}
+                          value={row.establishment_id}
+                          onChange={(v) => setRow({ establishment_id: v })}
+                          placeholder="Same as user"
+                          searchPlaceholder="Search establishments…"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            <button
+              type="button"
+              onClick={() => setExtraRoles((s) => [...s, { role: "", department_id: "", establishment_id: "" }])}
+              disabled={roleOptions.every((o) => usedRoles.has(o.value))}
+              className="mt-3 flex items-center gap-1.5 px-3 py-2 text-sm font-semibold text-[#0D6E6E] border border-dashed border-[#0D6E6E]/40 rounded-lg hover:bg-[#F0F7F7] disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              <Plus size={15} /> Add another role
+            </button>
+          </div>
         </div>
         <div className="px-6 py-4 border-t border-gray-200 flex justify-end gap-3 shrink-0">
           <button onClick={onClose} className="px-4 py-2.5 rounded-lg text-sm font-semibold text-gray-600 hover:bg-gray-100">Cancel</button>
@@ -621,6 +720,76 @@ function DeactivateUserModal({ user, onClose, onConfirm, isPending }: {
   );
 }
 
+function TransferOwnershipModal({ user, candidates, onClose, onConfirm, isPending }: {
+  user: AdminUser;
+  candidates: { value: string; label: string }[];
+  onClose: () => void;
+  onConfirm: (successorId: string, reasonType: string, remarks: string) => void;
+  isPending: boolean;
+}) {
+  const [successorId, setSuccessorId] = useState("");
+  const [reasonType, setReasonType] = useState("retired");
+  const [remarks, setRemarks] = useState("");
+  const REMARKS_MAX = 1000;
+
+  return (
+    <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-6" onClick={onClose}>
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg" onClick={(e) => e.stopPropagation()}>
+        <div className="px-6 py-5 border-b border-gray-200">
+          <h3 className="text-xl font-bold text-gray-900">Transfer Ownership &amp; Retire</h3>
+          <p className="text-sm text-gray-500 mt-1">
+            <span className="font-semibold text-gray-700">{user.full_name}</span> will be deactivated permanently.
+            The successor becomes the current holder of every file {user.first_name || "this user"} is holding,
+            and can open all of their file history. Nothing in the records is rewritten — past notes and
+            forwards still name {user.first_name || "the original user"}.
+          </p>
+        </div>
+        <div className="px-6 py-5 space-y-4">
+          <div>
+            <label className={LABEL}>Successor *</label>
+            <SearchableSelect
+              options={candidates}
+              value={successorId}
+              onChange={setSuccessorId}
+              clearable={false}
+              placeholder="Choose the person taking over…"
+              searchPlaceholder="Search by name or email…"
+            />
+          </div>
+          <div>
+            <label className={LABEL}>Reason *</label>
+            <select value={reasonType} onChange={(e) => setReasonType(e.target.value)} className={INPUT}>
+              {DEACTIVATION_REASON_OPTIONS.map((r) => <option key={r.value} value={r.value}>{r.label}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className={LABEL}>Remarks {reasonType === "other" ? "*" : "(optional)"}</label>
+            <textarea
+              value={remarks}
+              onChange={(e) => setRemarks(e.target.value.slice(0, REMARKS_MAX))}
+              maxLength={REMARKS_MAX}
+              rows={2}
+              className={`${INPUT} resize-none`}
+              placeholder="e.g. Superannuation w.e.f. 30 Sept 2026. Handover to the incoming officer."
+            />
+            <p className="text-xs text-gray-400 mt-1 text-right">{remarks.length}/{REMARKS_MAX}</p>
+          </div>
+        </div>
+        <div className="px-6 py-4 border-t border-gray-200 flex justify-end gap-3">
+          <button onClick={onClose} className="px-4 py-2.5 rounded-lg text-sm font-semibold text-gray-600 hover:bg-gray-100">Cancel</button>
+          <button
+            onClick={() => onConfirm(successorId, reasonType, remarks)}
+            disabled={isPending || !successorId || (reasonType === "other" && !remarks.trim())}
+            className="flex items-center gap-1 px-5 py-2.5 bg-[#0D6E6E] text-white rounded-lg text-sm font-semibold hover:bg-[#178F8F] disabled:opacity-50"
+          >
+            {isPending ? <Loader2 size={15} className="animate-spin" /> : null} Transfer &amp; Retire
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function UserManagementSection() {
   const qc = useQueryClient();
   const activeRole = useActiveRole();
@@ -632,6 +801,7 @@ export function UserManagementSection() {
   const [showBulkUpload, setShowBulkUpload] = useState(false);
   const [editingUser, setEditingUser] = useState<AdminUser | null>(null);
   const [deactivatingUser, setDeactivatingUser] = useState<AdminUser | null>(null);
+  const [transferUser, setTransferUser] = useState<AdminUser | null>(null);
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [page, setPage] = useState(1);
 
@@ -663,6 +833,20 @@ export function UserManagementSection() {
     onError: (err: unknown) => {
       const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
       toast.error(typeof msg === "string" ? msg : "Could not update user status.");
+    },
+  });
+
+  const transferOwnership = useMutation({
+    mutationFn: ({ id, successor_id, reason_type, remarks }: { id: string; successor_id: string; reason_type?: string; remarks?: string }) =>
+      api.post(`/auth/admin/users/${id}/transfer-ownership`, { successor_id, reason_type, remarks }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["user-management-users"] });
+      showSuccess("Ownership transferred. The outgoing user has been deactivated.");
+      setTransferUser(null);
+    },
+    onError: (err: unknown) => {
+      const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      toast.error(typeof msg === "string" ? msg : "Could not transfer ownership.");
     },
   });
 
@@ -748,6 +932,15 @@ export function UserManagementSection() {
                           <Pencil size={15} />
                         </button>
                       )}
+                      {isSuperAdmin && u.is_active && (
+                        <button
+                          onClick={() => setTransferUser(u)}
+                          title="Transfer ownership & retire"
+                          className="p-2 rounded-lg hover:bg-gray-100 text-gray-400 hover:text-[#0D6E6E]"
+                        >
+                          <ArrowRightLeft size={15} />
+                        </button>
+                      )}
                       {isSuperAdmin && (
                         <button
                           onClick={async () => {
@@ -788,6 +981,19 @@ export function UserManagementSection() {
           isPending={toggleStatus.isPending}
           onConfirm={(reason_type, remarks) =>
             toggleStatus.mutate({ id: deactivatingUser.id, is_active: false, reason_type, remarks })
+          }
+        />
+      )}
+      {transferUser && (
+        <TransferOwnershipModal
+          user={transferUser}
+          candidates={t.view
+            .filter((u) => u.is_active && u.id !== transferUser.id)
+            .map((u) => ({ value: u.id, label: u.employee_code ? `${u.full_name} (${u.employee_code})` : `${u.full_name} — ${u.email}` }))}
+          onClose={() => setTransferUser(null)}
+          isPending={transferOwnership.isPending}
+          onConfirm={(successor_id, reason_type, remarks) =>
+            transferOwnership.mutate({ id: transferUser.id, successor_id, reason_type, remarks })
           }
         />
       )}

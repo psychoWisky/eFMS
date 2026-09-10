@@ -68,6 +68,39 @@ class ReassignRequest(BaseModel):
     user_id: UUID
 
 
+class ProfileOut(BaseModel):
+    """The project's current PI profile, for pre-filling the super-admin
+    Edit-PI form. Read-only view."""
+    id: UUID
+    first_name: Optional[str] = None
+    middle_name: Optional[str] = None
+    last_name: Optional[str] = None
+    full_name: str
+    designation: Optional[str] = None
+    mobile: Optional[str] = None
+    department_id: Optional[UUID] = None
+    establishment_id: Optional[UUID] = None
+    active_role: Optional[str] = None
+    can_sign: bool = False
+    is_active: bool = True
+
+
+class ProfileEditRequest(BaseModel):
+    """Super-admin edit of the project's CURRENT PI profile. Every profile
+    field a super admin might reasonably change is here; identity links
+    (origin_user_id, project_id) are never editable — those define WHICH
+    (person, project) this profile is and are set only by assign/reassign."""
+    first_name: Optional[str] = None
+    middle_name: Optional[str] = None
+    last_name: Optional[str] = None
+    designation: Optional[str] = None
+    mobile: Optional[str] = None
+    department_id: Optional[UUID] = None
+    establishment_id: Optional[UUID] = None
+    role: Optional[str] = None
+    can_sign: Optional[bool] = None
+
+
 def _project_out(p: Project, current_profile_name: Optional[str] = None) -> ProjectOut:
     return ProjectOut(
         id=p.id, project_number=p.project_number, name=p.name,
@@ -101,11 +134,23 @@ async def _revoke_profile_sessions(db: AsyncSession, profile_id: UUID) -> None:
     )
 
 
-def _build_profile_email(origin: User, project: Project) -> str:
-    """Deterministic, unique, and NEVER used for login (the profile has no
-    password) — purely to satisfy users.email's NOT NULL/unique constraint."""
+async def _build_profile_email(db: AsyncSession, origin: User, project: Project) -> str:
+    """A synthetic, never-used-for-login address (the profile has no
+    password) that only has to satisfy users.email's NOT NULL + UNIQUE
+    constraint. The natural form is "<local>+pi<N>@<domain>", but that same
+    (person, project) pair can legitimately recur — reassign A -> B -> A
+    leaves A's first, now-deactivated profile row still holding that exact
+    address — so when it's taken we suffix a counter ("+pi3-2", "+pi3-3", …)
+    until we find a free one rather than letting the INSERT 500 on a unique
+    violation."""
     local, _, domain = origin.email.partition("@")
-    return f"{local}+pi{project.project_number}@{domain}"
+    base = f"{local}+pi{project.project_number}"
+    candidate = f"{base}@{domain}"
+    n = 1
+    while await db.scalar(select(User.id).where(User.email == candidate)) is not None:
+        n += 1
+        candidate = f"{base}-{n}@{domain}"
+    return candidate
 
 
 async def _create_project_profile(db: AsyncSession, origin: User, project: Project) -> User:
@@ -115,7 +160,7 @@ async def _create_project_profile(db: AsyncSession, origin: User, project: Proje
     are a one-time snapshot of the origin user's current values, per the
     confirmed decision that these are not project-specific fields."""
     profile = User(
-        email=_build_profile_email(origin, project),
+        email=await _build_profile_email(db, origin, project),
         hashed_password=None,
         is_active=True,
         kyc_completed=True,
@@ -133,8 +178,12 @@ async def _create_project_profile(db: AsyncSession, origin: User, project: Proje
     )
     db.add(profile)
     await db.flush()
-    if origin.active_role:
-        db.add(UserRole(user_id=profile.id, role=origin.active_role))
+    # Copy the origin person's FULL role set (multi-role users), so the PI
+    # profile can switch roles just like the main account. Fall back to
+    # active_role for a legacy single-role origin with no user_roles rows.
+    origin_roles = [ur.role for ur in origin.roles] or ([origin.active_role] if origin.active_role else [])
+    for role in dict.fromkeys(origin_roles):
+        db.add(UserRole(user_id=profile.id, role=role))
     return profile
 
 
@@ -165,7 +214,7 @@ async def create_project(body: ProjectCreate, db: AsyncSession = Depends(get_db)
     # simply created unassigned and the Assign button handles it later.
     profile_name: Optional[str] = None
     if body.assign_user_id is not None:
-        origin = await db.get(User, body.assign_user_id)
+        origin = await db.scalar(select(User).options(selectinload(User.roles)).where(User.id == body.assign_user_id))
         _assert_assignable(origin)
         profile = await _create_project_profile(db, origin, p)
         p.current_profile_id = profile.id
@@ -197,7 +246,7 @@ async def assign_project(
     if project.current_profile_id:
         raise HTTPException(400, "This project already has an assigned profile. Use reassign instead.")
 
-    origin = await db.get(User, body.user_id)
+    origin = await db.scalar(select(User).options(selectinload(User.roles)).where(User.id == body.user_id))
     _assert_assignable(origin)
 
     profile = await _create_project_profile(db, origin, project)
@@ -223,7 +272,7 @@ async def reassign_project(
     if not project.current_profile_id:
         raise HTTPException(400, "This project has no current assignment to reassign. Use assign instead.")
 
-    origin = await db.get(User, body.user_id)
+    origin = await db.scalar(select(User).options(selectinload(User.roles)).where(User.id == body.user_id))
     _assert_assignable(origin)
 
     old_profile = await db.get(User, project.current_profile_id)
@@ -259,6 +308,85 @@ async def complete_project(project_id: UUID, db: AsyncSession = Depends(get_db),
     await db.commit()
     await db.refresh(project)
     return _project_out(project, profile.full_name if profile else None)
+
+
+@router.get("/{project_id}/profile", response_model=ProfileOut)
+async def get_project_profile(
+    project_id: UUID,
+    db: AsyncSession = Depends(get_db), user: User = Depends(_super),
+):
+    """Current PI profile of a project — pre-fills the super-admin Edit-PI
+    form. 404 if the project has no assignment yet."""
+    project = await db.get(Project, project_id)
+    if not project:
+        raise HTTPException(404, "Project not found.")
+    if not project.current_profile_id:
+        raise HTTPException(404, "This project has no assigned PI profile.")
+    p = await db.get(User, project.current_profile_id)
+    if not p:
+        raise HTTPException(404, "Assigned profile not found.")
+    return ProfileOut(
+        id=p.id, first_name=p.first_name, middle_name=p.middle_name, last_name=p.last_name,
+        full_name=p.full_name, designation=p.designation, mobile=p.mobile,
+        department_id=p.department_id, establishment_id=p.establishment_id,
+        active_role=p.active_role, can_sign=p.can_sign, is_active=p.is_active,
+    )
+
+
+@router.patch("/{project_id}/profile", response_model=ProjectOut)
+async def edit_project_profile(
+    project_id: UUID, body: ProfileEditRequest,
+    db: AsyncSession = Depends(get_db), user: User = Depends(_super),
+):
+    """Super-admin edit of the project's current PI profile — name,
+    designation, mobile, department, establishment, role and can-sign. A PI
+    profile is otherwise auto-generated and not editable anywhere else.
+    Never touches origin_user_id / project_id (those define which
+    person+project this profile is) and never creates a new row."""
+    from app.api.v1.endpoints.auth import _validate_assignable_role, _set_single_role
+
+    project = await db.get(Project, project_id)
+    if not project:
+        raise HTTPException(404, "Project not found.")
+    if not project.current_profile_id:
+        raise HTTPException(400, "This project has no assigned PI profile to edit.")
+
+    profile = await db.get(User, project.current_profile_id)
+    if not profile:
+        raise HTTPException(404, "Assigned profile not found.")
+
+    if body.first_name is not None:
+        fn = body.first_name.strip()
+        if not fn:
+            raise HTTPException(400, "First name cannot be empty.")
+        profile.first_name = fn
+    if body.middle_name is not None:
+        profile.middle_name = body.middle_name.strip() or None
+    if body.last_name is not None:
+        profile.last_name = body.last_name.strip() or None
+    if body.designation is not None:
+        profile.designation = body.designation.strip() or None
+    if body.mobile is not None:
+        profile.mobile = body.mobile.strip() or None
+    if body.department_id is not None:
+        profile.department_id = body.department_id
+    if body.establishment_id is not None:
+        profile.establishment_id = body.establishment_id
+    if body.can_sign is not None:
+        profile.can_sign = body.can_sign
+    if body.role is not None and body.role != profile.active_role:
+        # Same catalog validation the admin user-edit path uses. A PI
+        # profile can never be SUPER_ADMIN (it is a workflow identity, not
+        # a person) — reject that explicitly rather than relying on the
+        # role simply not existing in the catalog.
+        if body.role == SystemRole.SUPER_ADMIN.value:
+            raise HTTPException(400, "A project profile cannot hold the Super Admin role.")
+        role = await _validate_assignable_role(db, body.role)
+        await _set_single_role(db, profile, role)
+
+    await db.commit()
+    await db.refresh(project)
+    return _project_out(project, profile.full_name)
 
 
 @router.patch("/{project_id}/reactivate", response_model=ProjectOut)

@@ -129,6 +129,12 @@ class User(Base, UUIDMixin, TimestampMixin):
     # project completion/reactivation or reassignment (see projects.py).
     origin_user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
     project_id     = Column(UUID(as_uuid=True), ForeignKey("projects.id"), nullable=True)
+    # Set on the SUCCESSOR when a super admin runs an ownership transfer: the
+    # id of the user this account replaced. Followed as a chain by the
+    # file-access checks so the successor inherits everything the
+    # predecessor could see (their created files, holding-period notes,
+    # routing history). The predecessor is deactivated, never deleted.
+    account_predecessor_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
 
     # Relationships
     roles = relationship("UserRole", back_populates="user", cascade="all, delete-orphan")
@@ -139,6 +145,7 @@ class User(Base, UUIDMixin, TimestampMixin):
     origin_user = relationship("User", remote_side="User.id", foreign_keys=[origin_user_id])
     project_profiles = relationship("User", foreign_keys=[origin_user_id], overlaps="origin_user")
     project = relationship("Project", foreign_keys=[project_id])
+    account_predecessor = relationship("User", remote_side="User.id", foreign_keys=[account_predecessor_id])
 
     __table_args__ = (
         # A profile row always has both origin_user_id and project_id, or
@@ -171,8 +178,16 @@ class UserRole(Base, UUIDMixin, TimestampMixin):
 
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     role = Column(String(50), nullable=False)
+    # Optional per-role organizational context. A multi-role person can be
+    # e.g. Registrar in one establishment and HoD in another department.
+    # NULL means "use the user record's own department_id / establishment_id"
+    # — so single-role users are entirely unaffected.
+    department_id = Column(UUID(as_uuid=True), ForeignKey("departments.id"), nullable=True)
+    establishment_id = Column(UUID(as_uuid=True), ForeignKey("establishments.id"), nullable=True)
 
     user = relationship("User", back_populates="roles")
+    department = relationship("Department", foreign_keys=[department_id])
+    establishment = relationship("Establishment", foreign_keys=[establishment_id])
 
 
 class RefreshToken(Base, UUIDMixin, TimestampMixin):

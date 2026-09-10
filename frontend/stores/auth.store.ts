@@ -14,6 +14,9 @@ export interface AuthUser {
   kyc_completed: boolean;
   must_change_password: boolean;
   roles: EfmsRole[];
+  // The role this token is acting as. For a multi-role user this is the one
+  // they last switched to; may differ from roles[0].
+  active_role?: EfmsRole | null;
   can_sign: boolean;
   is_active?: boolean;
   // Present only on a project (PI) profile — used by the profile switcher
@@ -44,7 +47,7 @@ export const useAuthStore = create<AuthState>()(
       activeRole: null,
       isLoading: false,
       setAuth: (user, accessToken, refreshToken) =>
-        set({ user, accessToken, refreshToken, activeRole: user.roles[0] ?? null }),
+        set({ user, accessToken, refreshToken, activeRole: user.active_role ?? user.roles[0] ?? null }),
       updateUser: (patch) =>
         set((s) => ({ user: s.user ? { ...s.user, ...patch } : null })),
       setRole: (role) => set({ activeRole: role }),
