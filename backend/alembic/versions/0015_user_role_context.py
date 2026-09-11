@@ -17,11 +17,15 @@ single-role users is completely unchanged. No backfill.
 Revision ID: 0015
 Revises: 0014
 Create Date: 2026-09-09
+
+Idempotent (`ADD COLUMN IF NOT EXISTS`): some environments received these
+columns via an out-of-band manual patch before `alembic_version` was
+updated, which made a plain `ADD COLUMN` fail with DuplicateColumnError on
+`alembic upgrade head`. Using raw DDL here (SQLAlchemy's op.add_column has
+no IF NOT EXISTS option) makes re-running this revision a safe no-op.
 """
 from typing import Sequence, Union
 from alembic import op
-import sqlalchemy as sa
-from sqlalchemy.dialects import postgresql
 
 revision: str = "0015"
 down_revision: Union[str, None] = "0014"
@@ -30,16 +34,14 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.add_column(
-        "user_roles",
-        sa.Column("department_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("departments.id"), nullable=True),
+    op.execute(
+        "ALTER TABLE user_roles ADD COLUMN IF NOT EXISTS department_id UUID REFERENCES departments(id)"
     )
-    op.add_column(
-        "user_roles",
-        sa.Column("establishment_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("establishments.id"), nullable=True),
+    op.execute(
+        "ALTER TABLE user_roles ADD COLUMN IF NOT EXISTS establishment_id UUID REFERENCES establishments(id)"
     )
 
 
 def downgrade() -> None:
-    op.drop_column("user_roles", "establishment_id")
-    op.drop_column("user_roles", "department_id")
+    op.execute("ALTER TABLE user_roles DROP COLUMN IF EXISTS establishment_id")
+    op.execute("ALTER TABLE user_roles DROP COLUMN IF EXISTS department_id")

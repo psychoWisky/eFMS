@@ -18,10 +18,12 @@ once a file actually carries a role.
 Revision ID: 0017
 Revises: 0016
 Create Date: 2026-09-09
+
+Idempotent (`IF NOT EXISTS`) for the same reason as 0015 — see that
+revision's docstring.
 """
 from typing import Sequence, Union
 from alembic import op
-import sqlalchemy as sa
 
 revision: str = "0017"
 down_revision: Union[str, None] = "0016"
@@ -30,14 +32,14 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.add_column("efms_files", sa.Column("creator_role", sa.String(50), nullable=True))
-    op.add_column("efms_files", sa.Column("current_holder_role", sa.String(50), nullable=True))
-    op.add_column("route_entries", sa.Column("from_role", sa.String(50), nullable=True))
-    op.add_column("route_entries", sa.Column("to_role", sa.String(50), nullable=True))
+    op.execute("ALTER TABLE efms_files ADD COLUMN IF NOT EXISTS creator_role VARCHAR(50)")
+    op.execute("ALTER TABLE efms_files ADD COLUMN IF NOT EXISTS current_holder_role VARCHAR(50)")
+    op.execute("ALTER TABLE route_entries ADD COLUMN IF NOT EXISTS from_role VARCHAR(50)")
+    op.execute("ALTER TABLE route_entries ADD COLUMN IF NOT EXISTS to_role VARCHAR(50)")
 
 
 def downgrade() -> None:
-    op.drop_column("route_entries", "to_role")
-    op.drop_column("route_entries", "from_role")
-    op.drop_column("efms_files", "current_holder_role")
-    op.drop_column("efms_files", "creator_role")
+    op.execute("ALTER TABLE route_entries DROP COLUMN IF EXISTS to_role")
+    op.execute("ALTER TABLE route_entries DROP COLUMN IF EXISTS from_role")
+    op.execute("ALTER TABLE efms_files DROP COLUMN IF EXISTS current_holder_role")
+    op.execute("ALTER TABLE efms_files DROP COLUMN IF EXISTS creator_role")

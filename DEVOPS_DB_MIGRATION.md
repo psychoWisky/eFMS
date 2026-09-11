@@ -8,6 +8,21 @@ matter, no backfill, no downtime). If migrations are skipped, the new code
 will 500 on multi-role / role-switch / ownership-transfer / per-role
 Docket features.
 
+> **Update (2026-09-11):** the first deploy attempt failed partway through
+> with `DuplicateColumnError: column "department_id" of relation
+> "user_roles" already exists` while running `0014 -> 0015`. That means
+> `user_roles.department_id` (and possibly other 0015–0017 columns) was
+> already present on live — from a prior partial/manual run — while
+> `alembic_version` still said `0014`, so Alembic tried to re-add it.
+> **Fix:** migrations `0015`, `0016`, and `0017` have been rewritten to use
+> `ADD COLUMN IF NOT EXISTS` / `DROP COLUMN IF EXISTS` (matching the style
+> `0018` already used), exactly like this file's §6 already documented for
+> `0018`. Re-running `alembic upgrade head` with the updated code now
+> succeeds regardless of which of the 0015–0017 columns already exist on
+> live — it fills in only what's missing and safely no-ops on the rest.
+> **Action needed:** pull the latest backend code (which includes the
+> fixed migration files) before retrying the deploy.
+
 ---
 
 ## 1. Scope of DB change
@@ -133,10 +148,12 @@ cd backend
 alembic downgrade 0014     # reverts 0015, 0016, 0017, 0018
 ```
 
-- `0015/0016/0017` downgrades simply `DROP COLUMN` / `DROP INDEX` — the new
-  columns hold only data written by the new code, so dropping them loses
-  only that release's role metadata (files revert to "visible in every
-  role", which is the pre-release behaviour).
+- `0015/0016/0017` downgrades run `DROP COLUMN IF EXISTS` / `DROP INDEX IF
+  EXISTS` (same idempotent style as `0018`, added after the first deploy
+  attempt hit drift — see the update note at the top of this file) — the
+  new columns hold only data written by the new code, so dropping them
+  loses only that release's role metadata (files revert to "visible in
+  every role", which is the pre-release behaviour).
 - `0018` downgrade is `DROP COLUMN IF EXISTS middle_name` — **only run this
   if you are also reverting to code that predates `middle_name`.** If the
   ORM model still references it, keep `0018` applied and stop the rollback

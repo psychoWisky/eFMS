@@ -14,11 +14,12 @@ Nothing about existing rows changes: NULL on every user today.
 Revision ID: 0016
 Revises: 0015
 Create Date: 2026-09-09
+
+Idempotent (`IF NOT EXISTS`) for the same reason as 0015 — see that
+revision's docstring.
 """
 from typing import Sequence, Union
 from alembic import op
-import sqlalchemy as sa
-from sqlalchemy.dialects import postgresql
 
 revision: str = "0016"
 down_revision: Union[str, None] = "0015"
@@ -27,13 +28,14 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.add_column(
-        "users",
-        sa.Column("account_predecessor_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("users.id"), nullable=True),
+    op.execute(
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS account_predecessor_id UUID REFERENCES users(id)"
     )
-    op.create_index("ix_users_account_predecessor_id", "users", ["account_predecessor_id"])
+    op.execute(
+        "CREATE INDEX IF NOT EXISTS ix_users_account_predecessor_id ON users (account_predecessor_id)"
+    )
 
 
 def downgrade() -> None:
-    op.drop_index("ix_users_account_predecessor_id", table_name="users")
-    op.drop_column("users", "account_predecessor_id")
+    op.execute("DROP INDEX IF EXISTS ix_users_account_predecessor_id")
+    op.execute("ALTER TABLE users DROP COLUMN IF EXISTS account_predecessor_id")

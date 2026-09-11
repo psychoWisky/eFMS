@@ -26,6 +26,7 @@ import re
 
 from app.models.user import User, UserRole, RefreshToken, SystemRole, DeactivationReasonType, Role
 from app.models.efms_extra import OTP
+from app.models.organization import Establishment, Department
 from app.schemas.auth import LoginRequest, TokenResponse, RefreshRequest, UserBrief
 # Forgot Password reuses the SHARED OTP/email helpers (used elsewhere for
 # e-signature OTP), not this file's own private _create_otp/_verify_otp/
@@ -839,8 +840,10 @@ async def download_bulk_user_sample(_: User = Depends(_super_admin_only)):
     #  - blank middle_name (optional)
     #  - blank temp_password (a strong one is generated & returned per row)
     #  - is_active true / false
-    #  - establishment_id / department_id are optional; leave blank OR paste
-    #    the exact UUID from Admin > Establishments / Departments.
+    #  - establishment_id / department_id are optional; leave blank, OR enter
+    #    the establishment/department CODE (e.g. "DFV") or full NAME exactly
+    #    as shown in Admin > Establishments / Departments, OR paste the UUID
+    #    if you already have it — all three forms are accepted.
     sample_rows = [
         # first, middle, last, email, mobile, emp_code, dob, designation,
         # establishment_id, department_id, role, is_active, temp_password
@@ -851,9 +854,9 @@ async def download_bulk_user_sample(_: User = Depends(_super_admin_only)):
         ["Chandra", "", "Das", "chandra.das@example.com", "9876500003", "",
          "", "Head of Department", "", "", "hod", "true", ""],
         ["Deepa", "", "Nair", "deepa.nair@example.com", "9876500004", "EMP104",
-         "1995-07-21", "Research Associate", "", "", "faculty", "true", "Temp@1234"],
+         "1995-07-21", "Research Associate", "DFV", "ABT", "faculty", "true", "Temp@1234"],
         ["Ehsan", "", "Ali", "ehsan.ali@example.com", "9876500005", "EMP105",
-         "1985-02-28", "Dispatch Clerk", "", "", "dispatch_officer", "false", ""],
+         "1985-02-28", "Dispatch Clerk", "DFV", "VMC", "dispatch_officer", "false", ""],
     ]
     for r in sample_rows:
         writer.writerow(r)
@@ -892,6 +895,34 @@ def _parse_bulk_bool(value: str, default: bool) -> bool:
     if v in ("false", "0", "no", "n", "inactive"):
         return False
     return default
+
+
+async def _resolve_bulk_org_ref(db: AsyncSession, model, value: str) -> Optional[UUID]:
+    """Bulk-upload establishment_id/department_id cells accept a UUID, a
+    code (e.g. "DFV"), or a name — not just a raw UUID — since that's what
+    people actually type into the CSV. Raises a plain ValueError with a
+    row-friendly message if the value matches nothing, so the caller can
+    surface it the same way as a Pydantic validation error."""
+    value = value.strip()
+    if not value:
+        return None
+    try:
+        return UUID(value)
+    except ValueError:
+        pass
+    label = "establishment" if model is Establishment else "department"
+    result = await db.execute(
+        select(model.id).where(func.lower(model.code) == value.lower())
+    )
+    match = result.scalar_one_or_none()
+    if match is None:
+        result = await db.execute(
+            select(model.id).where(func.lower(model.name) == value.lower())
+        )
+        match = result.scalar_one_or_none()
+    if match is None:
+        raise ValueError(f"no {label} found matching \"{value}\" (checked code and name)")
+    return match
 
 
 @router.post("/admin/users/bulk", response_model=BulkUserUploadResult)
@@ -935,6 +966,13 @@ async def bulk_create_users(
         full_name = " ".join(p for p in (row.get("first_name"), row.get("middle_name"), row.get("last_name")) if p)
 
         try:
+            establishment_id = await _resolve_bulk_org_ref(db, Establishment, row.get("establishment_id", ""))
+            department_id = await _resolve_bulk_org_ref(db, Department, row.get("department_id", ""))
+        except ValueError as exc:
+            results.append(BulkUserRowResult(row=idx, email=email or None, status="failed", error=str(exc)))
+            continue
+
+        try:
             body = CreateUserRequest(
                 first_name=row.get("first_name", ""),
                 middle_name=row.get("middle_name") or None,
@@ -944,8 +982,8 @@ async def bulk_create_users(
                 employee_code=row.get("employee_code") or None,
                 date_of_birth=row.get("date_of_birth") or None,
                 designation=row.get("designation", ""),
-                establishment_id=row.get("establishment_id") or None,
-                department_id=row.get("department_id") or None,
+                establishment_id=establishment_id,
+                department_id=department_id,
                 role=row.get("role", ""),
                 is_active=_parse_bulk_bool(row.get("is_active", ""), default=True),
                 temp_password=temp_password,
