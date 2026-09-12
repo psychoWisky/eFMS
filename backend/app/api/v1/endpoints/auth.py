@@ -1358,7 +1358,14 @@ class RoleUpdateRequest(BaseModel):
 
 
 async def _role_user_count(db: AsyncSession, role_name: str) -> int:
-    result = await db.execute(select(func.count()).select_from(User).where(User.active_role == role_name))
+    """Distinct users who HOLD this role — via user_roles, the real source of
+    truth for multi-role users — not just whoever has it as active_role right
+    now. A user can hold a role as a secondary role without it being active;
+    counting only active_role undercounts here and, worse, let delete_role
+    delete a role while users still held it as a non-active role."""
+    result = await db.execute(
+        select(func.count(func.distinct(UserRole.user_id))).where(UserRole.role == role_name)
+    )
     return result.scalar_one()
 
 
@@ -1375,8 +1382,14 @@ async def list_roles(db: AsyncSession = Depends(get_db), _: User = Depends(_supe
     roles = result.scalars().all()
     counts = {}
     if roles:
+        # Count distinct holders via user_roles (the real "who holds this
+        # role" source for multi-role users), not User.active_role — a user
+        # can hold a role as a non-active secondary role and still needs to
+        # show up here (see _role_user_count for the same fix elsewhere).
         count_result = await db.execute(
-            select(User.active_role, func.count()).where(User.active_role.in_([r.name for r in roles])).group_by(User.active_role)
+            select(UserRole.role, func.count(func.distinct(UserRole.user_id)))
+            .where(UserRole.role.in_([r.name for r in roles]))
+            .group_by(UserRole.role)
         )
         counts = dict(count_result.all())
     return [

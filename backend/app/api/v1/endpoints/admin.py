@@ -5,15 +5,17 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, func
 from sqlalchemy.orm import selectinload
 from pydantic import BaseModel
 
 from app.db.base import get_db
 from app.core.dependencies import require_roles, get_current_user
-from app.models.user import User, SystemRole, FavoriteRecipient
+from app.models.user import User, UserRole, SystemRole, FavoriteRecipient
 from app.models.admin import FileCategory, FilePriority, FileRecipient, Notification
 from app.models.organization import Establishment, Department
+from app.models.efms import EfmsFile
+from app.models.efms_extra import Docket
 
 router = APIRouter(prefix="/admin", tags=["Super Admin"])
 _super = require_roles(SystemRole.SUPER_ADMIN)
@@ -405,15 +407,63 @@ async def toggle_establishment(eid: UUID, db: AsyncSession = Depends(get_db), _=
     await db.commit(); await db.refresh(e)
     return e
 
+async def _org_ref_blockers(db: AsyncSession, *, establishment_id: Optional[UUID] = None, department_id: Optional[UUID] = None) -> list[str]:
+    """Every table that can FK-reference an establishment/department, checked
+    explicitly instead of relying on a caught IntegrityError — a blind catch
+    can't tell you WHICH of these actually blocked the delete, and reports
+    "users linked" even when the real blocker is a role assignment, a file,
+    or a released docket that no user-list screen would ever surface."""
+    col_name = "establishment_id" if establishment_id is not None else "department_id"
+    value = establishment_id if establishment_id is not None else department_id
+    blockers: list[str] = []
+
+    user_count = (await db.execute(
+        select(func.count()).select_from(User).where(getattr(User, col_name) == value)
+    )).scalar_one()
+    if user_count:
+        blockers.append(f"{user_count} user{'s' if user_count != 1 else ''} (primary {col_name.replace('_id', '')})")
+
+    role_count = (await db.execute(
+        select(func.count()).select_from(UserRole).where(getattr(UserRole, col_name) == value)
+    )).scalar_one()
+    if role_count:
+        blockers.append(f"{role_count} role assignment{'s' if role_count != 1 else ''} (a user's secondary role uses this)")
+
+    if department_id is not None:
+        file_count = (await db.execute(
+            select(func.count()).select_from(EfmsFile).where(EfmsFile.department_id == department_id)
+        )).scalar_one()
+        if file_count:
+            blockers.append(f"{file_count} file{'s' if file_count != 1 else ''}")
+
+        docket_count = (await db.execute(
+            select(func.count()).select_from(Docket).where(Docket.department_id == department_id)
+        )).scalar_one()
+        if docket_count:
+            blockers.append(f"{docket_count} released docket entr{'ies' if docket_count != 1 else 'y'}")
+
+    if establishment_id is not None:
+        dept_count = (await db.execute(
+            select(func.count()).select_from(Department).where(Department.establishment_id == establishment_id)
+        )).scalar_one()
+        if dept_count:
+            blockers.append(f"{dept_count} department{'s' if dept_count != 1 else ''}")
+
+    return blockers
+
+
 @router.delete("/establishments/{eid}", status_code=204)
 async def delete_establishment(eid: UUID, db: AsyncSession = Depends(get_db), _=Depends(_super)):
     e = await db.get(Establishment, eid)
     if not e: raise HTTPException(404, "Not found")
+    blockers = await _org_ref_blockers(db, establishment_id=eid)
+    if blockers:
+        raise HTTPException(400, f"Cannot delete — still referenced by {', '.join(blockers)}. Reassign or remove those first, or toggle to hide instead.")
     try:
         await db.delete(e); await db.commit()
     except IntegrityError:
         await db.rollback()
-        raise HTTPException(400, "Establishment has departments or users linked. Toggle to hide instead.")
+        raise HTTPException(400, "Establishment is still referenced elsewhere. Toggle to hide instead.")
 
 
 @router.get("/departments", response_model=List[DeptOut])
@@ -447,11 +497,14 @@ async def toggle_department(did: UUID, db: AsyncSession = Depends(get_db), _=Dep
 async def delete_department(did: UUID, db: AsyncSession = Depends(get_db), _=Depends(_super)):
     d = await db.get(Department, did)
     if not d: raise HTTPException(404, "Not found")
+    blockers = await _org_ref_blockers(db, department_id=did)
+    if blockers:
+        raise HTTPException(400, f"Cannot delete — still referenced by {', '.join(blockers)}. Reassign or remove those first, or toggle to hide instead.")
     try:
         await db.delete(d); await db.commit()
     except IntegrityError:
         await db.rollback()
-        raise HTTPException(400, "Department has users linked. Toggle to hide instead.")
+        raise HTTPException(400, "Department is still referenced elsewhere. Toggle to hide instead.")
 
 
 # ── Digital Signature Permissions ─────────────────────────────────────────────
