@@ -507,11 +507,14 @@ async def switch_role(
     """Switch the caller's ACTIVE role to another role they hold (see
     user_roles). Re-issues the token pair with the new active_role — from
     every other screen's perspective identical to having logged in with
-    that role. Works for a real person identity AND for one of their
-    project (PI) profiles: a PI profile inherits the origin person's full
-    role set at assign time, so it can switch roles too. A role the caller
-    does not hold is rejected 403 — authorized against user_roles, never
-    trusted."""
+    that role. A role the caller does not hold is rejected 403 — authorized
+    against user_roles, never trusted.
+
+    A project (PI) profile has no user_roles rows at all (see
+    _create_project_profile in projects.py) — it is a project identity, not
+    a person, and does not hold a role independently of the origin person.
+    So this 403s for any role on a profile, which is intentional: Switch
+    Role is not available on a PI profile."""
     # get_current_user already returns the caller with roles eager-loaded
     # from this same session — no extra query needed.
     me = current_user

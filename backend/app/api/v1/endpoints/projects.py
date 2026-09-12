@@ -26,7 +26,7 @@ from sqlalchemy.orm import selectinload
 
 from app.db.base import get_db
 from app.core.dependencies import require_roles
-from app.models.user import User, UserRole, RefreshToken, SystemRole
+from app.models.user import User, RefreshToken, SystemRole
 from app.models.project import Project, ProjectStatus
 
 router = APIRouter(prefix="/projects", tags=["Projects"])
@@ -158,7 +158,19 @@ async def _create_project_profile(db: AsyncSession, origin: User, project: Proje
     module docstring. Display name is auto-generated ("User A" + "PI74"),
     never independently editable; role/department/designation/establishment
     are a one-time snapshot of the origin user's current values, per the
-    confirmed decision that these are not project-specific fields."""
+    confirmed decision that these are not project-specific fields.
+
+    Deliberately does NOT create any user_roles row for the profile (and
+    does not support Switch Role on it): a PI profile is a project
+    identity, not a person — the origin person already holds the role(s).
+    An earlier version of this copied the origin's full role set into the
+    profile's own user_roles so it could switch roles too, but that made a
+    profile count as an independent "holder" of every role the origin had
+    AT ASSIGNMENT TIME — permanently, even after the origin's real role
+    later changed — which inflated Role Management's user_count for roles
+    no real person actually holds. active_role is still set (JWT/
+    authorization elsewhere key off it), it just never changes for a
+    profile."""
     profile = User(
         email=await _build_profile_email(db, origin, project),
         hashed_password=None,
@@ -178,12 +190,6 @@ async def _create_project_profile(db: AsyncSession, origin: User, project: Proje
     )
     db.add(profile)
     await db.flush()
-    # Copy the origin person's FULL role set (multi-role users), so the PI
-    # profile can switch roles just like the main account. Fall back to
-    # active_role for a legacy single-role origin with no user_roles rows.
-    origin_roles = [ur.role for ur in origin.roles] or ([origin.active_role] if origin.active_role else [])
-    for role in dict.fromkeys(origin_roles):
-        db.add(UserRole(user_id=profile.id, role=role))
     return profile
 
 
@@ -214,7 +220,7 @@ async def create_project(body: ProjectCreate, db: AsyncSession = Depends(get_db)
     # simply created unassigned and the Assign button handles it later.
     profile_name: Optional[str] = None
     if body.assign_user_id is not None:
-        origin = await db.scalar(select(User).options(selectinload(User.roles)).where(User.id == body.assign_user_id))
+        origin = await db.scalar(select(User).where(User.id == body.assign_user_id))
         _assert_assignable(origin)
         profile = await _create_project_profile(db, origin, p)
         p.current_profile_id = profile.id
@@ -246,7 +252,7 @@ async def assign_project(
     if project.current_profile_id:
         raise HTTPException(400, "This project already has an assigned profile. Use reassign instead.")
 
-    origin = await db.scalar(select(User).options(selectinload(User.roles)).where(User.id == body.user_id))
+    origin = await db.scalar(select(User).where(User.id == body.user_id))
     _assert_assignable(origin)
 
     profile = await _create_project_profile(db, origin, project)
@@ -272,7 +278,7 @@ async def reassign_project(
     if not project.current_profile_id:
         raise HTTPException(400, "This project has no current assignment to reassign. Use assign instead.")
 
-    origin = await db.scalar(select(User).options(selectinload(User.roles)).where(User.id == body.user_id))
+    origin = await db.scalar(select(User).where(User.id == body.user_id))
     _assert_assignable(origin)
 
     old_profile = await db.get(User, project.current_profile_id)
