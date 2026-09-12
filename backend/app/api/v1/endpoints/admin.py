@@ -412,19 +412,38 @@ async def _org_ref_blockers(db: AsyncSession, *, establishment_id: Optional[UUID
     explicitly instead of relying on a caught IntegrityError — a blind catch
     can't tell you WHICH of these actually blocked the delete, and reports
     "users linked" even when the real blocker is a role assignment, a file,
-    or a released docket that no user-list screen would ever surface."""
+    or a released docket that no user-list screen would ever surface.
+
+    User/UserRole checks are scoped to is_active=True AND origin_user_id IS
+    NULL: this system never hard-deletes a user, only deactivates them, so a
+    deactivated user's old department/role reference must not block a
+    delete an admin can't otherwise resolve (there is no user to reassign —
+    they're gone from every user-facing list). Project/PI profiles
+    (origin_user_id IS NOT NULL) are excluded for the same reason —
+    _create_project_profile snapshots the origin person's department/
+    establishment/roles onto a synthetic, separately-active `users` row
+    that no admin would ever find or reassign from the Users screen. Files
+    and dockets are permanent historical records and still block
+    regardless of the creator's current status."""
     col_name = "establishment_id" if establishment_id is not None else "department_id"
     value = establishment_id if establishment_id is not None else department_id
     blockers: list[str] = []
 
     user_count = (await db.execute(
-        select(func.count()).select_from(User).where(getattr(User, col_name) == value)
+        select(func.count()).select_from(User).where(
+            getattr(User, col_name) == value, User.is_active == True, User.origin_user_id.is_(None),
+        )
     )).scalar_one()
     if user_count:
         blockers.append(f"{user_count} user{'s' if user_count != 1 else ''} (primary {col_name.replace('_id', '')})")
 
     role_count = (await db.execute(
-        select(func.count()).select_from(UserRole).where(getattr(UserRole, col_name) == value)
+        select(func.count(func.distinct(UserRole.user_id)))
+        .select_from(UserRole)
+        .join(User, User.id == UserRole.user_id)
+        .where(
+            getattr(UserRole, col_name) == value, User.is_active == True, User.origin_user_id.is_(None),
+        )
     )).scalar_one()
     if role_count:
         blockers.append(f"{role_count} role assignment{'s' if role_count != 1 else ''} (a user's secondary role uses this)")

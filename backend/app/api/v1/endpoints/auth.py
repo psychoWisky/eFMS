@@ -1358,13 +1358,31 @@ class RoleUpdateRequest(BaseModel):
 
 
 async def _role_user_count(db: AsyncSession, role_name: str) -> int:
-    """Distinct users who HOLD this role — via user_roles, the real source of
-    truth for multi-role users — not just whoever has it as active_role right
-    now. A user can hold a role as a secondary role without it being active;
-    counting only active_role undercounts here and, worse, let delete_role
-    delete a role while users still held it as a non-active role."""
+    """Distinct ACTIVE, REAL-PERSON users who HOLD this role — via
+    user_roles, the real source of truth for multi-role users — not just
+    whoever has it as active_role right now. A user can hold a role as a
+    secondary role without it being active; counting only active_role
+    undercounts here and, worse, let delete_role delete a role while users
+    still held it as a non-active role.
+
+    Two kinds of users are deliberately excluded, both because they are
+    invisible on the (real-people, active-only) User Management list an
+    admin checks this count against:
+
+    1. Deactivated users (is_active=False) — this system never hard-deletes
+       a user, so their user_roles rows live on forever.
+    2. Project/PI profiles (origin_user_id IS NOT NULL) — _create_project_profile
+       (app/api/v1/endpoints/projects.py) copies the origin person's ENTIRE
+       role set into a new, separately-active `users` row for the project
+       profile. That profile is a synthetic per-project identity, not a
+       person an admin would ever look for on the Users screen, but without
+       this exclusion it still counts as a "holder" of every role the origin
+       person has — which is exactly how a role with zero real people could
+       still show a nonzero count."""
     result = await db.execute(
-        select(func.count(func.distinct(UserRole.user_id))).where(UserRole.role == role_name)
+        select(func.count(func.distinct(UserRole.user_id)))
+        .join(User, User.id == UserRole.user_id)
+        .where(UserRole.role == role_name, User.is_active == True, User.origin_user_id.is_(None))
     )
     return result.scalar_one()
 
@@ -1382,13 +1400,19 @@ async def list_roles(db: AsyncSession = Depends(get_db), _: User = Depends(_supe
     roles = result.scalars().all()
     counts = {}
     if roles:
-        # Count distinct holders via user_roles (the real "who holds this
-        # role" source for multi-role users), not User.active_role — a user
-        # can hold a role as a non-active secondary role and still needs to
-        # show up here (see _role_user_count for the same fix elsewhere).
+        # Count distinct ACTIVE, REAL-PERSON holders via user_roles — see
+        # _role_user_count's docstring for both exclusions (deactivated
+        # users, and project/PI profiles which inherit the origin person's
+        # entire role set and would otherwise inflate this count for roles
+        # no real person actually holds).
         count_result = await db.execute(
             select(UserRole.role, func.count(func.distinct(UserRole.user_id)))
-            .where(UserRole.role.in_([r.name for r in roles]))
+            .join(User, User.id == UserRole.user_id)
+            .where(
+                UserRole.role.in_([r.name for r in roles]),
+                User.is_active == True,
+                User.origin_user_id.is_(None),
+            )
             .group_by(UserRole.role)
         )
         counts = dict(count_result.all())
