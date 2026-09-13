@@ -16,3 +16,5 @@ frontend/package-lock.json
 backend/seed.py
 backend/uploads/
 uploads/
+backend/db_backups/
+*.dump

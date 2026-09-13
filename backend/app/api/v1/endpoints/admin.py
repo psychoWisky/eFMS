@@ -407,6 +407,24 @@ async def toggle_establishment(eid: UUID, db: AsyncSession = Depends(get_db), _=
     await db.commit(); await db.refresh(e)
     return e
 
+def _fk_violation_table(exc: IntegrityError) -> Optional[str]:
+    """Best-effort extraction of the referencing table name from a Postgres
+    FK-violation error, so the fallback IntegrityError handler in
+    delete_department/delete_establishment can name the real blocker even
+    when it's a table this codebase doesn't own (e.g. `courses` — this
+    Postgres database is shared with a sibling application, so a table with
+    no SQLAlchemy model here can still hold a `department_id`/
+    `establishment_id` FK and block a delete _org_ref_blockers can't see).
+    asyncpg's driver puts Postgres's own DETAIL text on the wrapped
+    exception's __cause__; falls back to None if the shape ever changes."""
+    detail = str(getattr(exc, "orig", None) or exc)
+    # Postgres DETAIL looks like: 'Key (id)=(...) is still referenced from table "courses".'
+    marker = 'is still referenced from table "'
+    if marker in detail:
+        return detail.split(marker, 1)[1].split('"', 1)[0]
+    return None
+
+
 async def _org_ref_blockers(db: AsyncSession, *, establishment_id: Optional[UUID] = None, department_id: Optional[UUID] = None) -> list[str]:
     """Every table that can FK-reference an establishment/department, checked
     explicitly instead of relying on a caught IntegrityError — a blind catch
@@ -480,9 +498,12 @@ async def delete_establishment(eid: UUID, db: AsyncSession = Depends(get_db), _=
         raise HTTPException(400, f"Cannot delete — still referenced by {', '.join(blockers)}. Reassign or remove those first, or toggle to hide instead.")
     try:
         await db.delete(e); await db.commit()
-    except IntegrityError:
+    except IntegrityError as exc:
         await db.rollback()
-        raise HTTPException(400, "Establishment is still referenced elsewhere. Toggle to hide instead.")
+        table = _fk_violation_table(exc)
+        detail = f'Cannot delete — still referenced by the "{table}" table (outside eFMS). Toggle to hide instead.' if table \
+            else "Establishment is still referenced elsewhere. Toggle to hide instead."
+        raise HTTPException(400, detail)
 
 
 @router.get("/departments", response_model=List[DeptOut])
@@ -521,9 +542,12 @@ async def delete_department(did: UUID, db: AsyncSession = Depends(get_db), _=Dep
         raise HTTPException(400, f"Cannot delete — still referenced by {', '.join(blockers)}. Reassign or remove those first, or toggle to hide instead.")
     try:
         await db.delete(d); await db.commit()
-    except IntegrityError:
+    except IntegrityError as exc:
         await db.rollback()
-        raise HTTPException(400, "Department is still referenced elsewhere. Toggle to hide instead.")
+        table = _fk_violation_table(exc)
+        detail = f'Cannot delete — still referenced by the "{table}" table (outside eFMS). Toggle to hide instead.' if table \
+            else "Department is still referenced elsewhere. Toggle to hide instead."
+        raise HTTPException(400, detail)
 
 
 # ── Digital Signature Permissions ─────────────────────────────────────────────

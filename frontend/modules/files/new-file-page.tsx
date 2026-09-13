@@ -175,7 +175,11 @@ export function NewFileForm({ onSuccess }: NewFileFormProps) {
   const createFile = useMutation({
     mutationFn: doCreateFile,
     onSuccess: () => {
-      showSuccess("File created and submitted successfully.", uploadSummaryLine());
+      // This mutation is bound to the "Save Draft" button — "submitted" is
+      // inaccurate here (the file hasn't gone anywhere; it's a Draft in My
+      // Files until it's forwarded) and was part of the same "draft"
+      // messaging confusion as the restored-draft banner above.
+      showSuccess("Draft saved.", uploadSummaryLine());
       qc.invalidateQueries({ queryKey: ["efms-files"] });
       qc.invalidateQueries({ queryKey: ["efms-files-outbox"] });
       onSuccess?.();
@@ -282,9 +286,15 @@ export function NewFileForm({ onSuccess }: NewFileFormProps) {
     <form onSubmit={handleSubmit} className="w-full space-y-4">
       {draftRestored && (
         <div className="flex items-center justify-between gap-3 px-4 py-2.5 bg-amber-50 border border-amber-200 rounded-xl text-amber-800 text-sm">
-          <span>Draft restored from your last session.</span>
+          {/* This is NOT a saved eFMS draft (no file exists yet) — it's
+              unsubmitted text auto-saved in this browser only, from a
+              previous visit that was closed/abandoned before Save Draft or
+              Forward was ever clicked. Worded to say exactly that; a
+              banner reading "Draft restored" was previously mistaken for
+              an actual saved-draft notification. */}
+          <span>You have unsaved text from a previous visit to this page, recovered from this browser. No file was created or saved.</span>
           <button type="button" onClick={() => { localStorage.removeItem(DRAFT_KEY); editor?.commands.setContent(DEFAULT_NOTESHEET_HTML); setNotesheetDirty(false); setSubject(""); setCategory(""); setPriority(""); setDraftRestored(false); }}
-            className="text-xs font-semibold underline hover:no-underline shrink-0">Clear draft</button>
+            className="text-xs font-semibold underline hover:no-underline shrink-0">Discard</button>
         </div>
       )}
 

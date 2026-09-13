@@ -19,6 +19,7 @@ from fastapi.responses import FileResponse, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, or_, and_, func
 from sqlalchemy.orm import selectinload
+from sqlalchemy.exc import IntegrityError
 from app.core.config import settings
 
 
@@ -85,15 +86,32 @@ def _attachment_delete_expired(att: FileAttachment) -> bool:
 router = APIRouter(prefix="/efms/files", tags=["eFMS Files"])
 
 async def _generate_ref(db: AsyncSession, dept_code: str = "GEN", category: str = "GEN") -> str:
-    """Format: AVFU/DEPT(4)/YEAR/CAT(3)/SEQID"""
+    """Format: AVFU/DEPT(4)/YEAR/CAT(3)/SEQID.
+
+    Derived from the highest existing sequence number under this exact
+    prefix, not a row COUNT — a plain count collides with an existing
+    ref_number the moment any file in this prefix bucket is ever deleted
+    (e.g. delete_draft_file on an untouched Draft, a normal, supported
+    action): count drops by one, the "next" number it computes is one
+    already taken by a still-existing file, and the create INSERT below
+    fails on ref_number's UNIQUE constraint for every subsequent caller
+    until the gap is filled by an unrelated deletion. Reproduced and
+    confirmed pre-fix; see create_file's retry-on-collision loop for the
+    other half of this fix (two concurrent creates racing for the same
+    MAX+1)."""
     year = datetime.now(timezone.utc).year
     dept_part = (dept_code[:4]).upper().ljust(4, "X")
     cat_part  = (category[:3]).upper().ljust(3, "X")
     prefix = f"AVFU/{dept_part}/{year}/{cat_part}/"
-    count = await db.scalar(
-        select(func.count(EfmsFile.id)).where(EfmsFile.ref_number.like(f"AVFU/{dept_part}/{year}/{cat_part}/%"))
-    )
-    return f"{prefix}{(count or 0) + 1:04d}"
+    existing = (await db.execute(
+        select(EfmsFile.ref_number).where(EfmsFile.ref_number.like(f"{prefix}%"))
+    )).scalars().all()
+    max_seq = 0
+    for ref in existing:
+        suffix = ref.rsplit("/", 1)[-1]
+        if suffix.isdigit():
+            max_seq = max(max_seq, int(suffix))
+    return f"{prefix}{max_seq + 1:04d}"
 
 
 async def _attach_is_released(files: list, db: AsyncSession) -> None:
@@ -795,8 +813,6 @@ async def create_file(
             dept_code = dept.code
         elif dept:
             dept_code = dept.name[:4]
-    ref = await _generate_ref(db, dept_code, body.category or "GEN")
-
     # Resolve recipient — informational only. A draft never enters the workflow:
     # no route entry, no notification, no email, no holder transfer. The recipient
     # (if chosen) is simply stored for pre-filling the eventual First Forward.
@@ -806,27 +822,44 @@ async def create_file(
         if rec_user:
             recipient_name = rec_user.full_name
 
-    efms_file = EfmsFile(
-        ref_number=ref,
-        subject=body.subject,
-        category=body.category,
-        priority=body.priority,
-        is_confidential=body.is_confidential,
-        due_date=body.due_date,
-        department_id=body.department_id,
-        recipient_id=body.recipient_id,
-        recipient_name=recipient_name,
-        created_by=user.id,
-        current_holder_id=user.id,
-        # The file belongs to the creator's current-role workspace (multi-
-        # role users). While it is still a Draft the creator also holds it,
-        # so both role fields start the same.
-        creator_role=user.active_role,
-        current_holder_role=user.active_role,
-        status=FileStatus.draft,
-    )
-    db.add(efms_file)
-    await db.flush()
+    # _generate_ref's MAX-based lookup fixes the "gap after a deletion"
+    # collision, but two requests racing for the same MAX+1 (concurrent
+    # creates in the same department/category/year bucket) can still both
+    # compute the same ref before either commits. Retry with a fresh ref on
+    # that specific case rather than surfacing a raw 500 — this is the
+    # standard, safe way to handle a unique-constraint race without a
+    # heavier locking scheme the rest of this codebase doesn't use elsewhere.
+    max_attempts = 5
+    for attempt in range(max_attempts):
+        ref = await _generate_ref(db, dept_code, body.category or "GEN")
+        efms_file = EfmsFile(
+            ref_number=ref,
+            subject=body.subject,
+            category=body.category,
+            priority=body.priority,
+            is_confidential=body.is_confidential,
+            due_date=body.due_date,
+            department_id=body.department_id,
+            recipient_id=body.recipient_id,
+            recipient_name=recipient_name,
+            created_by=user.id,
+            current_holder_id=user.id,
+            # The file belongs to the creator's current-role workspace (multi-
+            # role users). While it is still a Draft the creator also holds it,
+            # so both role fields start the same.
+            creator_role=user.active_role,
+            current_holder_role=user.active_role,
+            status=FileStatus.draft,
+        )
+        db.add(efms_file)
+        try:
+            await db.flush()
+        except IntegrityError:
+            await db.rollback()
+            if attempt == max_attempts - 1:
+                raise
+            continue
+        break
 
     notesheet = Notesheet(file_id=efms_file.id, content=body.initial_content, last_saved_by=user.id)
     db.add(notesheet)

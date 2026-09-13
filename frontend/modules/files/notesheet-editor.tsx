@@ -729,7 +729,7 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
     }
   }, [users, loadingUsers, draftRecipientId]);
   useEffect(() => {
-    if (!loadingUsers && toUserId && !users.some((u) => u.id === toUserId)) {
+    if (!loadingUsers && toUserId && !users.some((u) => u.id === splitRecipientValue(toUserId).userId)) {
       setToUserId("");
     }
   }, [users, loadingUsers, toUserId]);
@@ -1494,7 +1494,7 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                     </div>
                     <button onClick={async () => {
                       if (!toUserId) { toast.warning("Please select a recipient to forward to."); return; }
-                      const selected = users.find((u) => u.id === toUserId);
+                      const selected = users.find((u) => u.id === splitRecipientValue(toUserId).userId);
                       const confirmed = await confirmAction({
                         title: "Forward File",
                         html: `Are you sure you want to forward this file to <strong>${escapeHtml(selected?.full_name ?? "the selected recipient")}</strong>?`,
