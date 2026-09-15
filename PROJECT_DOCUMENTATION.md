@@ -180,7 +180,7 @@ optionally scopes a department under an establishment.
 #### `efms_files`
 | Column | Notes |
 |---|---|
-| `ref_number` | e.g. `AVFU/GENX/2026/PRO/0004` — generated in `_generate_ref()` |
+| `ref_number` | e.g. `AVFU/2026/PRO/0004` — generated in `_generate_ref()` |
 | `status` | `draft` → `active` → (`dispatched` is a separate terminal branch) — see §6.1 |
 | `priority` | `normal` \| `urgent` \| `secret` (secret implies `is_confidential`) |
 | `created_by` | Immutable — the file's creator, forever |

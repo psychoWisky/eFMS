@@ -86,7 +86,7 @@ def _attachment_delete_expired(att: FileAttachment) -> bool:
 router = APIRouter(prefix="/efms/files", tags=["eFMS Files"])
 
 async def _generate_ref(db: AsyncSession, dept_code: str = "GEN", category: str = "GEN") -> str:
-    """Format: AVFU/DEPT(4)/YEAR/CAT(3)/SEQID.
+    """Format: AVFU/YEAR/CAT(3)/SEQID.
 
     Derived from the highest existing sequence number under this exact
     prefix, not a row COUNT — a plain count collides with an existing
@@ -100,9 +100,8 @@ async def _generate_ref(db: AsyncSession, dept_code: str = "GEN", category: str 
     other half of this fix (two concurrent creates racing for the same
     MAX+1)."""
     year = datetime.now(timezone.utc).year
-    dept_part = (dept_code[:4]).upper().ljust(4, "X")
     cat_part  = (category[:3]).upper().ljust(3, "X")
-    prefix = f"AVFU/{dept_part}/{year}/{cat_part}/"
+    prefix = f"AVFU/{year}/{cat_part}/"
     existing = (await db.execute(
         select(EfmsFile.ref_number).where(EfmsFile.ref_number.like(f"{prefix}%"))
     )).scalars().all()
