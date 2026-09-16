@@ -270,8 +270,20 @@ async def reassign_project(
     """Never mutates the outgoing profile's identity — it is deactivated
     (kept forever, so every file/route entry/notesheet/attachment it ever
     touched stays intact and correctly attributed to it historically) and a
-    brand-new profile row is created for the new person. The Project row
-    itself (number/name/funding) is untouched."""
+    brand-new profile row is created for the new person.
+
+    Every file the OLD profile created, currently holds, or released is
+    moved onto the NEW profile's own account (real ownership-field rewrite,
+    same mechanism as per-role ownership transfer — see
+    efms_files.reassign_file_ownership) — so it shows up in the new PI's
+    own My Files / Docket / Released Files exactly as it did for the old
+    one, with no separate "accept this forward" step needed. This closes
+    a real gap: previously a reassigned project's files were untraceable
+    from the new profile at all, only reachable via the old (now
+    deactivated) one. The Project row itself (number/name/funding) is
+    untouched."""
+    from app.api.v1.endpoints.efms_files import reassign_file_ownership
+
     project = await db.get(Project, project_id)
     if not project:
         raise HTTPException(404, "Project not found.")
@@ -282,11 +294,23 @@ async def reassign_project(
     _assert_assignable(origin)
 
     old_profile = await db.get(User, project.current_profile_id)
-    if old_profile:
-        old_profile.is_active = False
-        await _revoke_profile_sessions(db, old_profile.id)
 
     new_profile = await _create_project_profile(db, origin, project)
+    await db.flush()
+
+    if old_profile:
+        note = f"Project reassigned ({project.name}): {old_profile.full_name} → {new_profile.full_name}"
+        await reassign_file_ownership(
+            db, old_id=old_profile.id, new_id=new_profile.id, new_role=new_profile.active_role,
+            actor_id=user.id, note=note, role_filter=None,
+        )
+        old_profile.is_active = False
+        # Historical-access safety net, same pattern as ownership transfer:
+        # anything not caught by the explicit file-reassignment above (e.g.
+        # a future access-check path) still resolves through this chain.
+        new_profile.account_predecessor_id = old_profile.id
+        await _revoke_profile_sessions(db, old_profile.id)
+
     project.current_profile_id = new_profile.id
     await db.commit()
     await db.refresh(project)

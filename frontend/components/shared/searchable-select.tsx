@@ -11,6 +11,15 @@ import { cn } from "@/lib/utils";
 export interface SearchableSelectOption {
   value: string;
   label: string;
+  /** Optional structured search fields for callers that need "search by
+   * name shows every match for that person, search by role narrows to
+   * that role only" (the recipient pickers) instead of one flat
+   * substring-on-label match. When absent, filtering falls back to the
+   * plain label search every other SearchableSelect caller already uses
+   * — this never changes existing behavior for Office/Section/admin
+   * dropdowns etc. See buildGroups() in use-favorite-recipients.ts. */
+  searchName?: string;
+  searchRole?: string;
 }
 
 export interface SearchableSelectGroup {
@@ -58,8 +67,18 @@ export function SearchableSelect({
   const selected = allOptions.find((o) => o.value === value) ?? null;
 
   const q = search.trim().toLowerCase();
+  // Structured match (searchName/searchRole present, e.g. recipient
+  // pickers): searching a person's name matches every role-entry of
+  // theirs (all share the same name); searching a role name narrows down
+  // to entries actually stamped with that role, not every person whose
+  // label happens to contain the text. Falls back to a plain label
+  // substring match for every other SearchableSelect caller, unchanged.
+  const matches = (o: SearchableSelectOption) =>
+    o.searchName !== undefined || o.searchRole !== undefined
+      ? (o.searchName?.toLowerCase().includes(q) ?? false) || (o.searchRole?.toLowerCase().includes(q) ?? false)
+      : o.label.toLowerCase().includes(q);
   const filteredGroups = (q
-    ? effectiveGroups.map((g) => ({ ...g, options: g.options.filter((o) => o.label.toLowerCase().includes(q)) }))
+    ? effectiveGroups.map((g) => ({ ...g, options: g.options.filter(matches) }))
     : effectiveGroups
   ).filter((g) => g.options.length > 0);
 

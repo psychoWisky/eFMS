@@ -720,70 +720,154 @@ function DeactivateUserModal({ user, onClose, onConfirm, isPending }: {
   );
 }
 
-function TransferOwnershipModal({ user, candidates, onClose, onConfirm, isPending }: {
+// One reassignable thing a leaver currently holds — a role, or a PI/
+// project profile they're incharge of. See GET .../transfer-status.
+interface TransferItem {
+  kind: "role" | "project_profile";
+  key: string;
+  label: string;
+  department_id: string | null;
+  establishment_id: string | null;
+  project_id: string | null;
+  project_name: string | null;
+}
+interface TransferStatus { items: TransferItem[]; can_retire: boolean; }
+
+// Per-item reassignment picker + action button. Its own target selection
+// is local state — each item is reassigned independently by its own
+// "Reassign" click, matching the confirmed flow (3 roles + 3 PI profiles
+// can go to 6 different people, one at a time, partial progress allowed).
+function TransferItemRow({ item, candidates, onReassign, isPending }: {
+  item: TransferItem;
+  candidates: { value: string; label: string }[];
+  onReassign: (item: TransferItem, targetId: string) => void;
+  isPending: boolean;
+}) {
+  const [targetId, setTargetId] = useState("");
+  return (
+    <div className="flex items-center gap-3 py-3 border-b border-gray-100 last:border-0">
+      <div className="flex-1 min-w-0">
+        <p className="text-sm font-semibold text-gray-800 truncate">{item.label}</p>
+        <p className="text-xs text-gray-400">{item.kind === "role" ? "Role" : "Project profile"}</p>
+      </div>
+      <div className="w-56 shrink-0">
+        <SearchableSelect
+          options={candidates}
+          value={targetId}
+          onChange={setTargetId}
+          clearable={false}
+          placeholder="Reassign to…"
+          searchPlaceholder="Search by name or email…"
+        />
+      </div>
+      <button
+        onClick={() => onReassign(item, targetId)}
+        disabled={!targetId || isPending}
+        className="shrink-0 px-3 py-2 bg-[#0D6E6E] text-white rounded-lg text-xs font-semibold hover:bg-[#178F8F] disabled:opacity-50 flex items-center gap-1"
+      >
+        {isPending ? <Loader2 size={13} className="animate-spin" /> : null} Reassign
+      </button>
+    </div>
+  );
+}
+
+// Replaces the old single-successor "transfer everything at once" flow.
+// A leaver can hold several roles AND several PI/project profiles — each
+// is reassigned to its OWN target user, independently, one action at a
+// time (confirmed: up to 6 different destinations for 3 roles + 3 PI
+// profiles is a normal case, not an edge case). The target user's own
+// existing roles/profiles/files are never touched — reassignment only
+// ADDS to them. Deactivating the leaver is blocked by the backend
+// (PATCH .../status) until every item here is gone, so this modal has no
+// "Retire" action of its own — once the list is empty, close this modal
+// and use the normal Deactivate button.
+function TransferOwnershipModal({ user, candidates, onClose }: {
   user: AdminUser;
   candidates: { value: string; label: string }[];
   onClose: () => void;
-  onConfirm: (successorId: string, reasonType: string, remarks: string) => void;
-  isPending: boolean;
 }) {
-  const [successorId, setSuccessorId] = useState("");
-  const [reasonType, setReasonType] = useState("retired");
-  const [remarks, setRemarks] = useState("");
-  const REMARKS_MAX = 1000;
+  const qc = useQueryClient();
+  const { data: status, isLoading } = useQuery<TransferStatus>({
+    queryKey: ["transfer-status", user.id],
+    queryFn: async () => (await api.get(`/auth/admin/users/${user.id}/transfer-status`)).data,
+  });
+
+  const reassignRole = useMutation({
+    mutationFn: ({ role, target_id }: { role: string; target_id: string }) =>
+      api.post(`/auth/admin/users/${user.id}/transfer-role`, { role, target_id }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["transfer-status", user.id] });
+      qc.invalidateQueries({ queryKey: ["user-management-users"] });
+      showSuccess("Role reassigned.");
+    },
+    onError: (err: unknown) => {
+      const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      toast.error(typeof msg === "string" ? msg : "Could not reassign this role.");
+    },
+  });
+
+  const reassignProfile = useMutation({
+    mutationFn: ({ project_id, target_id }: { project_id: string; target_id: string }) =>
+      api.post(`/projects/${project_id}/reassign`, { user_id: target_id }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["transfer-status", user.id] });
+      qc.invalidateQueries({ queryKey: ["user-management-users"] });
+      showSuccess("Project profile reassigned.");
+    },
+    onError: (err: unknown) => {
+      const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      toast.error(typeof msg === "string" ? msg : "Could not reassign this project profile.");
+    },
+  });
+
+  function handleReassign(item: TransferItem, targetId: string) {
+    if (item.kind === "role") {
+      reassignRole.mutate({ role: item.key, target_id: targetId });
+    } else {
+      if (!item.project_id) return;
+      reassignProfile.mutate({ project_id: item.project_id, target_id: targetId });
+    }
+  }
+
+  const isPending = reassignRole.isPending || reassignProfile.isPending;
+  const items = status?.items ?? [];
 
   return (
     <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-6" onClick={onClose}>
-      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg" onClick={(e) => e.stopPropagation()}>
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[85vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
         <div className="px-6 py-5 border-b border-gray-200">
-          <h3 className="text-xl font-bold text-gray-900">Transfer Ownership &amp; Retire</h3>
+          <h3 className="text-xl font-bold text-gray-900">Transfer Ownership</h3>
           <p className="text-sm text-gray-500 mt-1">
-            <span className="font-semibold text-gray-700">{user.full_name}</span> will be deactivated permanently.
-            The successor becomes the current holder of every file {user.first_name || "this user"} is holding,
-            and can open all of their file history. Nothing in the records is rewritten — past notes and
-            forwards still name {user.first_name || "the original user"}.
+            <span className="font-semibold text-gray-700">{user.full_name}</span> holds the role(s) and project
+            profile(s) below. Reassign each one individually — they can go to different people, or the same
+            person. Nothing about the target&apos;s own existing roles/profiles/files is touched; reassignment only
+            adds. This is optional: deactivating {user.first_name || "this user"} does NOT require reassigning
+            anything first — deactivation is a plain pause (nothing moves, everything comes back as-is on
+            reactivation). Use this screen only when you actually want to hand specific roles/projects to
+            someone else, e.g. before a permanent departure.
           </p>
         </div>
-        <div className="px-6 py-5 space-y-4">
-          <div>
-            <label className={LABEL}>Successor *</label>
-            <SearchableSelect
-              options={candidates}
-              value={successorId}
-              onChange={setSuccessorId}
-              clearable={false}
-              placeholder="Choose the person taking over…"
-              searchPlaceholder="Search by name or email…"
-            />
-          </div>
-          <div>
-            <label className={LABEL}>Reason *</label>
-            <select value={reasonType} onChange={(e) => setReasonType(e.target.value)} className={INPUT}>
-              {DEACTIVATION_REASON_OPTIONS.map((r) => <option key={r.value} value={r.value}>{r.label}</option>)}
-            </select>
-          </div>
-          <div>
-            <label className={LABEL}>Remarks {reasonType === "other" ? "*" : "(optional)"}</label>
-            <textarea
-              value={remarks}
-              onChange={(e) => setRemarks(e.target.value.slice(0, REMARKS_MAX))}
-              maxLength={REMARKS_MAX}
-              rows={2}
-              className={`${INPUT} resize-none`}
-              placeholder="e.g. Superannuation w.e.f. 30 Sept 2026. Handover to the incoming officer."
-            />
-            <p className="text-xs text-gray-400 mt-1 text-right">{remarks.length}/{REMARKS_MAX}</p>
-          </div>
+        <div className="px-6 py-4 overflow-y-auto flex-1">
+          {isLoading ? (
+            <div className="flex items-center gap-2 text-gray-400 py-6"><Loader2 size={16} className="animate-spin" /> Loading…</div>
+          ) : items.length === 0 ? (
+            <div className="flex items-center gap-2 text-green-700 bg-green-50 border border-green-200 rounded-xl px-4 py-3 text-sm font-semibold">
+              <CheckCircle2 size={16} /> Nothing left to reassign.
+            </div>
+          ) : (
+            items.map((item) => (
+              <TransferItemRow
+                key={`${item.kind}:${item.key}`}
+                item={item}
+                candidates={candidates}
+                onReassign={handleReassign}
+                isPending={isPending}
+              />
+            ))
+          )}
         </div>
         <div className="px-6 py-4 border-t border-gray-200 flex justify-end gap-3">
-          <button onClick={onClose} className="px-4 py-2.5 rounded-lg text-sm font-semibold text-gray-600 hover:bg-gray-100">Cancel</button>
-          <button
-            onClick={() => onConfirm(successorId, reasonType, remarks)}
-            disabled={isPending || !successorId || (reasonType === "other" && !remarks.trim())}
-            className="flex items-center gap-1 px-5 py-2.5 bg-[#0D6E6E] text-white rounded-lg text-sm font-semibold hover:bg-[#178F8F] disabled:opacity-50"
-          >
-            {isPending ? <Loader2 size={15} className="animate-spin" /> : null} Transfer &amp; Retire
-          </button>
+          <button onClick={onClose} className="px-4 py-2.5 rounded-lg text-sm font-semibold text-gray-600 hover:bg-gray-100">Close</button>
         </div>
       </div>
     </div>
@@ -836,19 +920,6 @@ export function UserManagementSection() {
     },
   });
 
-  const transferOwnership = useMutation({
-    mutationFn: ({ id, successor_id, reason_type, remarks }: { id: string; successor_id: string; reason_type?: string; remarks?: string }) =>
-      api.post(`/auth/admin/users/${id}/transfer-ownership`, { successor_id, reason_type, remarks }),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["user-management-users"] });
-      showSuccess("Ownership transferred. The outgoing user has been deactivated.");
-      setTransferUser(null);
-    },
-    onError: (err: unknown) => {
-      const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
-      toast.error(typeof msg === "string" ? msg : "Could not transfer ownership.");
-    },
-  });
 
   return (
     <div className="space-y-4">
@@ -935,7 +1006,7 @@ export function UserManagementSection() {
                       {isSuperAdmin && u.is_active && (
                         <button
                           onClick={() => setTransferUser(u)}
-                          title="Transfer ownership & retire"
+                          title="Transfer ownership (reassign roles / project profiles)"
                           className="p-2 rounded-lg hover:bg-gray-100 text-gray-400 hover:text-[#0D6E6E]"
                         >
                           <ArrowRightLeft size={15} />
@@ -991,10 +1062,6 @@ export function UserManagementSection() {
             .filter((u) => u.is_active && u.id !== transferUser.id)
             .map((u) => ({ value: u.id, label: u.employee_code ? `${u.full_name} (${u.employee_code})` : `${u.full_name} — ${u.email}` }))}
           onClose={() => setTransferUser(null)}
-          isPending={transferOwnership.isPending}
-          onConfirm={(successor_id, reason_type, remarks) =>
-            transferOwnership.mutate({ id: transferUser.id, successor_id, reason_type, remarks })
-          }
         />
       )}
       {isSuperAdmin && showBulkUpload && (

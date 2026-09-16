@@ -1171,6 +1171,17 @@ async def set_user_status(
                 "Cannot deactivate the only active Super Admin. Assign Super Admin to another user first.",
             )
 
+        # Deactivation is a plain, reversible pause — NOT an ownership
+        # transfer. Nothing about the user's roles, PI profiles, or files
+        # is touched or required to be reassigned first: reactivating them
+        # later brings everything back exactly as it was. An earlier
+        # version of this endpoint blocked deactivation until every role/
+        # PI profile was reassigned — reverted per explicit instruction:
+        # that "retire" behavior belongs to Transfer Ownership alone
+        # (still available as a separate, optional admin action before or
+        # instead of a plain deactivate), never to this generic on/off
+        # switch. See GET .../transfer-status / POST .../transfer-role /
+        # POST /projects/{id}/reassign for the actual transfer flow.
         reason_map = {r.value: r for r in DeactivationReasonType}
         reason = reason_map.get((body.reason_type or "").strip())
         if not reason:
@@ -1189,109 +1200,139 @@ async def set_user_status(
     return AdminUserOut.from_user(await _load_user(db, uid))
 
 
-class TransferOwnershipRequest(BaseModel):
-    """Hand a leaving user's entire working identity to a successor.
-    `successor_id` must be an existing, active, non-project-profile user
-    other than the leaver."""
-    successor_id: UUID
-    reason_type: Optional[str] = None   # defaults to "retired" if blank
+class TransferItemOut(BaseModel):
+    """One reassignable thing a person currently holds — either a role
+    (kind='role') or a PI/project profile they're incharge of
+    (kind='project_profile'). See GET .../transfer-status."""
+    kind: str  # "role" | "project_profile"
+    key: str   # role name, or the project profile's user id (as a string)
+    label: str  # human-readable — role display name, or "PI · <project name>"
+    department_id: Optional[UUID] = None
+    establishment_id: Optional[UUID] = None
+    project_id: Optional[UUID] = None
+    project_name: Optional[str] = None
+
+
+class TransferStatusOut(BaseModel):
+    """Everything currently outstanding for uid's ownership transfer, and
+    whether uid can be deactivated yet (only once this list is empty)."""
+    items: list[TransferItemOut]
+    can_retire: bool
+
+
+async def _leaver_transfer_items(db: AsyncSession, leaver: User) -> list[TransferItemOut]:
+    """Every role and active PI profile `leaver` (a real person, never a
+    project profile itself) currently holds — the exact set that must each
+    be individually reassigned before they can be retired."""
+    items: list[TransferItemOut] = []
+    role_rows = (await db.execute(select(UserRole).where(UserRole.user_id == leaver.id))).scalars().all()
+    for ur in role_rows:
+        items.append(TransferItemOut(
+            kind="role", key=ur.role, label=_pretty_role_name(ur.role),
+            department_id=ur.department_id, establishment_id=ur.establishment_id,
+        ))
+    profiles = (await db.execute(
+        select(User).options(selectinload(User.project)).where(User.origin_user_id == leaver.id, User.is_active == True)
+    )).scalars().all()
+    for p in profiles:
+        items.append(TransferItemOut(
+            kind="project_profile", key=str(p.id),
+            label=f"PI · {p.project.name if p.project else p.full_name}",
+            project_id=p.project_id, project_name=p.project.name if p.project else None,
+        ))
+    return items
+
+
+def _pretty_role_name(name: str) -> str:
+    return " ".join(w.capitalize() for w in name.split("_"))
+
+
+@router.get("/admin/users/{uid}/transfer-status", response_model=TransferStatusOut)
+async def transfer_status(uid: UUID, db: AsyncSession = Depends(get_db), _: User = Depends(_super)):
+    leaver = await _load_user(db, uid)
+    _assert_not_project_profile(leaver)
+    items = await _leaver_transfer_items(db, leaver)
+    return TransferStatusOut(items=items, can_retire=len(items) == 0)
+
+
+class TransferRoleRequest(BaseModel):
+    """Hand ONE of the leaver's roles (and that role's files — My Files,
+    Docket, Released) to target_id. Every other role/PI profile the leaver
+    holds is untouched by this call — each is reassigned independently, per
+    the confirmed per-item transfer flow (a person can have 3 roles and 3
+    PI profiles going to 6 different people)."""
+    role: str
+    target_id: UUID
     remarks: Optional[str] = None
 
 
-@router.post("/admin/users/{uid}/transfer-ownership", response_model=AdminUserOut)
-async def transfer_ownership(
+@router.post("/admin/users/{uid}/transfer-role", response_model=TransferStatusOut)
+async def transfer_role(
     uid: UUID,
-    body: TransferOwnershipRequest,
+    body: TransferRoleRequest,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(_super),
 ):
-    """Ownership transfer (super admin only). The user `uid` (the leaver)
-    is deactivated permanently; `successor_id` (B) inherits everything:
-
-      * B.account_predecessor_id -> A.id, so every file-access check treats
-        B as A too (their created files, holding-period notes, routing
-        history they were part of).
-      * Every file A currently HOLDS is re-pointed to B (current_holder_id),
-        and a route entry 'Account ownership transferred: A -> B' is added so
-        the hand-off shows in the file's timeline. B's holding-period note
-        row for each such file is created lazily on first save, exactly like
-        any normal Forward recipient.
-
-    A is not reusable afterwards. Historical attribution (who created / who
-    noted / who forwarded) is never rewritten — it still names A."""
-    from app.models.efms import EfmsFile, RouteEntry, RouteAction
-    from app.api.v1.endpoints.efms_files import _finalize_current_holder_note
+    """Move one role from the leaver to target_id (super admin only).
+    target_id's own existing roles/PI profiles/files are never touched —
+    this only ADDS the role to them (if they don't already hold it) and
+    moves that role's files onto target_id's account, alongside whatever
+    they already have."""
+    from app.api.v1.endpoints.efms_files import reassign_file_ownership
 
     leaver = await _load_user(db, uid)
     _assert_not_project_profile(leaver)
-    if str(body.successor_id) == str(uid):
-        raise HTTPException(400, "The successor must be a different user.")
+    if str(body.target_id) == str(uid):
+        raise HTTPException(400, "The target must be a different user.")
 
-    successor = await db.scalar(
-        select(User).options(selectinload(User.roles)).where(User.id == body.successor_id)
+    leaver_role = next((ur for ur in leaver.roles if ur.role == body.role), None)
+    if leaver_role is None:
+        raise HTTPException(404, "This user does not hold that role.")
+
+    target = await db.scalar(
+        select(User).options(selectinload(User.roles)).where(User.id == body.target_id)
     )
-    if not successor:
-        raise HTTPException(404, "Successor not found.")
-    if successor.origin_user_id is not None:
-        raise HTTPException(400, "The successor cannot be a project profile.")
-    if not successor.is_active:
-        raise HTTPException(400, "The successor account is inactive.")
+    if not target:
+        raise HTTPException(404, "Target user not found.")
+    if target.origin_user_id is not None:
+        raise HTTPException(400, "The target cannot be a project profile.")
+    if not target.is_active:
+        raise HTTPException(400, "The target account is inactive.")
 
     if (
-        leaver.active_role == SystemRole.SUPER_ADMIN
+        body.role == SystemRole.SUPER_ADMIN
         and leaver.is_active
         and await _count_other_active_super_admins(db, uid) == 0
     ):
         raise HTTPException(
             status.HTTP_409_CONFLICT,
-            "Cannot transfer the only active Super Admin. Assign Super Admin to another user first.",
+            "Cannot transfer the only active Super Admin role. Assign Super Admin to another user first.",
         )
 
-    # 1. Re-point every file the leaver currently holds -> successor,
-    #    finalizing the leaver's open holding-period note and recording a
-    #    route entry for the hand-off.
-    held = (await db.execute(
-        select(EfmsFile).where(EfmsFile.current_holder_id == leaver.id)
-    )).scalars().all()
-    note = (body.remarks or "").strip() or f"Account ownership transferred: {leaver.full_name} → {successor.full_name}"
-    for f in held:
-        await _finalize_current_holder_note(db, f.id, leaver.id)
-        for e in (await db.execute(
-            select(RouteEntry).where(RouteEntry.file_id == f.id, RouteEntry.is_current == True)
-        )).scalars().all():
-            e.is_current = False
-        db.add(RouteEntry(
-            file_id=f.id,
-            from_user_id=leaver.id,
-            to_user_id=successor.id,
-            from_role=f.current_holder_role or leaver.active_role,
-            to_role=successor.active_role,
-            action=RouteAction.forward,
-            remarks=note,
-            is_current=True,
+    # Add the role to target if they don't already hold it — never replaces
+    # or removes any role/PI-profile/file target already has.
+    if not any(ur.role == body.role for ur in target.roles):
+        db.add(UserRole(
+            user_id=target.id, role=body.role,
+            department_id=leaver_role.department_id, establishment_id=leaver_role.establishment_id,
         ))
-        f.current_holder_id = successor.id
-        # The file moves into the successor's current-role workspace.
-        f.current_holder_role = successor.active_role
 
-    # 2. Link the accounts so access checks follow the chain.
-    successor.account_predecessor_id = leaver.id
-
-    # 3. Deactivate the leaver (kept forever for attribution).
-    reason_map = {r.value: r for r in DeactivationReasonType}
-    reason = reason_map.get((body.reason_type or "").strip()) or DeactivationReasonType.RETIRED
-    leaver.is_active = False
-    leaver.deactivation_reason_type = reason
-    leaver.deactivation_remarks = (body.remarks or "").strip() or None
-    leaver.deactivated_at = datetime.now(timezone.utc)
-    leaver.deactivated_by = current_user.id
-    # Revoke the leaver's sessions so their token can't act post-transfer.
-    await db.execute(
-        update(RefreshToken).where(RefreshToken.user_id == leaver.id, RefreshToken.revoked == False).values(revoked=True)
+    note = (body.remarks or "").strip() or f"Role transferred ({_pretty_role_name(body.role)}): {leaver.full_name} → {target.full_name}"
+    await reassign_file_ownership(
+        db, old_id=leaver.id, new_id=target.id, new_role=body.role,
+        actor_id=current_user.id, note=note, role_filter=body.role,
     )
 
+    # Remove the role from the leaver — it has now fully moved.
+    await db.delete(leaver_role)
+    if leaver.active_role == body.role:
+        remaining = [ur.role for ur in leaver.roles if ur.role != body.role]
+        leaver.active_role = remaining[0] if remaining else None
+
     await db.commit()
-    return AdminUserOut.from_user(await _load_user(db, uid))
+    leaver = await _load_user(db, uid)
+    items = await _leaver_transfer_items(db, leaver)
+    return TransferStatusOut(items=items, can_retire=len(items) == 0)
 
 
 # Super Admin password-reset-for-another-user is intentionally NOT

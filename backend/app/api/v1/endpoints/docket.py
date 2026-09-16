@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from typing import Optional, List
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, or_
+from sqlalchemy import select, func
 from pydantic import BaseModel
 
 from app.db.base import get_db
@@ -39,10 +39,16 @@ async def my_docket(db: AsyncSession = Depends(get_db), user: User = Depends(get
             EfmsFile.current_holder_id == user.id,
             EfmsFile.created_by != user.id,
             EfmsFile.status != FileStatus.draft,
-            # Multi-role: only files that landed in THIS role's workspace.
-            # NULL current_holder_role = a legacy / single-role file — show
-            # it regardless of the caller's active role.
-            or_(EfmsFile.current_holder_role.is_(None), EfmsFile.current_holder_role == user.active_role),
+            # Multi-role: strictly only files stamped with THIS role. Every
+            # file is stamped with a real role at create/forward time, and
+            # migration 0019 backfilled every pre-existing NULL to its
+            # holder's role at the time — so a bare current_holder_role ==
+            # user.active_role is the correct, complete check now. A
+            # previous "NULL matches any role" fallback here caused a real
+            # bug: a person given a brand-new secondary role would still
+            # see their OTHER role's old files leak into the new role's
+            # Docket, since those old files' NULL stamp matched everything.
+            EfmsFile.current_holder_role == user.active_role,
         )
         .order_by(EfmsFile.updated_at.desc())
     )

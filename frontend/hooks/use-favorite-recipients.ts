@@ -69,6 +69,22 @@ export function useFavoriteRecipients() {
     else addFavorite.mutate(recipientId);
   }
 
+  // The "name" half of the structured search split (searchName/searchRole
+  // on SearchableSelectOption — see that component). Deliberately includes
+  // employee_code and, for a PI profile, the project name too, so
+  // searching either still finds the right person — only the role name
+  // itself is excluded here, since that's the OTHER half of the split
+  // (searchRole below) and must narrow results, not just be one more
+  // thing a name-shaped query happens to match.
+  function searchNameFor(u: FavoritableUser): string {
+    if (u.is_project_profile) {
+      const pi = `PI${u.project_number ?? ""}`;
+      const person = u.full_name.replace(new RegExp(`\\s*${pi}\\s*$`), "").trim() || u.full_name;
+      return [person, pi, u.project_name].filter(Boolean).join(" ");
+    }
+    return [u.full_name, u.employee_code].filter(Boolean).join(" ");
+  }
+
   function personLabel(u: FavoritableUser): string {
     if (u.is_project_profile) {
       // A PI profile's full_name is "<person> PI<n>". Rebuild the label so it
@@ -98,7 +114,16 @@ export function useFavoriteRecipients() {
     const others: SearchableSelectOption[] = [];
     for (const u of users) {
       const value = u.role ? `${u.id}::${u.role}` : u.id;
-      (u.is_favorite ? favorites : others).push({ value, label: label(u) });
+      // Structured search: typing a name matches every role-entry this
+      // person has (they all share the same searchName); typing a role
+      // name narrows down to only the entries actually stamped with that
+      // role — see SearchableSelect's matches() for how these combine.
+      const option: SearchableSelectOption = {
+        value, label: label(u),
+        searchName: searchNameFor(u),
+        searchRole: u.role ? prettyRoleName(u.role) : undefined,
+      };
+      (u.is_favorite ? favorites : others).push(option);
     }
     const groups: SearchableSelectGroup[] = [];
     if (favorites.length > 0) groups.push({ label: "⭐ Favorite Recipients", options: favorites });

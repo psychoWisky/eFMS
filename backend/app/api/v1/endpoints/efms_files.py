@@ -17,7 +17,7 @@ import os, aiofiles
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Request
 from fastapi.responses import FileResponse, Response
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, or_, and_, func
+from sqlalchemy import select, or_, and_, func, update
 from sqlalchemy.orm import selectinload
 from sqlalchemy.exc import IntegrityError
 from app.core.config import settings
@@ -512,10 +512,16 @@ async def list_files(
     is_admin = user.is_super_admin
 
     # Multi-role workspace scoping: a role's Docket / My Files only show
-    # files stamped with that role. NULL role on a file = legacy / single-
-    # role — always visible. `is_admin` skips scoping entirely.
-    _in_role_hold = or_(EfmsFile.current_holder_role.is_(None), EfmsFile.current_holder_role == user.active_role)
-    _in_role_created = or_(EfmsFile.creator_role.is_(None), EfmsFile.creator_role == user.active_role)
+    # files stamped with that exact role. Every file is stamped with a real
+    # role at create/forward time, and migration 0019 backfilled every
+    # pre-existing NULL to its holder's/creator's role at the time — so a
+    # strict equality check is correct and complete now. `is_admin` skips
+    # scoping entirely. (A previous "NULL = any role" fallback here caused
+    # a real bug: switching into a brand-new secondary role still showed
+    # old files from a person's OTHER role, since those files' NULL stamp
+    # matched every role including one that didn't exist for them yet.)
+    _in_role_hold = EfmsFile.current_holder_role == user.active_role
+    _in_role_created = EfmsFile.creator_role == user.active_role
 
     if inbox:
         # Inbox: files where user is current holder (files forwarded to them)
@@ -990,6 +996,101 @@ async def save_notesheet(
 # Lifecycle (creating the next holding-period row / finalizing the outgoing
 # one) happens in route_file (forward) and docket.py's release_file/
 # reopen_file — see _finalize_current_holder_note/_start_holding_period.
+
+async def reassign_file_ownership(
+    db: AsyncSession,
+    *,
+    old_id: UUID,
+    new_id: UUID,
+    new_role: Optional[str],
+    actor_id: UUID,
+    note: str,
+    role_filter: Optional[str] = None,
+) -> int:
+    """Move real ownership of every file old_id has as creator, current
+    holder, or releaser — over to new_id. Used by both per-role ownership
+    transfer and PI-profile reassignment; NOT a synthetic Forward. Unlike
+    route_file's Forward, this directly rewrites the three ownership
+    pointers (created_by, current_holder_id, dockets.released_by) so the
+    file appears in new_id's own My Files / Docket / Released Files exactly
+    as it did for old_id — no extra "accept this forward" step, no risk of
+    the release action misbehaving because the file still looks like it
+    belongs to someone else.
+
+    Historical attribution is never touched: past route_entries.from_user_id
+    /to_user_id, holder_notes.user_id, notesheets.last_saved_by etc. still
+    correctly name old_id — only who a file currently belongs to moves.
+
+    role_filter, when given, restricts this to files stamped with that
+    specific role (creator_role / current_holder_role) — used when a leaver
+    holds several roles and only ONE of them (with its own files) is being
+    handed to this particular new_id, not the leaver's other roles' files.
+    None means "every file old_id owns/holds/released, regardless of role"
+    — used for a PI profile, which has no roles of its own (see
+    projects.py's _create_project_profile docstring).
+
+    Returns the number of files whose current_holder_id was moved (the
+    "held" count is the most meaningful one to report back to an admin,
+    since that's the set that would otherwise need an explicit Forward)."""
+    from app.models.efms_extra import Docket
+
+    def _role_match(col):
+        if role_filter is None:
+            return True
+        return or_(col.is_(None), col == role_filter)
+
+    # 1. Files created by old_id (My Files) -> new_id. Covers Drafts too,
+    #    since a Draft's creator is also its current holder.
+    created = (await db.execute(
+        select(EfmsFile).where(EfmsFile.created_by == old_id, _role_match(EfmsFile.creator_role))
+    )).scalars().all()
+    for f in created:
+        f.created_by = new_id
+        f.creator_role = new_role if role_filter is not None else f.creator_role
+
+    # 2. Files currently held by old_id (Docket) -> new_id, moved directly
+    #    (not a Forward). A neutral audit route entry records the move
+    #    without changing the file's behavior the way a real Forward would.
+    held = (await db.execute(
+        select(EfmsFile).where(EfmsFile.current_holder_id == old_id, _role_match(EfmsFile.current_holder_role))
+    )).scalars().all()
+    held_count = len(held)
+    for f in held:
+        await _finalize_current_holder_note(db, f.id, old_id)
+        for e in (await db.execute(
+            select(RouteEntry).where(RouteEntry.file_id == f.id, RouteEntry.is_current == True)
+        )).scalars().all():
+            e.is_current = False
+        db.add(RouteEntry(
+            file_id=f.id,
+            from_user_id=old_id,
+            to_user_id=new_id,
+            from_role=f.current_holder_role,
+            to_role=new_role,
+            action=RouteAction.forward,
+            remarks=note,
+            is_current=True,
+        ))
+        f.current_holder_id = new_id
+        # Always restamped to new_role, even when role_filter is None (PI
+        # profile case): a PI profile's active_role never changes, so any
+        # file it holds is always naturally stamped with exactly that role
+        # already — restamping to new_profile's active_role here just keeps
+        # that same invariant true for the new profile.
+        f.current_holder_role = new_role
+
+    # 3. Files old_id released (Docket table's released_by, feeds "My
+    #    Released Files") -> new_id. Released files have no role stamp of
+    #    their own (current_holder_role is cleared on release), so this
+    #    always runs regardless of role_filter — a released file no longer
+    #    belongs to any particular role's workspace, only to whoever
+    #    released it.
+    await db.execute(
+        update(Docket).where(Docket.released_by == old_id).values(released_by=new_id)
+    )
+
+    return held_count
+
 
 async def _finalize_current_holder_note(db: AsyncSession, file_id: UUID, user_id: UUID) -> None:
     """Mark user_id's current (editable) holding-period row for this file,

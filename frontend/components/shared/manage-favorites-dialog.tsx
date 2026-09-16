@@ -6,7 +6,6 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/services/api";
 import { X, Search, Star, Loader2 } from "lucide-react";
-import { PersonBadge } from "./person-badge";
 import { useFavoriteRecipients, type FavoritableUser } from "@/hooks/use-favorite-recipients";
 
 export function ManageFavoritesDialog({ onClose }: { onClose: () => void }) {
@@ -15,19 +14,26 @@ export function ManageFavoritesDialog({ onClose }: { onClose: () => void }) {
     queryKey: ["admin-users"],
     queryFn: async () => (await api.get("/admin/users")).data,
   });
-  const { toggleFavorite, isToggling } = useFavoriteRecipients();
+  const { toggleFavorite, isToggling, personLabel } = useFavoriteRecipients();
 
   const q = search.trim().toLowerCase();
   const filtered = q
-    ? users.filter((u) => u.full_name.toLowerCase().includes(q) || u.employee_code?.toLowerCase().includes(q))
+    ? users.filter((u) => u.full_name.toLowerCase().includes(q) || u.employee_code?.toLowerCase().includes(q) || u.role?.toLowerCase().includes(q))
     : users;
   const favorites = filtered.filter((u) => u.is_favorite);
   const others = filtered.filter((u) => !u.is_favorite);
 
+  // A multi-role user appears once per role (same GET /admin/users shape
+  // every recipient picker uses) — key and toggle on the composite
+  // "<id>::<role>" the same way SearchableSelect's recipient pickers do,
+  // and show the role in the label (personLabel), not the role-blind
+  // PersonBadge this used before: that made every one of a multi-role
+  // person's rows render identically, indistinguishable from a single
+  // duplicated row.
   function Row({ u }: { u: FavoritableUser }) {
     return (
       <div className="flex items-center justify-between px-3 py-2.5 hover:bg-gray-50 rounded-xl">
-        <PersonBadge person={u} compact />
+        <span className="text-sm font-semibold text-gray-900">{personLabel(u)}</span>
         <button
           type="button"
           title={u.is_favorite ? "Remove from favorites" : "Add to favorites"}
@@ -70,7 +76,7 @@ export function ManageFavoritesDialog({ onClose }: { onClose: () => void }) {
               {favorites.length > 0 && (
                 <>
                   <p className="px-3 pt-1 pb-1.5 text-xs font-bold text-amber-600 uppercase tracking-wide">⭐ Favorite Recipients</p>
-                  {favorites.map((u) => <Row key={u.id} u={u} />)}
+                  {favorites.map((u) => <Row key={`${u.id}:${u.role ?? ""}`} u={u} />)}
                   <div className="my-2 border-t border-gray-100" />
                 </>
               )}
@@ -78,7 +84,7 @@ export function ManageFavoritesDialog({ onClose }: { onClose: () => void }) {
               {others.length === 0 ? (
                 <p className="px-3 py-6 text-sm text-gray-400 text-center">No users found.</p>
               ) : (
-                others.map((u) => <Row key={u.id} u={u} />)
+                others.map((u) => <Row key={`${u.id}:${u.role ?? ""}`} u={u} />)
               )}
             </>
           )}
