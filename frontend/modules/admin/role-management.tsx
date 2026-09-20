@@ -37,7 +37,7 @@ function RoleFormModal({ role, onClose }: { role: RoleSummary | null; onClose: (
     mutationFn: () =>
       isEdit
         ? api.patch(`/auth/admin/roles/${role!.id}`, { name, description: description || null })
-        : api.post("/auth/admin/roles", { name, description: description || undefined }),
+        : api.post("/auth/admin/roles", { name, description: description || null }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["admin-roles"] });
       showSuccess(isEdit ? "Role updated." : "Role created.");
