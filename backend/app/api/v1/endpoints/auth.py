@@ -817,6 +817,42 @@ async def create_user(
     return AdminUserOut.from_user(await _load_user(db, user.id))
 
 
+class AdminPasswordResetResponse(BaseModel):
+    message: str
+    temp_password: str
+
+
+@router.post("/admin/users/{user_id}/reset-password", response_model=AdminPasswordResetResponse)
+async def admin_reset_password(
+    user_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(_super_admin_only),
+):
+    """Reset a real user's password and force a new password at next login.
+
+    The plaintext password is returned only in this response so the Super
+    Admin can share it out-of-band; only its hash is persisted.
+    """
+    result = await db.execute(select(User).where(User.id == user_id))
+    user = result.scalar_one_or_none()
+    if not user or user.is_project_profile:
+        raise HTTPException(404, "User account not found.")
+
+    temp_password = generate_temp_password()
+    user.hashed_password = hash_password(temp_password)
+    user.must_change_password = True
+    await db.execute(
+        update(RefreshToken)
+        .where(RefreshToken.user_id == user.id, RefreshToken.revoked == False)
+        .values(revoked=True)
+    )
+    await db.commit()
+    return AdminPasswordResetResponse(
+        message="Password reset successfully. The user must change it after logging in.",
+        temp_password=temp_password,
+    )
+
+
 # ── Bulk user import (Super Admin only) ────────────────────────────────────────
 
 _BULK_CSV_COLUMNS = [

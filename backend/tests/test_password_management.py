@@ -1,14 +1,14 @@
 """Password management: Forgot Password (unauthenticated, OTP-verified),
-Change Password (authenticated, self-service), removal of the Super-Admin
-"reset another user's password" endpoint, and first-login temp-password
-flow regression checks.
+Change Password (authenticated, self-service), Super-Admin temporary password
+reset, and first-login temp-password flow regression checks.
 """
 import pytest
 from datetime import datetime, timedelta, timezone
+import hashlib
 from sqlalchemy import select, delete as sa_delete
 
 from app.core.security import verify_password
-from app.models.user import SystemRole, User
+from app.models.user import RefreshToken, SystemRole, User
 from app.models.efms_extra import OTP
 from tests.conftest import auth_headers
 
@@ -353,14 +353,57 @@ async def test_change_password_cannot_affect_another_user(client, users, db):
     assert verify_password(_PASSWORD, user_b.hashed_password) is True  # untouched
 
 
-# ── ADMIN PASSWORD RESET REMOVED ─────────────────────────────────────────────
+# ── ADMIN PASSWORD RESET ─────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_admin_reset_password_endpoint_no_longer_exists(client, users):
+async def test_super_admin_can_reset_another_users_password(client, users, db):
     super_admin = await users.make(SystemRole.SUPER_ADMIN)
     target = await users.make(SystemRole.EFMS_OFFICER)
-    r = await client.post(f"/auth/admin/users/{target.id}/reset-password", headers=auth_headers(super_admin))
-    assert r.status_code in (404, 405)
+    old_refresh = "refresh-token-before-admin-reset"
+    db.add(RefreshToken(
+        user_id=target.id,
+        token_hash=hashlib.sha256(old_refresh.encode()).hexdigest(),
+        expires_at=datetime.now(timezone.utc) + timedelta(days=1),
+    ))
+    await db.commit()
+
+    r = await client.post(
+        f"/auth/admin/users/{target.id}/reset-password",
+        headers=auth_headers(super_admin),
+    )
+    assert r.status_code == 200
+    temp_password = r.json()["temp_password"]
+    assert temp_password
+    assert temp_password != _PASSWORD
+
+    await db.refresh(target)
+    assert target.must_change_password is True
+    assert verify_password(temp_password, target.hashed_password) is True
+
+    login = await client.post("/auth/login/step1", json={"email": target.email, "password": temp_password})
+    assert login.status_code == 200
+    revoked = (await db.execute(
+        select(RefreshToken).where(RefreshToken.token_hash == hashlib.sha256(old_refresh.encode()).hexdigest())
+    )).scalar_one()
+    assert revoked is not None and revoked.revoked is True
+
+
+@pytest.mark.asyncio
+async def test_admin_reset_password_requires_super_admin_and_rejects_project_profile(client, users):
+    admin = await users.make(SystemRole.ADMIN)
+    target = await users.make(SystemRole.EFMS_OFFICER)
+    r = await client.post(f"/auth/admin/users/{target.id}/reset-password", headers=auth_headers(admin))
+    assert r.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_admin_reset_password_rejects_unknown_user(client, users):
+    super_admin = await users.make(SystemRole.SUPER_ADMIN)
+    r = await client.post(
+        "/auth/admin/users/00000000-0000-0000-0000-000000000000/reset-password",
+        headers=auth_headers(super_admin),
+    )
+    assert r.status_code == 404
 
 
 @pytest.mark.asyncio

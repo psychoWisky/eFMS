@@ -10,7 +10,7 @@ import { toast } from "sonner";
 import { showSuccess } from "@/lib/alert";
 import { useActiveRole } from "@/stores/auth.store";
 import {
-  Plus, Loader2, X, Copy, RefreshCw, Eye, EyeOff, Pencil,
+  Plus, Loader2, X, Copy, RefreshCw, Eye, EyeOff, Pencil, KeyRound,
   Power, PowerOff, ShieldAlert, Upload, Download, CheckCircle2, XCircle, ClipboardCopy, ArrowRightLeft,
 } from "lucide-react";
 import { SearchableSelect } from "@/components/shared/searchable-select";
@@ -712,7 +712,36 @@ function DeactivateUserModal({ user, onClose, onConfirm, isPending }: {
             disabled={isPending || (reasonType === "other" && !remarks.trim())}
             className="flex items-center gap-1 px-5 py-2.5 bg-red-600 text-white rounded-lg text-sm font-semibold hover:bg-red-700 disabled:opacity-50"
           >
+
             {isPending ? <Loader2 size={15} className="animate-spin" /> : null} Confirm Deactivation
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ResetPasswordModal({ user, onClose, onConfirm, isPending }: {
+  user: AdminUser;
+  onClose: () => void;
+  onConfirm: () => void;
+  isPending: boolean;
+}) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+      <div className="w-full max-w-md rounded-xl bg-white shadow-xl">
+        <div className="flex items-center justify-between border-b px-6 py-4">
+          <h3 className="text-lg font-bold text-gray-900">Reset User Password</h3>
+          <button onClick={onClose} className="rounded-lg p-1 text-gray-400 hover:bg-gray-100" aria-label="Close"><X size={18} /></button>
+        </div>
+        <div className="space-y-3 px-6 py-5 text-sm text-gray-600">
+          <p>Generate a new temporary password for <strong className="text-gray-900">{user.full_name}</strong>?</p>
+          <p>The user will be signed out of existing sessions and must choose a new password immediately after logging in.</p>
+        </div>
+        <div className="flex justify-end gap-3 border-t px-6 py-4">
+          <button onClick={onClose} className="rounded-lg px-4 py-2.5 text-sm font-semibold text-gray-600 hover:bg-gray-100">Cancel</button>
+          <button onClick={onConfirm} disabled={isPending} className="flex items-center gap-2 rounded-lg bg-[#0D6E6E] px-4 py-2.5 text-sm font-semibold text-white hover:bg-[#178F8F] disabled:opacity-60">
+            {isPending && <Loader2 size={15} className="animate-spin" />} Reset Password
           </button>
         </div>
       </div>
@@ -885,6 +914,8 @@ export function UserManagementSection() {
   const [showBulkUpload, setShowBulkUpload] = useState(false);
   const [editingUser, setEditingUser] = useState<AdminUser | null>(null);
   const [deactivatingUser, setDeactivatingUser] = useState<AdminUser | null>(null);
+  const [resettingUser, setResettingUser] = useState<AdminUser | null>(null);
+  const [temporaryPassword, setTemporaryPassword] = useState<{ user: AdminUser; password: string } | null>(null);
   const [transferUser, setTransferUser] = useState<AdminUser | null>(null);
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [page, setPage] = useState(1);
@@ -917,6 +948,20 @@ export function UserManagementSection() {
     onError: (err: unknown) => {
       const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
       toast.error(typeof msg === "string" ? msg : "Could not update user status.");
+    },
+  });
+
+  const resetPassword = useMutation({
+    mutationFn: (id: string) => api.post<{ temp_password: string }>(`/auth/admin/users/${id}/reset-password`),
+    onSuccess: (response, id) => {
+      const user = users.find((item) => item.id === id);
+      if (user) setTemporaryPassword({ user, password: response.data.temp_password });
+      setResettingUser(null);
+      showSuccess("Temporary password generated.");
+    },
+    onError: (err: unknown) => {
+      const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      toast.error(typeof msg === "string" ? msg : "Could not reset password.");
     },
   });
 
@@ -1014,6 +1059,15 @@ export function UserManagementSection() {
                       )}
                       {isSuperAdmin && (
                         <button
+                          onClick={() => setResettingUser(u)}
+                          title="Reset password"
+                          className="p-2 rounded-lg text-gray-400 hover:bg-gray-100 hover:text-[#0D6E6E]"
+                        >
+                          <KeyRound size={15} />
+                        </button>
+                      )}
+                      {isSuperAdmin && (
+                        <button
                           onClick={async () => {
                             if (!u.is_active) {
                               toggleStatus.mutate({ id: u.id, is_active: true });
@@ -1054,6 +1108,35 @@ export function UserManagementSection() {
             toggleStatus.mutate({ id: deactivatingUser.id, is_active: false, reason_type, remarks })
           }
         />
+      )}
+      {resettingUser && (
+        <ResetPasswordModal
+          user={resettingUser}
+          onClose={() => { if (!resetPassword.isPending) setResettingUser(null); }}
+          isPending={resetPassword.isPending}
+          onConfirm={() => resetPassword.mutate(resettingUser.id)}
+        />
+      )}
+      {temporaryPassword && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="w-full max-w-md rounded-xl bg-white shadow-xl">
+            <div className="flex items-center justify-between border-b px-6 py-4">
+              <h3 className="text-lg font-bold text-gray-900">Temporary Password</h3>
+              <button onClick={() => setTemporaryPassword(null)} className="rounded-lg p-1 text-gray-400 hover:bg-gray-100" aria-label="Close"><X size={18} /></button>
+            </div>
+            <div className="space-y-3 px-6 py-5 text-sm text-gray-600">
+              <p>Share this password securely with <strong className="text-gray-900">{temporaryPassword.user.email}</strong>. It will not be shown again.</p>
+              <div className="flex items-center justify-between rounded-lg bg-gray-50 px-3 py-2.5 font-mono text-sm text-gray-900">
+                <span>{temporaryPassword.password}</span>
+                <button onClick={() => copyToClipboard(temporaryPassword.password)} className="rounded p-1 text-gray-500 hover:bg-gray-200" title="Copy temporary password"><ClipboardCopy size={15} /></button>
+              </div>
+              <p className="text-amber-700">The user must change this password immediately after logging in.</p>
+            </div>
+            <div className="flex justify-end border-t px-6 py-4">
+              <button onClick={() => setTemporaryPassword(null)} className="rounded-lg bg-[#0D6E6E] px-4 py-2.5 text-sm font-semibold text-white hover:bg-[#178F8F]">Done</button>
+            </div>
+          </div>
+        </div>
       )}
       {transferUser && (
         <TransferOwnershipModal
