@@ -144,6 +144,18 @@ async def test_duplicate_role_creation_is_rejected(client, users, roles):
 
 
 @pytest.mark.asyncio
+async def test_role_name_allows_mixed_case_and_punctuation_within_length_limit(client, users):
+    super_admin = await users.make(SystemRole.SUPER_ADMIN)
+    r = await client.post(
+        "/auth/admin/roles",
+        json={"name": "Manager / Team-Lead / A1", "description": "Mixed-case role"},
+        headers=auth_headers(super_admin),
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["name"] == "Manager / Team-Lead / A1"
+
+
+@pytest.mark.asyncio
 async def test_super_admin_can_edit_role(client, users, roles):
     super_admin = await users.make(SystemRole.SUPER_ADMIN)
     role = await roles.make("test_edit_role", description="Old description")

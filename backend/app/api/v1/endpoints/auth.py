@@ -1404,17 +1404,10 @@ async def transfer_role(
 # never by anything in this table. Creating or editing a Role row can never
 # make a role act like SUPER_ADMIN.
 
-_ROLE_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{1,49}$")
-
-
 def _normalize_role_name(name: str) -> str:
-    normalized = (name or "").strip().lower().replace(" ", "_")
-    if not _ROLE_NAME_RE.match(normalized):
-        raise HTTPException(
-            400,
-            "Role name must be 2-50 characters, start with a letter, and contain only "
-            "lowercase letters, numbers, and underscores.",
-        )
+    normalized = (name or "").strip()
+    if len(normalized) < 2 or len(normalized) > 50:
+        raise HTTPException(400, "Role name must be between 2 and 50 characters.")
     return normalized
 
 
@@ -1505,7 +1498,7 @@ async def list_roles(db: AsyncSession = Depends(get_db), _: User = Depends(_supe
 @router.post("/admin/roles", status_code=201, response_model=RoleOut)
 async def create_role(body: RoleCreateRequest, db: AsyncSession = Depends(get_db), _: User = Depends(_super)):
     name = _normalize_role_name(body.name)
-    existing = await db.execute(select(Role).where(func.lower(Role.name) == name))
+    existing = await db.execute(select(Role).where(func.lower(Role.name) == name.lower()))
     if existing.scalar_one_or_none():
         raise HTTPException(409, "A role with this name already exists.")
     description = (body.description or "").strip() or None
@@ -1532,7 +1525,7 @@ async def update_role(role_id: UUID, body: RoleUpdateRequest, db: AsyncSession =
                     "The Super Admin role cannot be renamed — it is the one role this application's "
                     "privilege check is explicitly tied to. Only its description can be edited.",
                 )
-            existing = await db.execute(select(Role).where(func.lower(Role.name) == new_name, Role.id != role_id))
+            existing = await db.execute(select(Role).where(func.lower(Role.name) == new_name.lower(), Role.id != role_id))
             if existing.scalar_one_or_none():
                 raise HTTPException(409, "A role with this name already exists.")
             # Renaming a custom role must keep every existing assignment

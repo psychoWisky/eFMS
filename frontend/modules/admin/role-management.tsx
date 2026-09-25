@@ -34,10 +34,13 @@ function RoleFormModal({ role, onClose }: { role: RoleSummary | null; onClose: (
   const [error, setError] = useState("");
 
   const save = useMutation({
-    mutationFn: () =>
-      isEdit
-        ? api.patch(`/auth/admin/roles/${role!.id}`, { name, description: description || null })
-        : api.post("/auth/admin/roles", { name, description: description || null }),
+    mutationFn: () => {
+      const trimmedName = name.trim();
+      const trimmedDescription = (description || "").trim() || null;
+      return isEdit
+        ? api.patch(`/auth/admin/roles/${role!.id}`, { name: trimmedName, description: trimmedDescription })
+        : api.post("/auth/admin/roles", { name: trimmedName, description: trimmedDescription });
+    },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["admin-roles"] });
       showSuccess(isEdit ? "Role updated." : "Role created.");
@@ -50,6 +53,7 @@ function RoleFormModal({ role, onClose }: { role: RoleSummary | null; onClose: (
   });
 
   const nameLocked = !!role?.is_system;
+  const isValidRoleName = name.trim().length >= 2 && name.trim().length <= 50;
 
   return (
     <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-6" onClick={onClose}>
@@ -72,7 +76,7 @@ function RoleFormModal({ role, onClose }: { role: RoleSummary | null; onClose: (
             {nameLocked ? (
               <p className="text-xs text-amber-600 mt-1 flex items-center gap-1"><Lock size={11} /> The Super Admin role cannot be renamed — only its description can be edited.</p>
             ) : (
-              <p className="text-xs text-gray-400 mt-1">Lowercase letters, numbers and underscores only, e.g. &quot;records_clerk&quot;.</p>
+              <p className="text-xs text-gray-400 mt-1">2-50 characters. Any text is allowed, including uppercase, lowercase, spaces, numbers and punctuation.</p>
             )}
           </div>
           <div>
@@ -89,8 +93,16 @@ function RoleFormModal({ role, onClose }: { role: RoleSummary | null; onClose: (
         <div className="px-6 py-4 border-t border-gray-200 flex justify-end gap-3">
           <button onClick={onClose} className="px-4 py-2.5 rounded-lg text-sm font-semibold text-gray-600 hover:bg-gray-100">Cancel</button>
           <button
-            onClick={() => { setError(""); save.mutate(); }}
-            disabled={save.isPending || !name.trim()}
+            onClick={() => {
+              const trimmedName = name.trim();
+              if (trimmedName.length < 2 || trimmedName.length > 50) {
+                setError("Role name must be between 2 and 50 characters.");
+                return;
+              }
+              setError("");
+              save.mutate();
+            }}
+            disabled={save.isPending || !isValidRoleName}
             className="flex items-center gap-1 px-5 py-2.5 bg-[#0D6E6E] text-white rounded-lg text-sm font-semibold hover:bg-[#178F8F] disabled:opacity-50"
           >
             {save.isPending ? <Loader2 size={15} className="animate-spin" /> : <Plus size={15} />} {isEdit ? "Save Changes" : "Create Role"}
