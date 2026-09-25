@@ -25,19 +25,20 @@ router = APIRouter(prefix="/docket", tags=["Docket"])
 
 @router.get("", response_model=List[dict])
 async def my_docket(db: AsyncSession = Depends(get_db), user: User = Depends(get_current_verified_user)):
-    """Files currently forwarded TO me by SOMEONE ELSE (I am the current
-    holder and did NOT create the file).
+    """Files currently in my inbox / with me as current holder.
 
-    A file I created lives in "My Files" exclusively — it never appears in
-    my own Docket, even when I currently hold it (a fresh draft, or a file
-    I reopened after release). Docket is strictly "work others sent me".
-    `created_by != me` is what enforces that; `status != draft` additionally
-    keeps out any lingering draft-state file that slipped through."""
+    Docket is the active-holder queue: it should show any file where I am the
+    current holder and it is not sitting as a saved-unsent draft for me.
+    Draft here means "I have written / attached work but not forwarded it yet";
+    a file that was already forwarded and later returned to the creator is not
+    a draft, even if the creator is currently holding it again. My Files keeps
+    creator-owned files visible, while Docket shows the files currently in the
+    caller's inbox.
+    """
     result = await db.execute(
         select(EfmsFile)
         .where(
             EfmsFile.current_holder_id == user.id,
-            EfmsFile.created_by != user.id,
             EfmsFile.status != FileStatus.draft,
             # Multi-role: strictly only files stamped with THIS role. Every
             # file is stamped with a real role at create/forward time, and

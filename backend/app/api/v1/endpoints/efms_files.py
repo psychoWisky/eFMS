@@ -1285,10 +1285,10 @@ async def save_my_holder_notesheet(
 
     # Touch updated_at so a file the current holder just worked on floats to
     # the top of their Docket / the creator's My Files. The workflow
-    # `status` is deliberately NOT changed here — "forwarded ever = active,
-    # never forwarded = draft" is the rule, and it's derived at read time
-    # (see list_files' has_been_forwarded / the Docket has_unsent_holder_note
-    # flag) rather than mutated on the row.
+    # `status` is deliberately NOT changed here — draft means "unsent work
+    # by the current holder" rather than "never forwarded before". That is
+    # derived at read time (see list_files' has_been_forwarded / the Docket
+    # has_unsent_holder_note flag) rather than mutated on the row.
     f.updated_at = datetime.now(timezone.utc)
 
     await db.commit()

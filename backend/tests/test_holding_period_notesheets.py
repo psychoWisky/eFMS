@@ -270,7 +270,35 @@ async def test_existing_creator_only_release_authorization_still_works(client, u
         await _delete_file(db, file_id)
 
 
-# ── 20: My Files behavior unaffected ─────────────────────────────────────────
+# ── 20: creator sees returned active file in Docket ────────────────────────
+
+@pytest.mark.asyncio
+async def test_creator_sees_forwarded_back_file_in_docket(client, users, db):
+    creator = await users.make(SystemRole.EFMS_OFFICER, first_name="Creator")
+    other = await users.make(SystemRole.EFMS_OFFICER, first_name="Other")
+    file_id = await _create_file(client, creator)
+    try:
+        await _forward(client, creator, other, file_id)
+        r = await client.get("/docket", headers=auth_headers(other))
+        assert r.status_code == 200
+        ids = {item["file_id"] for item in r.json()}
+        assert file_id in ids
+
+        await _forward(client, other, creator, file_id)
+        r = await client.get("/docket", headers=auth_headers(creator))
+        assert r.status_code == 200
+        ids = {item["file_id"] for item in r.json()}
+        assert file_id in ids
+
+        outbox = await client.get("/efms/files?outbox=true", headers=auth_headers(creator))
+        assert outbox.status_code == 200
+        outbox_ids = {f["id"] for f in outbox.json()}
+        assert file_id in outbox_ids
+    finally:
+        await _delete_file(db, file_id)
+
+
+# ── 21: My Files behavior unaffected ─────────────────────────────────────────
 
 @pytest.mark.asyncio
 async def test_my_files_behavior_unchanged(client, users, db):

@@ -56,14 +56,15 @@ const docketSortValue = (f: DocketItem, key: string): string | number | Date | n
 };
 
 // My Files status rule:
-//   - released                            -> "released"
-//   - the creator currently holds it      -> "draft"
-//     (a fresh never-forwarded draft, OR a file they reopened after
-//      release — it's back in their hands and not yet sent on)
-//   - otherwise (it's out with someone)   -> "active"
+//   - released -> "released"
+//   - draft means unsent work by the current holder, not "never forwarded"
+//   - a creator-held file is draft only if it is still a real unsent draft
+//   - any file that has already been forwarded, including one returned to
+//     the creator, is active while it is in circulation
+//   - a reopened file is also active until the creator releases it again
 const myFileDisplayStatus = (f: EfmsFile) => {
   if (f.is_released) return "released";
-  if (f.current_holder_id && f.current_holder_id === f.created_by) return "draft";
+  if (f.current_holder_id && f.current_holder_id === f.created_by && !f.has_been_forwarded) return "draft";
   return "active";
 };
 
