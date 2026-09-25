@@ -735,7 +735,7 @@ class CreateUserRequest(BaseModel):
     middle_name: Optional[str] = None
     last_name: str
     email: EmailStr
-    mobile: str
+    mobile: Optional[str] = None
     employee_code: Optional[str] = None
     date_of_birth: Optional[str] = None
     designation: str
@@ -783,13 +783,14 @@ async def _create_user_record(db: AsyncSession, body: CreateUserRequest) -> User
     if existing.scalar_one_or_none():
         raise HTTPException(409, "An account with this email already exists.")
 
+    cleaned_mobile = (body.mobile or "").strip() or None
     user = User(
         email=email,
         hashed_password=hash_password(body.temp_password),
         first_name=body.first_name.strip(),
         middle_name=(body.middle_name or "").strip() or None,
         last_name=body.last_name.strip(),
-        mobile=body.mobile,
+        mobile=cleaned_mobile,
         employee_code=body.employee_code,
         date_of_birth=_parse_dob(body.date_of_birth),
         designation=body.designation,

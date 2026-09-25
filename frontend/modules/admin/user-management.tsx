@@ -154,7 +154,7 @@ function UserFields({
         <div><label className={LABEL}>Email *</label>
           <input type="email" value={form.email} disabled={disabledEmail}
             onChange={(e) => setForm((f) => ({ ...f, email: e.target.value }))} className={`${INPUT} disabled:bg-gray-50 disabled:text-gray-500`} /></div>
-        <div><label className={LABEL}>Mobile Number *</label>
+        <div><label className={LABEL}>Mobile Number</label>
           <input type="tel" value={form.mobile} onChange={(e) => setForm((f) => ({ ...f, mobile: e.target.value }))} className={INPUT} /></div>
       </div>
       <div className="grid grid-cols-2 gap-4">
@@ -236,7 +236,9 @@ function CreateUserModal({ onClose, establishments, departments, roleOptions }: 
   function validate(): string | null {
     if (!form.first_name || !form.last_name) return "First and last name are required.";
     if (!form.email) return "Email is required.";
-    if (!form.mobile) return "Mobile number is required.";
+    if (form.mobile && !/^\+?[0-9\s-]{10,15}$/.test(form.mobile.trim())) {
+      return "Mobile number must be 10-15 digits, optional plus sign, spaces and dashes allowed.";
+    }
     if (!form.designation) return "Designation is required.";
     if (password.length < 8 || !/[A-Z]/.test(password) || !/[a-z]/.test(password) || !/\d/.test(password)) {
       return "Password must be at least 8 characters and include an uppercase letter, a lowercase letter and a digit.";

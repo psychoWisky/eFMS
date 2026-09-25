@@ -133,6 +133,26 @@ async def test_super_admin_can_create_role(client, users, roles):
 
 
 @pytest.mark.asyncio
+async def test_super_admin_can_create_user_without_mobile_number(client, users):
+    super_admin = await users.make(SystemRole.SUPER_ADMIN)
+    r = await client.post(
+        "/auth/admin/users",
+        json={
+            "first_name": "No",
+            "last_name": "Mobile",
+            "email": "nomobile@example.com",
+            "designation": "Developer",
+            "role": "efms_officer",
+            "is_active": True,
+            "temp_password": "StrongPass1",
+        },
+        headers=auth_headers(super_admin),
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["mobile"] is None
+
+
+@pytest.mark.asyncio
 async def test_duplicate_role_creation_is_rejected(client, users, roles):
     super_admin = await users.make(SystemRole.SUPER_ADMIN)
     role = await roles.make("test_dup_role")
