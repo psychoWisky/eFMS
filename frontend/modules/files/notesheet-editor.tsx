@@ -20,7 +20,7 @@ import { FileClassificationBadge, FileClassificationBanner } from "@/components/
 import { SearchableSelect } from "@/components/shared/searchable-select";
 import { useRichTextEditor, RichTextToolbar } from "@/components/shared/rich-text-editor";
 import { EditorContent } from "@tiptap/react";
-import { useFavoriteRecipients, splitRecipientValue } from "@/hooks/use-favorite-recipients";
+import { useFavoriteRecipients, splitRecipientValue, resolveRecipientValue } from "@/hooks/use-favorite-recipients";
 import { useRecipientFilter } from "@/hooks/use-recipient-filter";
 import { OfficeSectionFilter } from "@/components/shared/office-section-filter";
 import { useAttachmentQueue } from "@/hooks/use-attachment-queue";
@@ -43,6 +43,7 @@ interface EfmsFile {
   created_by: string; current_holder_id: string | null;
   department_id: string | null;
   recipient_id: string | null; recipient_name: string | null;
+  recipient_role?: string | null; recipient_user_role_id?: string | null;
   created_at: string; updated_at: string;
   is_released: boolean;
   creator_info?: PersonInfo | null; current_holder_info?: PersonInfo | null; recipient_info?: PersonInfo | null;
@@ -254,7 +255,7 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
   // and the subsequent-forward panel — the endpoint and payload shape are
   // unchanged; only what populates `remarks`/`to_user_id` differs by caller.
   const submitAction = useMutation({
-    mutationFn: (data: { action: string; remarks?: string; to_user_id?: string | null; to_role?: string }) =>
+    mutationFn: (data: { action: string; remarks?: string; to_user_id?: string | null; to_role?: string; to_user_role_id?: string }) =>
       api.post(`/efms/files/${fileId}/route`, data),
   });
 
@@ -278,9 +279,9 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
   // picker (needsRecipientPicker), which lets the user pick/change one even
   // though the rest of the draft is locked.
   async function handleFirstForward(recipientId?: string) {
-    const { userId: pickedId, role: pickedRole } = recipientId
+    const { userId: pickedId, role: pickedRole, userRoleId: pickedUserRoleId } = recipientId
       ? splitRecipientValue(recipientId)
-      : { userId: undefined, role: undefined };
+      : { userId: undefined, role: undefined, userRoleId: undefined };
     const target = pickedId ?? file?.recipient_id;
     if (!target) return;
     // Client-side mirror of the backend's own check (route_file) — the
@@ -294,7 +295,7 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
       // No remarks field exists at first-forward — omitted (not "") so the
       // backend/timeline never mistake "nothing was ever written" for
       // "content exists but you can't see it."
-      await submitAction.mutateAsync({ action: actionType, to_user_id: target, to_role: pickedRole });
+      await submitAction.mutateAsync({ action: actionType, to_user_id: target, to_role: pickedRole, to_user_role_id: pickedUserRoleId });
       await afterForwardSuccess();
     } catch (err) {
       const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
@@ -312,7 +313,7 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
   // pattern as every other forward/delete action.
   async function handleSubmitAction() {
     if (!toUserId) { toast.warning("Please select a person to forward to."); return; }
-    const { userId: toUid, role: toRole } = splitRecipientValue(toUserId);
+    const { userId: toUid, role: toRole, userRoleId: toUserRoleId } = splitRecipientValue(toUserId);
     const selected = users.find((u) => u.id === toUid);
     const confirmed = await confirmAction({
       title: "Forward File",
@@ -334,7 +335,7 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
     try {
       // Omit (not "") when the holder never wrote anything — same reasoning
       // as handleFirstForward above.
-      await submitAction.mutateAsync({ action: actionType, remarks: noteContent || undefined, to_user_id: toUid || null, to_role: toRole });
+      await submitAction.mutateAsync({ action: actionType, remarks: noteContent || undefined, to_user_id: toUid || null, to_role: toRole, to_user_role_id: toUserRoleId });
       await afterForwardSuccess();
     } catch (err) {
       const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
@@ -540,9 +541,11 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
         category: draftCategory,
         priority: draftPriority,
         department_id: draftDepartmentId || null,
-        // The draft only stores a recipient hint (user, not role) — the
-        // role is chosen when the file is actually Forwarded.
+        // The draft stores the recipient AND which of their roles was
+        // picked, so the draft's first Forward goes to that role.
         recipient_id: splitRecipientValue(draftRecipientId).userId || null,
+        recipient_role: splitRecipientValue(draftRecipientId).role ?? null,
+        recipient_user_role_id: splitRecipientValue(draftRecipientId).userRoleId ?? null,
       });
       await updateNotesheetMutation.mutateAsync(draftNotesheet);
       showSuccess("Draft updated.");
@@ -563,7 +566,11 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
       departmentId: file.department_id ?? "",
       category: file.category,
       priority: file.priority,
-      recipientId: file.recipient_id ?? "",
+      // Rebuild the picker value (person + role) so the saved recipient is
+      // shown pre-selected; falls back to the bare person id.
+      recipientId:
+        resolveRecipientValue(users, file.recipient_id, file.recipient_role, file.recipient_user_role_id)
+        || (file.recipient_id ?? ""),
       notesheet: file.notesheet?.content ?? "",
     };
     setDraftSubject(baseline.subject);
@@ -713,11 +720,14 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
   // Pre-fill the recipient-only picker (needsRecipientPicker) with whatever
   // recipient is already on the draft, if any — the user can still change it.
   useEffect(() => {
-    if (needsRecipientPicker && file?.recipient_id && !toUserId) {
-      setToUserId(file.recipient_id);
+    if (needsRecipientPicker && file?.recipient_id && !toUserId && !loadingUsers) {
+      setToUserId(
+        resolveRecipientValue(users, file.recipient_id, file.recipient_role, file.recipient_user_role_id)
+        || file.recipient_id,
+      );
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [needsRecipientPicker, file?.recipient_id]);
+  }, [needsRecipientPicker, file?.recipient_id, loadingUsers]);
 
   // If Office/Section narrows the recipient list to exclude whichever
   // recipient is currently selected, clear that selection rather than
@@ -752,7 +762,7 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
     draftDepartmentId !== draftBaseline.departmentId ||
     draftCategory !== draftBaseline.category ||
     draftPriority !== draftBaseline.priority ||
-    splitRecipientValue(draftRecipientId).userId !== draftBaseline.recipientId ||
+    draftRecipientId !== draftBaseline.recipientId ||
     draftNotesheet !== draftBaseline.notesheet
   );
   const myNoteDirty = canEditHolderNotesheet && myNoteContent !== myNoteBaseline;

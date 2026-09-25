@@ -230,6 +230,45 @@ select.form-input { cursor: pointer; }
   margin-left: 5px;
 }
 
+/* ── Sonner toast — always above every modal & high-contrast text ────────────── */
+/* Lift only the toaster container. Never set z-index on the individual
+   [data-sonner-toast] elements: Sonner orders its stack with a per-toast
+   z-index, and flattening it lets an older toast (whose text Sonner hides
+   while stacked) paint over the newest one — a coloured box with no text. */
+[data-sonner-toaster] {
+  z-index: 99999 !important;
+}
+
+/* Ensure success toasts ALWAYS have prominent, high-contrast dark green text */
+[data-sonner-toast][data-type="success"],
+[data-sonner-toast][data-type="success"][data-styled="true"] {
+  background: #ECFDF5 !important;
+  color: #064E3B !important;
+  border: 1px solid #6EE7B7 !important;
+}
+[data-sonner-toast][data-type="success"] [data-title],
+[data-sonner-toast][data-type="success"] [data-description],
+[data-sonner-toast][data-type="success"] [data-content] {
+  color: #064E3B !important;
+  opacity: 1 !important;
+  font-weight: 600 !important;
+}
+
+/* Ensure error toasts ALWAYS have prominent, high-contrast dark red text */
+[data-sonner-toast][data-type="error"],
+[data-sonner-toast][data-type="error"][data-styled="true"] {
+  background: #FEF2F2 !important;
+  color: #7F1D1D !important;
+  border: 1px solid #FCA5A5 !important;
+}
+[data-sonner-toast][data-type="error"] [data-title],
+[data-sonner-toast][data-type="error"] [data-description],
+[data-sonner-toast][data-type="error"] [data-content] {
+  color: #7F1D1D !important;
+  opacity: 1 !important;
+  font-weight: 600 !important;
+}
+
 /* ── Print styles ────────────────────────────────────────────────────────────── */
 @media print {
   .print\:hidden { display: none !important; }

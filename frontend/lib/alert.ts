@@ -7,6 +7,7 @@
 // existing `sonner` toast (toast.error) — this file only replaces
 // confirmation dialogs and success notifications, per the project convention.
 import Swal from "sweetalert2";
+import { toast as sonnerToast } from "sonner";
 
 const BRAND_COLOR = "#0D6E6E";
 const DANGER_COLOR = "#DC2626";
@@ -74,15 +75,14 @@ export async function confirmLeaveUnsaved(): Promise<boolean> {
   return result.isConfirmed;
 }
 
-/** Show a brief, non-blocking-feeling success confirmation (auto-dismisses). */
+/**
+ * Show a brief, non-blocking success notification in the top-right corner
+ * (via Sonner) so it stays visible regardless of scroll position or open
+ * modals. Auto-dismisses after 3.5 s.
+ */
 export function showSuccess(title: string, text?: string): void {
-  Swal.fire({
-    title,
-    text,
-    icon: "success",
-    confirmButtonColor: BRAND_COLOR,
-    timer: 2200,
-    timerProgressBar: true,
-    showConfirmButton: false,
+  const message = text ? `${title} — ${text}` : title;
+  sonnerToast.success(message, {
+    duration: 3500,
   });
 }

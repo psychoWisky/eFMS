@@ -24,6 +24,15 @@ class RefreshRequest(BaseModel):
     refresh_token: str
 
 
+class HeldRoleBrief(BaseModel):
+    id: str
+    role: str
+    department_id: Optional[str] = None
+    department_name: Optional[str] = None
+    establishment_id: Optional[str] = None
+    establishment_name: Optional[str] = None
+
+
 class UserBrief(BaseModel):
     id: str
     email: str
@@ -34,6 +43,13 @@ class UserBrief(BaseModel):
     profile_photo_url: Optional[str]
     roles: list[str]
     can_sign: bool = False
+    # Active organizational context
+    department_id: Optional[str] = None
+    department_name: Optional[str] = None
+    establishment_id: Optional[str] = None
+    establishment_name: Optional[str] = None
+    # All held roles with their individual establishment / department contexts
+    held_roles: list[HeldRoleBrief] = []
     # Lets GET /auth/my-profiles show an inactive/completed project profile
     # disabled rather than omitting it silently. Always True for a normal
     # login response (get_current_user already rejects inactive users
@@ -57,3 +73,7 @@ class SwitchRoleRequest(BaseModel):
     # A role NAME the caller already holds (see user_roles). Not restricted
     # to the SystemRole enum — custom roles from Role Management are valid.
     role: str
+    department_id: Optional[str] = None
+    establishment_id: Optional[str] = None
+    user_role_id: Optional[str] = None
+

@@ -46,6 +46,9 @@ class FileCreate(BaseModel):
     initial_content: str = ""
     recipient_id: Optional[UUID] = None
     recipient_name: Optional[str] = None
+    # Which of the recipient's roles was picked (multi-role recipients).
+    recipient_role: Optional[str] = None
+    recipient_user_role_id: Optional[UUID] = None
 
 
 class FileUpdate(BaseModel):
@@ -57,6 +60,9 @@ class FileUpdate(BaseModel):
     department_id: Optional[UUID] = None
     recipient_id: Optional[UUID] = None
     recipient_name: Optional[str] = None
+    # Sent together with recipient_id; replaced whenever recipient_id is.
+    recipient_role: Optional[str] = None
+    recipient_user_role_id: Optional[UUID] = None
 
 
 class RouteEntryOut(BaseModel):
@@ -107,6 +113,8 @@ class FileOut(BaseModel):
     current_holder_id: Optional[UUID] = None
     recipient_id: Optional[UUID] = None
     recipient_name: Optional[str] = None
+    recipient_role: Optional[str] = None
+    recipient_user_role_id: Optional[UUID] = None
     created_at: datetime
     updated_at: datetime
     is_released: bool = False
@@ -185,6 +193,10 @@ class RouteAction_(BaseModel):
     # users). NULL = the recipient's current active_role. The file lands in
     # that role's Docket only.
     to_role: Optional[str] = None
+    # The exact user_roles row targeted, when the recipient holds the same
+    # role name in more than one establishment/department. Takes precedence
+    # over to_role; the file lands in that role-context's Docket only.
+    to_user_role_id: Optional[UUID] = None
     remarks: Optional[str] = None
 
 

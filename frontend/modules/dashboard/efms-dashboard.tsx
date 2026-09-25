@@ -15,6 +15,7 @@ import { ReopenFilePicker } from "@/modules/files/reopen-file-picker";
 import { PersonBadge, type PersonInfo } from "@/components/shared/person-badge";
 import { FileClassificationBadge } from "@/components/shared/file-classification-badge";
 import { PageHeader } from "@/components/shared/page-header";
+import { formatRoleTitle } from "@/components/layouts/topnav";
 import { paginate, TablePagination } from "@/components/shared/table-pagination";
 import { useTableSearchSort, TableSearchInput, SortTh } from "@/components/shared/table-controls";
 
@@ -216,20 +217,28 @@ export function EFMSDashboard() {
 
   // The workspace context: a project profile shows its project; otherwise the
   // active role IS the workspace (switching roles = switching workspace).
-  const roleLabel = role ? role.replace(/_/g, " ").replace(/\b\w/g, (m) => m.toUpperCase()) : "";
+  const roleContextLabel = role
+    ? formatRoleTitle(role, user?.establishment_name, user?.department_name)
+    : "";
   const workspaceContext = user?.project_name
     ? `${user.project_name}${user.project_number ? ` (PI${user.project_number})` : ""}`
-    : roleLabel;
+    : roleContextLabel;
 
   return (
     <div className="min-h-screen bg-[#F5F7FA]">
       <PageHeader
         title={
           workspaceContext
-            ? <>eFMS Workspace <span className="text-[#4A5568] font-semibold">— {workspaceContext}</span></>
+            ? <>eFMS Workspace <span className="text-[#4A5568] font-semibold break-words">— {workspaceContext}</span></>
             : "eFMS Workspace"
         }
-        subtitle={<>{user?.full_name} · <span className="capitalize">{role?.replace("_", " ")}</span></>}
+        subtitle={
+          <div className="flex flex-wrap items-center gap-1.5 text-sm text-[#4A5568]">
+            <span className="font-semibold text-gray-900">{user?.full_name}</span>
+            <span>·</span>
+            <span className="text-[#0D6E6E] font-medium break-words">{roleContextLabel}</span>
+          </div>
+        }
       />
 
       {/* Section tabs */}

@@ -5,15 +5,29 @@ export type EfmsRole =
   | "efms_officer" | "efms_admin" | "registrar" | "dispatch_officer"
   | "hod" | "faculty" | "admin" | "super_admin";
 
+export interface HeldRole {
+  id: string;
+  role: string;
+  department_id?: string | null;
+  department_name?: string | null;
+  establishment_id?: string | null;
+  establishment_name?: string | null;
+}
+
 export interface AuthUser {
   id: string;
   email: string;
   full_name: string;
   designation?: string;
   department?: string;
+  department_id?: string | null;
+  department_name?: string | null;
+  establishment_id?: string | null;
+  establishment_name?: string | null;
   kyc_completed: boolean;
   must_change_password: boolean;
   roles: EfmsRole[];
+  held_roles?: HeldRole[];
   // The role this token is acting as. For a multi-role user this is the one
   // they last switched to; may differ from roles[0].
   active_role?: EfmsRole | null;

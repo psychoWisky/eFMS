@@ -1,14 +1,4 @@
 "use client";
-// Super-Admin-only Role Management: list / create / edit / delete roles.
-// This is a metadata/administration layer over the same role names
-// User.active_role has always used on the backend — it does NOT grant any
-// privilege by itself. SUPER_ADMIN's system-wide bypass is decided
-// exclusively by the backend's User.is_super_admin check; nothing here can
-// change that, by design (see backend app/models/user.py Role docstring).
-//
-// Backend enforces SUPER_ADMIN on every /auth/admin/roles endpoint
-// (require_roles(SUPER_ADMIN)) — the isSuperAdmin check below is UX only,
-// same convention as UserManagementSection.
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/services/api";
@@ -31,7 +21,6 @@ function RoleFormModal({ role, onClose }: { role: RoleSummary | null; onClose: (
   const isEdit = !!role;
   const [name, setName] = useState(role?.name ?? "");
   const [description, setDescription] = useState(role?.description ?? "");
-  const [error, setError] = useState("");
 
   const save = useMutation({
     mutationFn: () => {
@@ -47,8 +36,8 @@ function RoleFormModal({ role, onClose }: { role: RoleSummary | null; onClose: (
       onClose();
     },
     onError: (err: unknown) => {
-      const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
-      setError(typeof msg === "string" ? msg : "Could not save role.");
+      const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail || (err as Error)?.message;
+      toast.error(typeof msg === "string" ? msg : "Could not save role.");
     },
   });
 
@@ -63,7 +52,6 @@ function RoleFormModal({ role, onClose }: { role: RoleSummary | null; onClose: (
           <button onClick={onClose} className="text-gray-400 hover:text-gray-600"><X size={20} /></button>
         </div>
         <div className="px-6 py-5 space-y-4">
-          {error && <div className="p-3 bg-red-50 border border-red-200 rounded-xl text-red-700 text-sm">{error}</div>}
           <div>
             <label className={LABEL}>Role Name *</label>
             <input
@@ -96,10 +84,9 @@ function RoleFormModal({ role, onClose }: { role: RoleSummary | null; onClose: (
             onClick={() => {
               const trimmedName = name.trim();
               if (trimmedName.length < 2 || trimmedName.length > 50) {
-                setError("Role name must be between 2 and 50 characters.");
+                toast.error("Role name must be between 2 and 50 characters.");
                 return;
               }
-              setError("");
               save.mutate();
             }}
             disabled={save.isPending || !isValidRoleName}

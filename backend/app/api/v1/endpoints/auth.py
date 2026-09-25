@@ -25,9 +25,10 @@ from app.core.dependencies import get_current_user, require_roles
 import re
 
 from app.models.user import User, UserRole, RefreshToken, SystemRole, DeactivationReasonType, Role
-from app.models.efms_extra import OTP
+from app.models.efms_extra import OTP, Docket
 from app.models.organization import Establishment, Department
-from app.schemas.auth import LoginRequest, TokenResponse, RefreshRequest, UserBrief
+from app.schemas.auth import LoginRequest, TokenResponse, RefreshRequest, UserBrief, HeldRoleBrief
+from app.utils.workspace import role_context
 # Forgot Password reuses the SHARED OTP/email helpers (used elsewhere for
 # e-signature OTP), not this file's own private _create_otp/_verify_otp/
 # _send_email_otp below, which carry a login-only DEV_TEST_BYPASS_OTP.
@@ -128,6 +129,22 @@ def build_user_brief(user: User) -> UserBrief:
     # user.project unconditionally would lazy-load in an async context for
     # every other caller (login, switch-profile, refresh) and raise.
     proj = user.__dict__.get("project")
+    dept = user.__dict__.get("department")
+    estb = user.__dict__.get("establishment")
+
+    held_roles: list[HeldRoleBrief] = []
+    for r in getattr(user, "roles", []):
+        r_dept = r.__dict__.get("department")
+        r_estb = r.__dict__.get("establishment")
+        held_roles.append(HeldRoleBrief(
+            id=str(r.id),
+            role=r.role,
+            department_id=str(r.department_id) if r.department_id else None,
+            department_name=r_dept.name if r_dept else (dept.name if dept and str(user.department_id) == str(r.department_id) else None),
+            establishment_id=str(r.establishment_id) if r.establishment_id else None,
+            establishment_name=r_estb.name if r_estb else (estb.name if estb and str(user.establishment_id) == str(r.establishment_id) else None),
+        ))
+
     return UserBrief(
         id=str(user.id),
         email=user.email,
@@ -141,6 +158,11 @@ def build_user_brief(user: User) -> UserBrief:
         is_active=user.is_active,
         project_number=proj.project_number if proj else None,
         project_name=proj.name if proj else None,
+        department_id=str(user.department_id) if user.department_id else None,
+        department_name=dept.name if dept else None,
+        establishment_id=str(user.establishment_id) if user.establishment_id else None,
+        establishment_name=estb.name if estb else None,
+        held_roles=held_roles,
     )
 
 
@@ -208,7 +230,14 @@ async def login_step2(payload: LoginStep2Request, db: AsyncSession = Depends(get
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired OTP. Please request a new one.")
 
     result = await db.execute(
-        select(User).options(selectinload(User.roles)).where(User.email == email)
+        select(User)
+        .options(
+            selectinload(User.roles).selectinload(UserRole.department),
+            selectinload(User.roles).selectinload(UserRole.establishment),
+            selectinload(User.department),
+            selectinload(User.establishment),
+        )
+        .where(User.email == email)
     )
     user = result.scalar_one_or_none()
     if not user or not user.is_active:
@@ -453,7 +482,14 @@ async def list_my_profiles(
     derived from the caller's own verified token."""
     person_id = _resolve_person_id(current_user)
     result = await db.execute(
-        select(User).options(selectinload(User.roles), selectinload(User.project))
+        select(User)
+        .options(
+            selectinload(User.roles).selectinload(UserRole.department),
+            selectinload(User.roles).selectinload(UserRole.establishment),
+            selectinload(User.department),
+            selectinload(User.establishment),
+            selectinload(User.project),
+        )
         .where(or_(User.id == person_id, User.origin_user_id == person_id))
         .order_by(User.origin_user_id.is_(None).desc(), User.created_at)
     )
@@ -481,7 +517,13 @@ async def switch_profile(
     # "Workspace" header when switching INTO a project (PI) profile.
     target = await db.scalar(
         select(User)
-        .options(selectinload(User.roles), selectinload(User.project))
+        .options(
+            selectinload(User.roles).selectinload(UserRole.department),
+            selectinload(User.roles).selectinload(UserRole.establishment),
+            selectinload(User.department),
+            selectinload(User.establishment),
+            selectinload(User.project),
+        )
         .where(User.id == body.profile_user_id)
     )
     if not target or (target.id != person_id and target.origin_user_id != person_id):
@@ -496,6 +538,9 @@ async def switch_profile(
 
 class SwitchRoleBody(BaseModel):
     role: str
+    department_id: Optional[UUID] = None
+    establishment_id: Optional[UUID] = None
+    user_role_id: Optional[UUID] = None
 
 
 @router.post("/switch-role", response_model=TokenResponse)
@@ -518,19 +563,48 @@ async def switch_role(
     # get_current_user already returns the caller with roles eager-loaded
     # from this same session — no extra query needed.
     me = current_user
-    target = next((ur for ur in me.roles if ur.role == body.role), None)
+    target = None
+    if body.user_role_id:
+        target = next((ur for ur in me.roles if str(ur.id) == str(body.user_role_id)), None)
+    if target is None and (body.department_id is not None or body.establishment_id is not None):
+        target = next(
+            (
+                ur for ur in me.roles
+                if ur.role == body.role
+                and (str(ur.department_id) if ur.department_id else None) == (str(body.department_id) if body.department_id else None)
+                and (str(ur.establishment_id) if ur.establishment_id else None) == (str(body.establishment_id) if body.establishment_id else None)
+            ),
+            None,
+        )
+    if target is None:
+        target = next((ur for ur in me.roles if ur.role == body.role), None)
+
     if target is None:
         raise HTTPException(status_code=403, detail="You do not hold this role.")
-    if body.role != me.active_role:
-        me.active_role = body.role
-        # Apply this role's organizational context to the session. NULL on
-        # the role row means "keep the user's own value" — so switching to a
-        # role that was added without an explicit dept/estb is a no-op for
-        # those fields, matching single-role behaviour.
-        if target.department_id is not None:
-            me.department_id = target.department_id
-        if target.establishment_id is not None:
-            me.establishment_id = target.establishment_id
+
+    me.active_role = target.role
+    # Apply this role's organizational context to the session. Files are
+    # scoped to (role, establishment, department), so this is what separates
+    # two same-named roles held in different contexts. Same rule as forward's
+    # recipient stamping — see role_context in app/utils/workspace.py.
+    me.establishment_id, me.department_id = role_context(me, target)
+
+    await db.flush()
+    reloaded = await db.execute(
+        select(User)
+        .options(
+            selectinload(User.roles).selectinload(UserRole.department),
+            selectinload(User.roles).selectinload(UserRole.establishment),
+            selectinload(User.department),
+            selectinload(User.establishment),
+        )
+        .where(User.id == me.id)
+        # Already in the identity map with the OLD department/establishment
+        # loaded — force a refresh so the new token's names are current.
+        .execution_options(populate_existing=True)
+    )
+    me = reloaded.scalar_one()
+
     resp = await _issue_tokens(me, db)
     await db.commit()
     return resp
@@ -561,9 +635,12 @@ async def get_me(current_user: User = Depends(get_current_user)):
 class RoleContextOut(BaseModel):
     """One role a user holds, with its optional org context — pre-fills the
     Edit User form's Role N rows."""
+    id: Optional[UUID] = None
     role: str
     department_id: Optional[UUID] = None
+    department_name: Optional[str] = None
     establishment_id: Optional[UUID] = None
+    establishment_name: Optional[str] = None
 
 
 class AdminUserOut(BaseModel):
@@ -599,16 +676,31 @@ class AdminUserOut(BaseModel):
 
     @classmethod
     def from_user(cls, u: "User") -> "AdminUserOut":
-        by_name = {r.role: r for r in u.roles}
-        order = ([u.active_role] if u.active_role in by_name else []) + [n for n in by_name if n != u.active_role]
-        ordered = [
-            RoleContextOut(
-                role=n,
-                department_id=by_name[n].department_id,
-                establishment_id=by_name[n].establishment_id,
+        def is_active_match(r: UserRole) -> bool:
+            return (
+                r.role == u.active_role
+                and (r.department_id == u.department_id or (r.department_id is None and u.department_id is None))
+                and (r.establishment_id == u.establishment_id or (r.establishment_id is None and u.establishment_id is None))
             )
-            for n in order
-        ]
+
+        sorted_roles = sorted(
+            u.roles,
+            key=lambda r: (0 if is_active_match(r) else (1 if r.role == u.active_role else 2))
+        )
+        ordered: list[RoleContextOut] = []
+        for r in sorted_roles:
+            r_dept = r.__dict__.get("department")
+            r_estb = r.__dict__.get("establishment")
+            ordered.append(
+                RoleContextOut(
+                    id=r.id,
+                    role=r.role,
+                    department_id=r.department_id,
+                    department_name=r_dept.name if r_dept else (u.department.name if u.department and u.department_id == r.department_id else None),
+                    establishment_id=r.establishment_id,
+                    establishment_name=r_estb.name if r_estb else (u.establishment.name if u.establishment and u.establishment_id == r.establishment_id else None),
+                )
+            )
         return cls(
             id=u.id, email=u.email,
             first_name=u.first_name, middle_name=u.middle_name, last_name=u.last_name, full_name=u.full_name,
@@ -635,7 +727,12 @@ class AdminUserOut(BaseModel):
 async def _load_user(db: AsyncSession, uid: UUID) -> User:
     result = await db.execute(
         select(User)
-        .options(selectinload(User.department), selectinload(User.establishment), selectinload(User.roles))
+        .options(
+            selectinload(User.department),
+            selectinload(User.establishment),
+            selectinload(User.roles).selectinload(UserRole.department),
+            selectinload(User.roles).selectinload(UserRole.establishment),
+        )
         .where(User.id == uid)
     )
     user = result.scalar_one_or_none()
@@ -675,36 +772,47 @@ async def _set_single_role(db: AsyncSession, user: User, role: str) -> None:
 
 async def _set_role_set(db: AsyncSession, user: User, roles: list["RoleAssignment"]) -> list[str]:
     """Replace the user's UserRole rows with exactly `roles` (deduped by
-    role name, order preserved). Each entry carries an optional
-    department_id / establishment_id — the organizational context that role
-    is exercised in; NULL falls back to the user record's own values at
-    switch time. The first entry's role becomes active_role, unless the
-    user's current active_role is still in the set (a plain "add a role"
-    edit must not silently switch their working context). Existing rows are
-    updated in place (role name is the key); the delta is deleted/inserted,
-    so uq_user_role is never hit by a same-pair delete+reinsert race."""
-    seen: set[str] = set()
+    (role, establishment_id, department_id), order preserved). Each entry
+    carries an optional department_id / establishment_id. The first entry's
+    role becomes active_role unless the user's current active_role is still
+    held."""
+    seen: set[tuple[str, Optional[UUID], Optional[UUID]]] = set()
     want: list["RoleAssignment"] = []
     for r in roles:
-        if r.role and r.role not in seen:
-            seen.add(r.role)
+        if not r.role:
+            continue
+        key = (r.role, r.establishment_id, r.department_id)
+        if key not in seen:
+            seen.add(key)
             want.append(r)
-    want_names = [r.role for r in want]
-    have = {
-        ur.role: ur
-        for ur in (await db.execute(select(UserRole).where(UserRole.user_id == user.id))).scalars().all()
-    }
-    for name, ur in have.items():
-        if name not in seen:
+
+    want_keys = {(r.role, r.establishment_id, r.department_id) for r in want}
+    existing_roles = (await db.execute(select(UserRole).where(UserRole.user_id == user.id))).scalars().all()
+
+    # Delete existing roles that are not in want_keys
+    for ur in existing_roles:
+        key = (ur.role, ur.establishment_id, ur.department_id)
+        if key not in want_keys:
             await db.delete(ur)
     await db.flush()
+
+    remaining_roles = (await db.execute(select(UserRole).where(UserRole.user_id == user.id))).scalars().all()
+    remaining_keys = {(ur.role, ur.establishment_id, ur.department_id) for ur in remaining_roles}
+
     for r in want:
-        ur = have.get(r.role)
-        if ur is None:
-            ur = UserRole(user_id=user.id, role=r.role)
+        key = (r.role, r.establishment_id, r.department_id)
+        if key not in remaining_keys:
+            ur = UserRole(
+                user_id=user.id,
+                role=r.role,
+                establishment_id=r.establishment_id,
+                department_id=r.department_id,
+            )
             db.add(ur)
-        ur.department_id = r.department_id
-        ur.establishment_id = r.establishment_id
+            remaining_keys.add(key)
+    await db.flush()
+
+    want_names = [r.role for r in want]
     if user.active_role not in want_names:
         user.active_role = want_names[0] if want_names else None
     return want_names
@@ -720,7 +828,10 @@ async def list_admin_users(
     # are managed exclusively through the Projects screen instead, so they
     # never appear here as if they were independent people to manage.
     q = select(User).options(
-        selectinload(User.department), selectinload(User.establishment), selectinload(User.roles),
+        selectinload(User.department),
+        selectinload(User.establishment),
+        selectinload(User.roles).selectinload(UserRole.department),
+        selectinload(User.roles).selectinload(UserRole.establishment),
     ).where(User.origin_user_id.is_(None))
     if status_filter == "active":
         q = q.where(User.is_active == True)
@@ -815,6 +926,7 @@ async def create_user(
 ):
     user = await _create_user_record(db, body)
     await db.commit()
+    db.expunge_all()
     return AdminUserOut.from_user(await _load_user(db, user.id))
 
 
@@ -1164,6 +1276,7 @@ async def edit_user(
         await _set_single_role(db, user, role)
 
     await db.commit()
+    db.expunge_all()
     return AdminUserOut.from_user(await _load_user(db, uid))
 
 
@@ -1244,6 +1357,11 @@ class TransferItemOut(BaseModel):
     kind: str  # "role" | "project_profile"
     key: str   # role name, or the project profile's user id (as a string)
     label: str  # human-readable — role display name, or "PI · <project name>"
+    # kind='role' only: the exact user_roles row, and "<establishment> ·
+    # <department>" — a person may hold the same role name in several
+    # contexts, and each is transferred separately (see transfer_role).
+    user_role_id: Optional[UUID] = None
+    context_label: Optional[str] = None
     department_id: Optional[UUID] = None
     establishment_id: Optional[UUID] = None
     project_id: Optional[UUID] = None
@@ -1262,10 +1380,19 @@ async def _leaver_transfer_items(db: AsyncSession, leaver: User) -> list[Transfe
     project profile itself) currently holds — the exact set that must each
     be individually reassigned before they can be retired."""
     items: list[TransferItemOut] = []
-    role_rows = (await db.execute(select(UserRole).where(UserRole.user_id == leaver.id))).scalars().all()
+    role_rows = (await db.execute(
+        select(UserRole)
+        .options(selectinload(UserRole.department), selectinload(UserRole.establishment))
+        .where(UserRole.user_id == leaver.id)
+    )).scalars().all()
     for ur in role_rows:
+        ctx = " · ".join(n for n in (
+            ur.establishment.name if ur.establishment else None,
+            ur.department.name if ur.department else None,
+        ) if n) or None
         items.append(TransferItemOut(
             kind="role", key=ur.role, label=_pretty_role_name(ur.role),
+            user_role_id=ur.id, context_label=ctx,
             department_id=ur.department_id, establishment_id=ur.establishment_id,
         ))
     profiles = (await db.execute(
@@ -1299,6 +1426,10 @@ class TransferRoleRequest(BaseModel):
     the confirmed per-item transfer flow (a person can have 3 roles and 3
     PI profiles going to 6 different people)."""
     role: str
+    # The exact user_roles row to hand over. Required when the leaver holds
+    # `role` in more than one establishment/department — the role name alone
+    # can't say which one is meant.
+    user_role_id: Optional[UUID] = None
     target_id: UUID
     remarks: Optional[str] = None
 
@@ -1322,7 +1453,17 @@ async def transfer_role(
     if str(body.target_id) == str(uid):
         raise HTTPException(400, "The target must be a different user.")
 
-    leaver_role = next((ur for ur in leaver.roles if ur.role == body.role), None)
+    same_name = [ur for ur in leaver.roles if ur.role == body.role]
+    if body.user_role_id is not None:
+        leaver_role = next((ur for ur in same_name if ur.id == body.user_role_id), None)
+    elif len(same_name) > 1:
+        raise HTTPException(
+            400,
+            "This user holds this role in more than one establishment/department. "
+            "Choose which one to transfer.",
+        )
+    else:
+        leaver_role = same_name[0] if same_name else None
     if leaver_role is None:
         raise HTTPException(404, "This user does not hold that role.")
 
@@ -1346,25 +1487,53 @@ async def transfer_role(
             "Cannot transfer the only active Super Admin role. Assign Super Admin to another user first.",
         )
 
-    # Add the role to target if they don't already hold it — never replaces
+    # Add the role to target if they don't already hold it in this context — never replaces
     # or removes any role/PI-profile/file target already has.
-    if not any(ur.role == body.role for ur in target.roles):
-        db.add(UserRole(
+    target_role = next(
+        (ur for ur in target.roles
+         if ur.role == body.role
+         and ur.department_id == leaver_role.department_id
+         and ur.establishment_id == leaver_role.establishment_id),
+        None,
+    )
+    if target_role is None:
+        target_role = UserRole(
             user_id=target.id, role=body.role,
             department_id=leaver_role.department_id, establishment_id=leaver_role.establishment_id,
-        ))
+        )
+        db.add(target_role)
 
+    # Only this role-context's files move when the leaver holds the same
+    # role name in several contexts; otherwise every file of the role does
+    # (same scoping rule as Docket / My Files — see app/utils/workspace.py).
+    # Moved files are restamped to the target's matching workspace.
+    old_context = role_context(leaver, leaver_role) if len(same_name) > 1 else None
     note = (body.remarks or "").strip() or f"Role transferred ({_pretty_role_name(body.role)}): {leaver.full_name} → {target.full_name}"
     await reassign_file_ownership(
         db, old_id=leaver.id, new_id=target.id, new_role=body.role,
         actor_id=current_user.id, note=note, role_filter=body.role,
+        old_context=old_context, new_context=role_context(target, target_role),
     )
 
     # Remove the role from the leaver — it has now fully moved.
     await db.delete(leaver_role)
-    if leaver.active_role == body.role:
-        remaining = [ur.role for ur in leaver.roles if ur.role != body.role]
-        leaver.active_role = remaining[0] if remaining else None
+    remaining = [ur for ur in leaver.roles if ur.id != leaver_role.id]
+    if not remaining:
+        # Last role gone: hand over any released files still attributed to
+        # the leaver (e.g. from a role removed earlier), so none are left
+        # with nobody able to see them.
+        await db.execute(
+            update(Docket).where(Docket.released_by == leaver.id).values(released_by=target.id)
+        )
+    current = (leaver.establishment_id, leaver.department_id)
+    if not any(ur.role == leaver.active_role and role_context(leaver, ur) == current for ur in remaining):
+        # The leaver was acting in the role just transferred — move them to
+        # one they still hold (with its context), same as switch-role.
+        if remaining:
+            leaver.active_role = remaining[0].role
+            leaver.establishment_id, leaver.department_id = role_context(leaver, remaining[0])
+        else:
+            leaver.active_role = None
 
     await db.commit()
     leaver = await _load_user(db, uid)

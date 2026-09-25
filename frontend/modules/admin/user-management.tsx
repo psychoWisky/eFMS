@@ -26,7 +26,14 @@ interface AdminUser {
   establishment_id: string | null; establishment_name: string | null;
   department_id: string | null; department_name: string | null;
   active_role: string | null;
-  roles?: { role: string; department_id: string | null; establishment_id: string | null }[];
+  roles?: {
+    id?: string;
+    role: string;
+    department_id: string | null;
+    department_name?: string | null;
+    establishment_id: string | null;
+    establishment_name?: string | null;
+  }[];
   is_active: boolean; must_change_password: boolean; can_sign: boolean;
   deactivation_reason_type: string | null; deactivation_remarks: string | null;
   deactivated_at: string | null; deactivated_by: string | null;
@@ -211,7 +218,6 @@ function CreateUserModal({ onClose, establishments, departments, roleOptions }: 
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [confirming, setConfirming] = useState(false);
-  const [error, setError] = useState("");
 
   const create = useMutation({
     mutationFn: () => api.post("/auth/admin/users", {
@@ -227,8 +233,8 @@ function CreateUserModal({ onClose, establishments, departments, roleOptions }: 
       onClose();
     },
     onError: (err: unknown) => {
-      const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
-      setError(typeof msg === "string" ? msg : "Could not create user.");
+      const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail || (err as Error)?.message;
+      toast.error(typeof msg === "string" ? msg : "Could not create user.");
       setConfirming(false);
     },
   });
@@ -247,9 +253,11 @@ function CreateUserModal({ onClose, establishments, departments, roleOptions }: 
   }
 
   function handleReviewClick() {
-    setError("");
     const err = validate();
-    if (err) { setError(err); return; }
+    if (err) {
+      toast.error(err);
+      return;
+    }
     setConfirming(true);
   }
 
@@ -264,8 +272,6 @@ function CreateUserModal({ onClose, establishments, departments, roleOptions }: 
         </div>
 
         <div className="overflow-y-auto px-6 py-5 flex-1">
-          {error && <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-xl text-red-700 text-sm">{error}</div>}
-
           <UserFields form={form} setForm={setForm} establishments={establishments} departments={departments} roleOptions={roleOptions} />
 
           <div className="mt-5 pt-5 border-t border-gray-200">
@@ -366,53 +372,82 @@ function EditUserModal({ user, onClose, establishments, departments, roleOptions
     designation: user.designation ?? "", establishment_id: user.establishment_id ?? "",
     department_id: user.department_id ?? "", role: user.active_role ?? "efms_officer", is_active: user.is_active,
   });
-  // Additional roles beyond the primary (form.role), each with its own org
-  // context. Pre-seeded from the user's current role set minus the primary.
-  // Sending `roles` (primary + these) uses the multi-role edit path.
+
+  // Identify the primary role index in user.roles:
+  // Match active_role and the user's current dept/establishment context; fallback to 0.
+  const primaryIdx = (user.roles ?? []).findIndex(
+    (r) =>
+      r.role === (user.active_role ?? "") &&
+      (r.department_id ?? "") === (user.department_id ?? "") &&
+      (r.establishment_id ?? "") === (user.establishment_id ?? "")
+  );
+  const primaryIndex = primaryIdx !== -1 ? primaryIdx : 0;
+
   const [extraRoles, setExtraRoles] = useState<
     { role: string; department_id: string; establishment_id: string }[]
   >(
     (user.roles ?? [])
-      .filter((r) => r.role !== (user.active_role ?? ""))
+      .filter((_, idx) => idx !== primaryIndex)
       .map((r) => ({
         role: r.role,
         department_id: r.department_id ?? "",
         establishment_id: r.establishment_id ?? "",
       })),
   );
-  const [error, setError] = useState("");
-
-  // Role names not yet used by the primary or any additional row — the only
-  // ones a Role N dropdown may offer.
-  const usedRoles = new Set<string>([form.role, ...extraRoles.map((r) => r.role)]);
-
   const save = useMutation({
-    mutationFn: () => api.patch(`/auth/admin/users/${user.id}`, {
-      first_name: form.first_name, middle_name: form.middle_name || "", last_name: form.last_name, email: form.email,
-      mobile: form.mobile, employee_code: form.employee_code || null,
-      date_of_birth: form.date_of_birth || null, designation: form.designation,
-      establishment_id: form.establishment_id || null, department_id: form.department_id || null,
-      // Primary role first (its context is the user record's own dept/estb),
-      // then each additional role with its own optional context.
-      roles: [
+    mutationFn: () => {
+      // Validate that any extra role row has all three fields (establishment, department, role)
+      for (let i = 0; i < extraRoles.length; i++) {
+        const r = extraRoles[i];
+        if (r.role || r.department_id || r.establishment_id) {
+          if (!r.establishment_id) throw new Error(`Role ${i + 1}: Please select an establishment.`);
+          if (!r.department_id) throw new Error(`Role ${i + 1}: Please select a department.`);
+          if (!r.role) throw new Error(`Role ${i + 1}: Please select a role.`);
+        }
+      }
+
+      const validExtras = extraRoles.filter(
+        (r) => r.role && r.department_id && r.establishment_id
+      );
+
+      // Assemble all role assignments
+      const allRoles = [
         { role: form.role, department_id: form.department_id || null, establishment_id: form.establishment_id || null },
-        ...extraRoles
-          .filter((r) => r.role && r.role !== form.role)
-          .map((r) => ({
-            role: r.role,
-            department_id: r.department_id || null,
-            establishment_id: r.establishment_id || null,
-          })),
-      ],
-    }),
+        ...validExtras.map((r) => ({
+          role: r.role,
+          department_id: r.department_id || null,
+          establishment_id: r.establishment_id || null,
+        })),
+      ];
+
+      // Validate uniqueness across (role, establishment_id, department_id)
+      const seen = new Set<string>();
+      for (const r of allRoles) {
+        const key = `${r.role}__${r.establishment_id ?? ""}__${r.department_id ?? ""}`;
+        if (seen.has(key)) {
+          throw new Error("Duplicate role assignment: the same establishment, department, and role combination cannot be assigned twice.");
+        }
+        seen.add(key);
+      }
+
+      return api.patch(`/auth/admin/users/${user.id}`, {
+        first_name: form.first_name, middle_name: form.middle_name || "", last_name: form.last_name, email: form.email,
+        mobile: form.mobile, employee_code: form.employee_code || null,
+        date_of_birth: form.date_of_birth || null, designation: form.designation,
+        establishment_id: form.establishment_id || null, department_id: form.department_id || null,
+        roles: allRoles,
+      });
+    },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["user-management-users"] });
       showSuccess("User updated.");
       onClose();
     },
     onError: (err: unknown) => {
-      const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
-      setError(typeof msg === "string" ? msg : "Could not update user.");
+      const msg =
+        (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ||
+        (err as Error)?.message;
+      toast.error(typeof msg === "string" ? msg : "Could not update user.");
     },
   });
 
@@ -424,60 +459,93 @@ function EditUserModal({ user, onClose, establishments, departments, roleOptions
           <button onClick={onClose} className="text-gray-400 hover:text-gray-600"><X size={20} /></button>
         </div>
         <div className="overflow-y-auto overflow-x-hidden px-6 py-5 flex-1">
-          {error && <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-xl text-red-700 text-sm">{error}</div>}
           <UserFields form={form} setForm={setForm} establishments={establishments} departments={departments} roleOptions={roleOptions} />
           <div className="mt-5 border-t border-gray-100 pt-4">
             <div className="flex items-center justify-between mb-2">
               <label className={LABEL}>
-                Additional roles <span className="font-normal text-gray-400">(this person can switch between them; each can have its own dept / establishment)</span>
+                Additional roles <span className="font-normal text-gray-400">(hierarchical: choose Establishment 1st, Department 2nd, Role 3rd)</span>
               </label>
             </div>
             <div className="space-y-3">
               {extraRoles.map((row, i) => {
-                // A Role N dropdown offers roles not used by the primary or
-                // any OTHER additional row (this row's own current pick stays
-                // selectable so it displays).
-                const otherUsed = new Set<string>([form.role, ...extraRoles.filter((_, j) => j !== i).map((r) => r.role)]);
-                const opts = roleOptions.filter((o) => !otherUsed.has(o.value) || o.value === row.role);
                 const setRow = (patch: Partial<typeof row>) =>
                   setExtraRoles((s) => s.map((r, j) => (j === i ? { ...r, ...patch } : r)));
+
+                // Filter departments belonging to selected establishment
+                const rowDepts = departments
+                  .filter((d) => d.is_active !== false && (!row.establishment_id || d.establishment_id === row.establishment_id));
+
+                // Identify roles already taken for the exact SAME establishment and department
+                const takenRolesForContext = new Set<string>();
+                if (row.establishment_id && row.department_id) {
+                  // Primary role check
+                  if (form.establishment_id === row.establishment_id && form.department_id === row.department_id && form.role) {
+                    takenRolesForContext.add(form.role);
+                  }
+                  // Other extra role rows check
+                  extraRoles.forEach((other, j) => {
+                    if (
+                      j !== i &&
+                      other.establishment_id === row.establishment_id &&
+                      other.department_id === row.department_id &&
+                      other.role
+                    ) {
+                      takenRolesForContext.add(other.role);
+                    }
+                  });
+                }
+
+                const roleOpts = roleOptions.map((o) => {
+                  const isTaken = takenRolesForContext.has(o.value) && o.value !== row.role;
+                  return {
+                    ...o,
+                    label: isTaken ? `${o.label} (Already assigned)` : o.label,
+                    disabled: isTaken,
+                  };
+                });
+
                 return (
                   <div key={i} className="rounded-xl border border-gray-200 p-3 bg-gray-50/60">
                     <div className="flex items-center justify-between mb-2">
-                      <span className="text-xs font-bold text-gray-500 uppercase tracking-wide">Role {i + 1}</span>
+                      <span className="text-xs font-bold text-gray-500 uppercase tracking-wide">Additional Role {i + 1}</span>
                       <button type="button" onClick={() => setExtraRoles((s) => s.filter((_, j) => j !== i))}
                         className="text-gray-400 hover:text-red-500"><X size={15} /></button>
                     </div>
                     <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                      {/* 1st: Establishment */}
                       <div>
-                        <label className="block text-xs font-semibold text-gray-500 mb-1">Role</label>
-                        <SearchableSelect
-                          options={opts}
-                          value={row.role}
-                          onChange={(v) => setRow({ role: v })}
-                          clearable={false}
-                          placeholder="Select role…"
-                          searchPlaceholder="Search roles…"
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-xs font-semibold text-gray-500 mb-1">Department</label>
-                        <SearchableSelect
-                          options={departments.filter((d) => d.is_active !== false).map((d) => ({ value: d.id, label: d.name }))}
-                          value={row.department_id}
-                          onChange={(v) => setRow({ department_id: v })}
-                          placeholder="Same as user"
-                          searchPlaceholder="Search departments…"
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-xs font-semibold text-gray-500 mb-1">Establishment</label>
+                        <label className="block text-xs font-semibold text-gray-500 mb-1">Establishment *</label>
                         <SearchableSelect
                           options={establishments.filter((e) => e.is_active !== false).map((e) => ({ value: e.id, label: e.name }))}
                           value={row.establishment_id}
-                          onChange={(v) => setRow({ establishment_id: v })}
-                          placeholder="Same as user"
+                          onChange={(v) => setRow({ establishment_id: v, department_id: "", role: "" })}
+                          placeholder="Select establishment…"
                           searchPlaceholder="Search establishments…"
+                        />
+                      </div>
+                      {/* 2nd: Department (depends on Establishment) */}
+                      <div>
+                        <label className="block text-xs font-semibold text-gray-500 mb-1">Department *</label>
+                        <SearchableSelect
+                          options={rowDepts.map((d) => ({ value: d.id, label: d.name }))}
+                          value={row.department_id}
+                          disabled={!row.establishment_id}
+                          onChange={(v) => setRow({ department_id: v, role: "" })}
+                          placeholder={row.establishment_id ? "Select department…" : "Select establishment first"}
+                          searchPlaceholder="Search departments…"
+                        />
+                      </div>
+                      {/* 3rd: Role */}
+                      <div>
+                        <label className="block text-xs font-semibold text-gray-500 mb-1">Role *</label>
+                        <SearchableSelect
+                          options={roleOpts}
+                          value={row.role}
+                          disabled={!row.establishment_id || !row.department_id}
+                          onChange={(v) => setRow({ role: v })}
+                          clearable={false}
+                          placeholder={!row.establishment_id ? "Select establishment first" : (!row.department_id ? "Select dept first" : "Select role…")}
+                          searchPlaceholder="Search roles…"
                         />
                       </div>
                     </div>
@@ -488,7 +556,7 @@ function EditUserModal({ user, onClose, establishments, departments, roleOptions
             <button
               type="button"
               onClick={() => setExtraRoles((s) => [...s, { role: "", department_id: "", establishment_id: "" }])}
-              disabled={roleOptions.every((o) => usedRoles.has(o.value))}
+              disabled={extraRoles.some((r) => !r.establishment_id || !r.department_id || !r.role)}
               className="mt-3 flex items-center gap-1.5 px-3 py-2 text-sm font-semibold text-[#0D6E6E] border border-dashed border-[#0D6E6E]/40 rounded-lg hover:bg-[#F0F7F7] disabled:opacity-40 disabled:cursor-not-allowed"
             >
               <Plus size={15} /> Add another role
@@ -506,6 +574,7 @@ function EditUserModal({ user, onClose, establishments, departments, roleOptions
     </div>
   );
 }
+
 
 interface BulkRowResult {
   row: number; email: string | null; full_name: string | null; status: "created" | "failed";
@@ -757,6 +826,11 @@ interface TransferItem {
   kind: "role" | "project_profile";
   key: string;
   label: string;
+  // kind="role" only: the exact role row and its "<establishment> ·
+  // <department>" — one person can hold the same role in several places,
+  // and each is reassigned separately.
+  user_role_id?: string | null;
+  context_label?: string | null;
   department_id: string | null;
   establishment_id: string | null;
   project_id: string | null;
@@ -779,6 +853,7 @@ function TransferItemRow({ item, candidates, onReassign, isPending }: {
     <div className="flex items-center gap-3 py-3 border-b border-gray-100 last:border-0">
       <div className="flex-1 min-w-0">
         <p className="text-sm font-semibold text-gray-800 truncate">{item.label}</p>
+        {item.context_label && <p className="text-xs text-gray-600 truncate">{item.context_label}</p>}
         <p className="text-xs text-gray-400">{item.kind === "role" ? "Role" : "Project profile"}</p>
       </div>
       <div className="w-56 shrink-0">
@@ -824,8 +899,8 @@ function TransferOwnershipModal({ user, candidates, onClose }: {
   });
 
   const reassignRole = useMutation({
-    mutationFn: ({ role, target_id }: { role: string; target_id: string }) =>
-      api.post(`/auth/admin/users/${user.id}/transfer-role`, { role, target_id }),
+    mutationFn: ({ role, user_role_id, target_id }: { role: string; user_role_id?: string | null; target_id: string }) =>
+      api.post(`/auth/admin/users/${user.id}/transfer-role`, { role, user_role_id, target_id }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["transfer-status", user.id] });
       qc.invalidateQueries({ queryKey: ["user-management-users"] });
@@ -853,7 +928,7 @@ function TransferOwnershipModal({ user, candidates, onClose }: {
 
   function handleReassign(item: TransferItem, targetId: string) {
     if (item.kind === "role") {
-      reassignRole.mutate({ role: item.key, target_id: targetId });
+      reassignRole.mutate({ role: item.key, user_role_id: item.user_role_id, target_id: targetId });
     } else {
       if (!item.project_id) return;
       reassignProfile.mutate({ project_id: item.project_id, target_id: targetId });
@@ -888,7 +963,7 @@ function TransferOwnershipModal({ user, candidates, onClose }: {
           ) : (
             items.map((item) => (
               <TransferItemRow
-                key={`${item.kind}:${item.key}`}
+                key={`${item.kind}:${item.user_role_id ?? item.key}`}
                 item={item}
                 candidates={candidates}
                 onReassign={handleReassign}
@@ -1028,7 +1103,16 @@ export function UserManagementSection() {
                   <td className="px-4 py-3 text-gray-600 text-xs">{u.email}</td>
                   <td className="px-4 py-3 text-gray-500">{u.designation ?? "—"}</td>
                   <td className="px-4 py-3 text-gray-500">{u.department_name ?? "—"}</td>
-                  <td className="px-4 py-3 text-gray-500 capitalize">{u.active_role?.replace(/_/g, " ") ?? "—"}</td>
+                  <td className="px-4 py-3 text-gray-500">
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <span>{u.active_role ? roleLabelFor(u.active_role) : "—"}</span>
+                      {(u.roles?.length ?? 0) > 1 && (
+                        <span className="px-1.5 py-0.5 bg-blue-100 text-blue-700 rounded text-[10px] font-semibold shrink-0">
+                          +{(u.roles?.length ?? 1) - 1} more role{(u.roles?.length ?? 1) - 1 !== 1 ? "s" : ""}
+                        </span>
+                      )}
+                    </div>
+                  </td>
                   <td className="px-4 py-3">
                     {u.is_active
                       ? <span className="px-2 py-0.5 bg-green-100 text-green-700 rounded-full text-xs font-semibold">Active</span>

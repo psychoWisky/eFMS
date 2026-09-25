@@ -20,12 +20,12 @@ export function PageHeader({
   return (
     <div className={cn("bg-white border-b border-gray-200 px-6 py-4", className)}>
       <div className="flex items-start justify-between gap-4">
-        <div className="min-w-0">
-          <h1 className="text-xl font-bold text-[#1A1A2E] flex items-center gap-2">
+        <div className="min-w-0 flex-1">
+          <h1 className="text-xl font-bold text-[#1A1A2E] flex items-center gap-2 flex-wrap break-words">
             {Icon && <Icon size={20} className="text-[#0D6E6E] shrink-0" />}
-            {title}
+            <span className="break-words">{title}</span>
           </h1>
-          {subtitle && <p className="text-sm text-[#4A5568] mt-0.5">{subtitle}</p>}
+          {subtitle && <div className="text-sm text-[#4A5568] mt-1 break-words whitespace-normal">{subtitle}</div>}
         </div>
         {actions && <div className="flex items-center gap-2 shrink-0">{actions}</div>}
       </div>

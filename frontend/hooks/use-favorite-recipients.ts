@@ -25,13 +25,41 @@ export interface FavoritableUser {
   // backend returns one entry per role; the picker sends `<id>::<role>` so
   // Forward can route the file to that role's workspace.
   role?: string | null;
+  // Set only when the recipient holds `role` in more than one establishment/
+  // department: the exact user_roles row, and its "<estb> · <dept>" label.
+  user_role_id?: string | null;
+  role_context?: string | null;
 }
 
-/** A recipient-picker option value is "<userId>::<role>". Split it back for
- * the Forward call. `role` is undefined for a legacy value with no "::". */
-export function splitRecipientValue(v: string): { userId: string; role?: string } {
-  const i = v.indexOf("::");
-  return i === -1 ? { userId: v } : { userId: v.slice(0, i), role: v.slice(i + 2) || undefined };
+/** A recipient-picker option value is "<userId>::<role>", or
+ * "<userId>::<role>::<userRoleId>" when the person holds that role in
+ * several contexts. Split it back for the Forward call. `role` is undefined
+ * for a legacy value with no "::". */
+export function splitRecipientValue(v: string): { userId: string; role?: string; userRoleId?: string } {
+  const [userId, role, userRoleId] = v.split("::");
+  return { userId, role: role || undefined, userRoleId: userRoleId || undefined };
+}
+
+/** Build the picker option value that matches a recipient saved on a draft
+ * (person + optional role + optional exact role row). Prefers the exact
+ * role row, then the role name, then the person's first entry — so a saved
+ * draft still pre-selects correctly if the person's roles changed since.
+ * Returns "" when the person isn't in `users`. */
+export function resolveRecipientValue(
+  users: FavoritableUser[],
+  userId: string | null | undefined,
+  role?: string | null,
+  userRoleId?: string | null,
+): string {
+  if (!userId) return "";
+  const entries = users.filter((u) => u.id === userId);
+  const hit =
+    (userRoleId && entries.find((u) => u.user_role_id === userRoleId)) ||
+    (role && entries.find((u) => u.role === role)) ||
+    entries[0];
+  if (!hit) return "";
+  if (!hit.role) return hit.id;
+  return hit.user_role_id ? `${hit.id}::${hit.role}::${hit.user_role_id}` : `${hit.id}::${hit.role}`;
 }
 
 const prettyRoleName = (name: string) =>
@@ -97,7 +125,9 @@ export function useFavoriteRecipients() {
     const base = u.employee_code ? `${u.full_name} (${u.employee_code})` : u.full_name;
     // Multi-role recipient: the list has one entry per role — spell out
     // which role this entry routes to.
-    return u.role ? `${base} — ${prettyRoleName(u.role)}` : base;
+    if (!u.role) return base;
+    const role = prettyRoleName(u.role);
+    return u.role_context ? `${base} — ${role} (${u.role_context})` : `${base} — ${role}`;
   }
 
   /** Partition an already-fetched user list into Favorite / All Recipients
@@ -113,7 +143,7 @@ export function useFavoriteRecipients() {
     const favorites: SearchableSelectOption[] = [];
     const others: SearchableSelectOption[] = [];
     for (const u of users) {
-      const value = u.role ? `${u.id}::${u.role}` : u.id;
+      const value = resolveRecipientValue([u], u.id, u.role, u.user_role_id);
       // Structured search: typing a name matches every role-entry this
       // person has (they all share the same searchName); typing a role
       // name narrows down to only the entries actually stamped with that

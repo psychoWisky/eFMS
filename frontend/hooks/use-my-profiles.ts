@@ -28,7 +28,10 @@ export async function switchToProfile(profileUserId: string) {
 // Switch the CURRENT person's active role to another role they already
 // hold (multi-role users). Same token-swap contract as switchToProfile:
 // a fresh access+refresh pair with the new active_role, then setAuth.
-export async function switchToRole(role: string) {
-  const res = await api.post("/auth/switch-role", { role });
+export async function switchToRole(
+  param: string | { role: string; department_id?: string | null; establishment_id?: string | null; user_role_id?: string | null }
+) {
+  const payload = typeof param === "string" ? { role: param } : param;
+  const res = await api.post("/auth/switch-role", payload);
   return res.data as { access_token: string; refresh_token: string; user: AuthUser };
 }

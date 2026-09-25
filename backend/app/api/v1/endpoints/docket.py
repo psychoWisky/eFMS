@@ -17,6 +17,7 @@ from app.api.v1.endpoints.efms_files import (
     _finalize_current_holder_note, _finalize_any_current_holder_note,
 )
 from app.utils.person_info import person_info_map
+from app.utils.workspace import workspace_filter
 
 router = APIRouter(prefix="/docket", tags=["Docket"])
 
@@ -40,16 +41,13 @@ async def my_docket(db: AsyncSession = Depends(get_db), user: User = Depends(get
         .where(
             EfmsFile.current_holder_id == user.id,
             EfmsFile.status != FileStatus.draft,
-            # Multi-role: strictly only files stamped with THIS role. Every
-            # file is stamped with a real role at create/forward time, and
-            # migration 0019 backfilled every pre-existing NULL to its
-            # holder's role at the time — so a bare current_holder_role ==
-            # user.active_role is the correct, complete check now. A
-            # previous "NULL matches any role" fallback here caused a real
-            # bug: a person given a brand-new secondary role would still
-            # see their OTHER role's old files leak into the new role's
-            # Docket, since those old files' NULL stamp matched everything.
-            EfmsFile.current_holder_role == user.active_role,
+            # Multi-role: strictly only files stamped with THIS role-workspace
+            # (role name, plus establishment/department when the user holds
+            # this role in several contexts — see app/utils/workspace.py).
+            workspace_filter(
+                user, EfmsFile.current_holder_role,
+                EfmsFile.current_holder_establishment_id, EfmsFile.current_holder_department_id,
+            ),
         )
         .order_by(EfmsFile.updated_at.desc())
     )
@@ -152,6 +150,8 @@ async def release_file(file_id: UUID, db: AsyncSession = Depends(get_db), user: 
     # Clear current_holder so the file leaves everyone's docket
     file.current_holder_id = None
     file.current_holder_role = None
+    file.current_holder_establishment_id = None
+    file.current_holder_department_id = None
     await db.commit()
     return {"released": True}
 
@@ -193,8 +193,10 @@ async def reopen_file(file_id: UUID, db: AsyncSession = Depends(get_db), user: U
     docket.is_released = False
     file.status = FileStatus.active
     file.current_holder_id = user.id
-    # Back in the creator's current-role workspace.
+    # Back in the creator's current role-workspace.
     file.current_holder_role = user.active_role
+    file.current_holder_establishment_id = user.establishment_id
+    file.current_holder_department_id = user.department_id
     await db.commit()
     return {"reopened": True}
 
@@ -230,15 +232,23 @@ async def released_files(db: AsyncSession = Depends(get_db), user: User = Depend
 
 @router.get("/released/mine", response_model=List[dict])
 async def my_released_files(db: AsyncSession = Depends(get_db), user: User = Depends(get_current_verified_user)):
-    """Released files this user both created and released. Distinct from
-    /released (department-wide) — this is the exact "My Released Files" list
-    used by New File -> Use Existing Released File, and must never include
-    department files or files the user was only a participant on."""
-    result = await db.execute(
-        select(Docket)
-        .where(Docket.is_released == True, Docket.released_by == user.id)
-        .order_by(Docket.released_at.desc())
-    )
+    """Released files this user both created and released, in the role-
+    workspace they are currently acting in. Distinct from /released
+    (department-wide) — this is the exact "My Released Files" list used by
+    New File -> Use Existing Released File, and must never include
+    department files, files the user was only a participant on, or files
+    from the same person's other role-workspaces."""
+    q = (select(Docket)
+         .join(EfmsFile, EfmsFile.id == Docket.file_id)
+         .where(
+             Docket.is_released == True,
+             Docket.released_by == user.id,
+             workspace_filter(
+                 user, EfmsFile.creator_role,
+                 EfmsFile.creator_establishment_id, EfmsFile.creator_department_id,
+             ),
+         ))
+    result = await db.execute(q.order_by(Docket.released_at.desc()))
     dockets = result.scalars().all()
     out = []
     for d in dockets:

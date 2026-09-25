@@ -41,7 +41,7 @@ def _send_email(to: str, subject: str, body: str) -> None:
 
 from app.db.base import get_db
 from app.core.dependencies import get_current_verified_user
-from app.models.user import User
+from app.models.user import User, UserRole
 from app.models.efms import (
     EfmsFile, Notesheet, NotesheetVersion, HolderNote,
     RouteEntry, FileAttachment, DispatchRecord,
@@ -58,6 +58,7 @@ from app.schemas.efms import (
 )
 from app.utils.otp import create_otp, verify_otp, send_email as _send_otp_email
 from app.utils.person_info import PersonInfo, person_info_map
+from app.utils.workspace import workspace_filter, role_context
 from app.api.v1.endpoints.admin import create_notification
 
 # SUPER_ADMIN is the only globally privileged role — see User.is_super_admin.
@@ -512,16 +513,17 @@ async def list_files(
     is_admin = user.is_super_admin
 
     # Multi-role workspace scoping: a role's Docket / My Files only show
-    # files stamped with that exact role. Every file is stamped with a real
-    # role at create/forward time, and migration 0019 backfilled every
-    # pre-existing NULL to its holder's/creator's role at the time — so a
-    # strict equality check is correct and complete now. `is_admin` skips
-    # scoping entirely. (A previous "NULL = any role" fallback here caused
-    # a real bug: switching into a brand-new secondary role still showed
-    # old files from a person's OTHER role, since those files' NULL stamp
-    # matched every role including one that didn't exist for them yet.)
-    _in_role_hold = EfmsFile.current_holder_role == user.active_role
-    _in_role_created = EfmsFile.creator_role == user.active_role
+    # files stamped with that role-workspace — role name, plus org context
+    # when the user holds this role in more than one establishment /
+    # department (see app/utils/workspace.py). `is_admin` skips scoping.
+    _in_role_hold = workspace_filter(
+        user, EfmsFile.current_holder_role,
+        EfmsFile.current_holder_establishment_id, EfmsFile.current_holder_department_id,
+    )
+    _in_role_created = workspace_filter(
+        user, EfmsFile.creator_role,
+        EfmsFile.creator_establishment_id, EfmsFile.creator_department_id,
+    )
 
     if inbox:
         # Inbox: files where user is current holder (files forwarded to them)
@@ -536,7 +538,7 @@ async def list_files(
             q = q.where(_in_role_created)
     elif not is_admin:
         # Regular users see files they created OR files forwarded to them —
-        # in each case scoped to the role they're currently acting as.
+        # in each case scoped to the role-workspace they're currently acting in.
         q = q.where(or_(
             and_(EfmsFile.created_by == user.id, _in_role_created),
             and_(EfmsFile.current_holder_id == user.id, _in_role_hold),
@@ -803,6 +805,23 @@ async def get_file(
     return payload
 
 
+async def _resolve_recipient_role(
+    db: AsyncSession, recipient_id: UUID, role: Optional[str], user_role_id: Optional[UUID],
+) -> tuple[Optional[str], Optional[UUID]]:
+    """Validate a draft's picked recipient role against the roles the
+    recipient actually holds. Returns (role, user_roles row id); anything
+    that doesn't belong to this recipient is dropped (NULL = their current
+    role at Forward time, the pre-0022 behaviour)."""
+    rows = (await db.execute(select(UserRole).where(UserRole.user_id == recipient_id))).scalars().all()
+    if user_role_id is not None:
+        row = next((ur for ur in rows if ur.id == user_role_id), None)
+        if row is not None:
+            return row.role, row.id
+    if role and any(ur.role == role for ur in rows):
+        return role, None
+    return None, None
+
+
 @router.post("", response_model=FileOut, status_code=201)
 async def create_file(
     body: FileCreate,
@@ -822,10 +841,14 @@ async def create_file(
     # no route entry, no notification, no email, no holder transfer. The recipient
     # (if chosen) is simply stored for pre-filling the eventual First Forward.
     recipient_name = body.recipient_name
+    recipient_role, recipient_user_role_id = None, None
     if body.recipient_id:
         rec_user = await db.get(User, body.recipient_id)
         if rec_user:
             recipient_name = rec_user.full_name
+        recipient_role, recipient_user_role_id = await _resolve_recipient_role(
+            db, body.recipient_id, body.recipient_role, body.recipient_user_role_id,
+        )
 
     # _generate_ref's MAX-based lookup fixes the "gap after a deletion"
     # collision, but two requests racing for the same MAX+1 (concurrent
@@ -847,13 +870,19 @@ async def create_file(
             department_id=body.department_id,
             recipient_id=body.recipient_id,
             recipient_name=recipient_name,
+            recipient_role=recipient_role,
+            recipient_user_role_id=recipient_user_role_id,
             created_by=user.id,
             current_holder_id=user.id,
-            # The file belongs to the creator's current-role workspace (multi-
-            # role users). While it is still a Draft the creator also holds it,
-            # so both role fields start the same.
+            # The file belongs to the creator's current role-workspace (role +
+            # org context, see app/utils/workspace.py). While it is still a
+            # Draft the creator also holds it, so both stamps start the same.
             creator_role=user.active_role,
             current_holder_role=user.active_role,
+            creator_establishment_id=user.establishment_id,
+            creator_department_id=user.department_id,
+            current_holder_establishment_id=user.establishment_id,
+            current_holder_department_id=user.department_id,
             status=FileStatus.draft,
         )
         db.add(efms_file)
@@ -895,6 +924,14 @@ async def update_file(
     if "recipient_id" in update_data:
         rec_user = await db.get(User, update_data["recipient_id"])
         update_data["recipient_name"] = rec_user.full_name if rec_user else update_data.get("recipient_name")
+        # The picked role always travels with recipient_id — a new recipient
+        # (or the same one with no role sent) must not keep a stale role.
+        update_data["recipient_role"], update_data["recipient_user_role_id"] = await _resolve_recipient_role(
+            db, update_data["recipient_id"], body.recipient_role, body.recipient_user_role_id,
+        )
+    else:
+        update_data.pop("recipient_role", None)
+        update_data.pop("recipient_user_role_id", None)
     for field, val in update_data.items():
         setattr(f, field, val)
     await db.commit()
@@ -1006,6 +1043,8 @@ async def reassign_file_ownership(
     actor_id: UUID,
     note: str,
     role_filter: Optional[str] = None,
+    old_context: Optional[tuple] = None,
+    new_context: Optional[tuple] = None,
 ) -> int:
     """Move real ownership of every file old_id has as creator, current
     holder, or releaser — over to new_id. Used by both per-role ownership
@@ -1029,30 +1068,51 @@ async def reassign_file_ownership(
     — used for a PI profile, which has no roles of its own (see
     projects.py's _create_project_profile docstring).
 
+    old_context, an (establishment_id, department_id) pair, further limits
+    role_filter to files stamped with that org context — used when the
+    leaver holds the same role name in several establishments/departments
+    and only one of them is being handed over. new_context, when given, is
+    the recipient's matching workspace: moved files are restamped to it so
+    they show up under the right role for new_id.
+
     Returns the number of files whose current_holder_id was moved (the
     "held" count is the most meaningful one to report back to an admin,
     since that's the set that would otherwise need an explicit Forward)."""
     from app.models.efms_extra import Docket
 
-    def _role_match(col):
+    def _role_match(col, estb_col, dept_col):
         if role_filter is None:
             return True
-        return or_(col.is_(None), col == role_filter)
+        cond = or_(col.is_(None), col == role_filter)
+        if old_context is not None:
+            cond = and_(
+                cond,
+                estb_col.is_not_distinct_from(old_context[0]),
+                dept_col.is_not_distinct_from(old_context[1]),
+            )
+        return cond
 
     # 1. Files created by old_id (My Files) -> new_id. Covers Drafts too,
     #    since a Draft's creator is also its current holder.
     created = (await db.execute(
-        select(EfmsFile).where(EfmsFile.created_by == old_id, _role_match(EfmsFile.creator_role))
+        select(EfmsFile).where(EfmsFile.created_by == old_id, _role_match(
+            EfmsFile.creator_role, EfmsFile.creator_establishment_id, EfmsFile.creator_department_id,
+        ))
     )).scalars().all()
     for f in created:
         f.created_by = new_id
         f.creator_role = new_role if role_filter is not None else f.creator_role
+        if new_context is not None:
+            f.creator_establishment_id, f.creator_department_id = new_context
 
     # 2. Files currently held by old_id (Docket) -> new_id, moved directly
     #    (not a Forward). A neutral audit route entry records the move
     #    without changing the file's behavior the way a real Forward would.
     held = (await db.execute(
-        select(EfmsFile).where(EfmsFile.current_holder_id == old_id, _role_match(EfmsFile.current_holder_role))
+        select(EfmsFile).where(EfmsFile.current_holder_id == old_id, _role_match(
+            EfmsFile.current_holder_role,
+            EfmsFile.current_holder_establishment_id, EfmsFile.current_holder_department_id,
+        ))
     )).scalars().all()
     held_count = len(held)
     for f in held:
@@ -1078,16 +1138,20 @@ async def reassign_file_ownership(
         # already — restamping to new_profile's active_role here just keeps
         # that same invariant true for the new profile.
         f.current_holder_role = new_role
+        if new_context is not None:
+            f.current_holder_establishment_id, f.current_holder_department_id = new_context
 
     # 3. Files old_id released (Docket table's released_by, feeds "My
-    #    Released Files") -> new_id. Released files have no role stamp of
-    #    their own (current_holder_role is cleared on release), so this
-    #    always runs regardless of role_filter — a released file no longer
-    #    belongs to any particular role's workspace, only to whoever
-    #    released it.
-    await db.execute(
-        update(Docket).where(Docket.released_by == old_id).values(released_by=new_id)
-    )
+    #    Released Files") -> new_id. "My Released Files" is scoped by the
+    #    file's creator workspace, so for a per-role transfer only the
+    #    released files of this role's workspace move — exactly the created
+    #    files moved in step 1 (only a file's creator can release it). With
+    #    no role_filter (PI profile) every released file moves. transfer_role
+    #    hands over any leftovers once the leaver's last role is gone.
+    released_q = update(Docket).where(Docket.released_by == old_id)
+    if role_filter is not None:
+        released_q = released_q.where(Docket.file_id.in_([f.id for f in created]))
+    await db.execute(released_q.values(released_by=new_id))
 
     return held_count
 
@@ -2078,23 +2142,44 @@ async def route_file(
         if to_user and not to_user.is_active:
             raise HTTPException(status_code=400, detail="Cannot forward a file to an inactive recipient.")
 
-    # Resolve the recipient's target role (multi-role users). The sender
-    # picked "<person> — <role>" in the recipient list; `to_role` carries
-    # that. Validate it against the roles the recipient actually holds; fall
-    # back to their active_role. NULL for a single-role recipient with no
-    # user_roles rows (legacy) — treated as "any role" downstream.
+    # Resolve the recipient's target role-workspace (multi-role users). The
+    # sender picked "<person> — <role>" in the recipient list; `to_role`
+    # (and `to_user_role_id` when the person holds that role in several
+    # establishments/departments) carries that. Validate against the roles
+    # the recipient actually holds; fall back to their active_role, in the
+    # context they are currently working in. NULL role for a single-role
+    # recipient with no user_roles rows (legacy).
     to_role: Optional[str] = None
+    to_establishment_id = None
+    to_department_id = None
+    if (
+        body.action == RouteAction.forward and body.to_user_id
+        and body.to_user_id == f.recipient_id
+        and not body.to_role and not body.to_user_role_id
+    ):
+        # Forwarding to the draft's own recipient with no role given (the
+        # default "Forward" of a draft): use the role picked on the draft.
+        body.to_role = f.recipient_role
+        body.to_user_role_id = f.recipient_user_role_id
     if body.action == RouteAction.forward and body.to_user_id:
         _rec = await db.scalar(
             select(User).options(selectinload(User.roles)).where(User.id == body.to_user_id)
         )
-        _held = {ur.role for ur in _rec.roles} if _rec else set()
-        if body.to_role and body.to_role in _held:
-            to_role = body.to_role
-        elif _rec and _rec.active_role in _held:
-            to_role = _rec.active_role
-        elif _rec:
-            to_role = _rec.active_role  # single-role recipient, no user_roles row
+        if _rec:
+            _target = None
+            if body.to_user_role_id:
+                _target = next((ur for ur in _rec.roles if ur.id == body.to_user_role_id), None)
+            if _target is None:
+                _held = {ur.role for ur in _rec.roles}
+                _want = body.to_role if body.to_role in _held else _rec.active_role
+                _matches = [ur for ur in _rec.roles if ur.role == _want]
+                _target = next(
+                    (ur for ur in _matches
+                     if role_context(_rec, ur) == (_rec.establishment_id, _rec.department_id)),
+                    _matches[0] if _matches else None,
+                )
+            to_role = _target.role if _target else _rec.active_role
+            to_establishment_id, to_department_id = role_context(_rec, _target)
 
     for entry in f.route_entries:
         entry.is_current = False
@@ -2136,6 +2221,8 @@ async def route_file(
         f.current_holder_id = body.to_user_id
         # The file now lives in this recipient's <to_role> workspace.
         f.current_holder_role = to_role
+        f.current_holder_establishment_id = to_establishment_id
+        f.current_holder_department_id = to_department_id
     elif body.action == RouteAction.dispatch:
         f.status = FileStatus.dispatched
 

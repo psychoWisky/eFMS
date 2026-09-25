@@ -18,6 +18,7 @@ export interface SearchableSelectOption {
    * plain label search every other SearchableSelect caller already uses
    * — this never changes existing behavior for Office/Section/admin
    * dropdowns etc. See buildGroups() in use-favorite-recipients.ts. */
+  disabled?: boolean;
   searchName?: string;
   searchRole?: string;
 }
@@ -163,16 +164,18 @@ export function SearchableSelect({
                     <div
                       key={o.value}
                       className={cn(
-                        "flex items-center gap-1 hover:bg-gray-50",
+                        "flex items-center gap-1",
+                        o.disabled ? "opacity-50 cursor-not-allowed bg-gray-50/50" : "hover:bg-gray-50",
                         o.value === value && "bg-[#E6F4F4]",
                       )}
                     >
                       <button
                         type="button"
-                        onClick={() => select(o.value)}
+                        disabled={o.disabled}
+                        onClick={() => !o.disabled && select(o.value)}
                         className={cn(
                           "flex-1 min-w-0 text-left px-3 py-2 text-sm whitespace-normal break-words",
-                          o.value === value && "text-[#0D6E6E] font-semibold",
+                          o.disabled ? "text-gray-400 cursor-not-allowed" : (o.value === value ? "text-[#0D6E6E] font-semibold" : "text-gray-700"),
                         )}
                       >
                         {o.label}

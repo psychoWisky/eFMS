@@ -5,7 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 from app.db.base import get_db
 from app.core.security import verify_token
-from app.models.user import User, SystemRole
+from app.models.user import User, UserRole, SystemRole
 
 bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -29,7 +29,16 @@ async def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    result = await db.execute(select(User).options(selectinload(User.roles)).where(User.id == user_id, User.is_active == True))
+    result = await db.execute(
+        select(User)
+        .options(
+            selectinload(User.roles).selectinload(UserRole.department),
+            selectinload(User.roles).selectinload(UserRole.establishment),
+            selectinload(User.department),
+            selectinload(User.establishment),
+        )
+        .where(User.id == user_id, User.is_active == True)
+    )
     user = result.scalar_one_or_none()
 
     if not user:

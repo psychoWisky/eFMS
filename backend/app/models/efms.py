@@ -54,16 +54,26 @@ class EfmsFile(Base, UUIDMixin, TimestampMixin):
     current_holder_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
     recipient_id  = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
     recipient_name = Column(String(200), nullable=True)
-    # Per-role workspace scoping (multi-role users). NULL = "any role" (the
-    # single-role era, and single-role users today). creator_role scopes
-    # My Files, current_holder_role scopes the Docket.
-    creator_role         = Column(String(50), nullable=True)
-    current_holder_role  = Column(String(50), nullable=True)
+    # Which of the recipient's roles the draft was addressed to (multi-role
+    # recipients) — used by the draft's first Forward. See migration 0022.
+    recipient_role         = Column(String(50), nullable=True)
+    recipient_user_role_id = Column(UUID(as_uuid=True), ForeignKey("user_roles.id", ondelete="SET NULL"), nullable=True)
+    # Per-role workspace scoping (multi-role users). The workspace key is
+    # (role, establishment_id, department_id) — one person may hold the same
+    # role name in two org contexts, so the role string alone is not enough.
+    # creator_* scopes My Files; current_holder_* scopes the Docket. See
+    # app/utils/workspace.py for how these are matched.
+    creator_role                    = Column(String(50), nullable=True)
+    current_holder_role             = Column(String(50), nullable=True)
+    creator_establishment_id        = Column(UUID(as_uuid=True), ForeignKey("establishments.id"), nullable=True)
+    creator_department_id           = Column(UUID(as_uuid=True), ForeignKey("departments.id"), nullable=True)
+    current_holder_establishment_id = Column(UUID(as_uuid=True), ForeignKey("establishments.id"), nullable=True)
+    current_holder_department_id    = Column(UUID(as_uuid=True), ForeignKey("departments.id"), nullable=True)
 
     creator       = relationship("User", foreign_keys=[created_by])
     current_holder = relationship("User", foreign_keys=[current_holder_id])
     recipient     = relationship("User", foreign_keys=[recipient_id])
-    department    = relationship("Department")
+    department    = relationship("Department", foreign_keys=[department_id])
     notesheet     = relationship("Notesheet", back_populates="file", uselist=False, cascade="all, delete-orphan")
     holder_notes  = relationship("HolderNote", back_populates="file", cascade="all, delete-orphan", order_by="HolderNote.sequence")
     route_entries = relationship("RouteEntry", back_populates="file", cascade="all, delete-orphan", order_by="RouteEntry.created_at")

@@ -7,17 +7,13 @@ import { guardedNavigate } from "@/hooks/use-unsaved-changes-guard";
 import { cn } from "@/lib/utils";
 import Image from "next/image";
 
-// All non-SUPER_ADMIN roles are equal, ordinary eFMS roles — including any
-// role Super Admin creates through Role Management. Normal eFMS workflow
-// pages are therefore available to every role except super_admin (which
-// only sees Admin Panel), rather than an enumerated legacy-role list.
 interface NavItem { label: string; icon: React.ElementType; href: string; audience: "normal" | "super_admin"; }
 
 const NAV_ITEMS: NavItem[] = [
-  { label: "Dashboard",    icon: LayoutDashboard, href: "/dashboard", audience: "normal" },
-  { label: "Search Files", icon: Search,          href: "/search",    audience: "normal" },
-  { label: "Tracking History", icon: History,     href: "/tracking",  audience: "normal" },
-  { label: "Admin Panel",  icon: ShieldCheck,     href: "/admin",     audience: "super_admin" },
+  { label: "Dashboard", icon: LayoutDashboard, href: "/dashboard", audience: "normal" },
+  { label: "Search Files", icon: Search, href: "/search", audience: "normal" },
+  { label: "Tracking History", icon: History, href: "/tracking", audience: "normal" },
+  { label: "Admin Panel", icon: ShieldCheck, href: "/admin", audience: "super_admin" },
 ];
 
 interface SidebarProps { collapsed: boolean; canToggle: boolean; onToggle: () => void; }

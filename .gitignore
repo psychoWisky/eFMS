@@ -19,3 +19,5 @@ backend/uploads/
 uploads/
 backend/db_backups/
 *.dump
+# local editor settings (machine-specific interpreter path)
+.vscode/settings.json

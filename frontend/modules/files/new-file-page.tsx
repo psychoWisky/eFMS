@@ -122,7 +122,7 @@ export function NewFileForm({ onSuccess }: NewFileFormProps) {
 
   async function doCreateFile(): Promise<string> {
     const noteContent = editor?.getHTML() ?? "";
-    const { userId: recUserId } = splitRecipientValue(recipientId);
+    const { userId: recUserId, role: recRole, userRoleId: recUserRoleId } = splitRecipientValue(recipientId);
     const selectedUser = allUsers.find((u) => u.id === recUserId);
     const res = await api.post("/efms/files", {
       subject,
@@ -131,6 +131,10 @@ export function NewFileForm({ onSuccess }: NewFileFormProps) {
       is_confidential: isConfidential,
       recipient_id: recUserId || undefined,
       recipient_name: selectedUser?.full_name,
+      // Which of the recipient's roles was picked — the draft's first
+      // Forward goes to that role, not whatever role they're acting in.
+      recipient_role: recRole,
+      recipient_user_role_id: recUserRoleId,
       initial_content: noteContent,
     });
     const fileId = res.data.id;
@@ -199,8 +203,10 @@ export function NewFileForm({ onSuccess }: NewFileFormProps) {
   const createAndForwardFile = useMutation({
     mutationFn: async () => {
       const fileId = await doCreateFile();
-      const { userId: recUserId, role: recRole } = splitRecipientValue(recipientId);
-      await api.post(`/efms/files/${fileId}/route`, { action: "forward", to_user_id: recUserId, to_role: recRole });
+      const { userId: recUserId, role: recRole, userRoleId: recUserRoleId } = splitRecipientValue(recipientId);
+      await api.post(`/efms/files/${fileId}/route`, {
+        action: "forward", to_user_id: recUserId, to_role: recRole, to_user_role_id: recUserRoleId,
+      });
       return fileId;
     },
     onSuccess: () => {

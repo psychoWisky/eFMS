@@ -67,13 +67,21 @@ class UserOut(BaseModel):
     # one entry PER role, each with its own `role` — the sender forwards to
     # "<person> — <role>", and the file lands in that role's Docket only.
     role: Optional[str] = None
+    # Set only when this person holds `role` in more than one establishment /
+    # department: the exact user_roles row this entry targets, and a label
+    # ("<establishment> · <department>") telling the entries apart. Forward
+    # sends user_role_id back so the file lands in that context's Docket.
+    user_role_id: Optional[UUID] = None
+    role_context: Optional[str] = None
     model_config = {"from_attributes": True}
 
     @classmethod
-    def from_user(cls, u: User, role: Optional[str] = None):
+    def from_user(cls, u: User, role: Optional[str] = None,
+                  user_role_id: Optional[UUID] = None, role_context: Optional[str] = None):
         return cls(id=u.id, email=u.email, full_name=u.full_name,
                    active_role=u.active_role,
                    role=role if role is not None else u.active_role,
+                   user_role_id=user_role_id, role_context=role_context,
                    designation=getattr(u, "designation", None),
                    department_name=u.department.name if u.department else None,
                    employee_code=getattr(u, "employee_code", None),
@@ -251,7 +259,11 @@ async def list_users(
     if department_id:
         q = q.where(User.department_id == department_id)
     r = await db.execute(
-        q.options(selectinload(User.department), selectinload(User.project), selectinload(User.roles))
+        q.options(
+            selectinload(User.department), selectinload(User.project),
+            selectinload(User.roles).selectinload(UserRole.department),
+            selectinload(User.roles).selectinload(UserRole.establishment),
+        )
         .order_by(User.first_name)
     )
     users = r.scalars().all()
@@ -268,10 +280,26 @@ async def list_users(
         # One entry per role the user holds (multi-role). A project profile
         # or a single-role user yields exactly one entry, unchanged from
         # before. SUPER_ADMIN role is filtered out at the query level.
-        held = [ur.role for ur in u.roles if ur.role != SystemRole.SUPER_ADMIN]
-        roles = held or ([u.active_role] if u.active_role else [None])
-        for role in roles:
-            item = UserOut.from_user(u, role=role)
+        # A role held in several establishments/departments yields one entry
+        # per context, each naming its context and user_roles row.
+        held = [ur for ur in u.roles if ur.role != SystemRole.SUPER_ADMIN]
+        counts: dict[str, int] = {}
+        for ur in held:
+            counts[ur.role] = counts.get(ur.role, 0) + 1
+        entries: list[tuple] = []
+        for ur in held:
+            if counts[ur.role] > 1:
+                ctx = " · ".join(n for n in (
+                    ur.establishment.name if ur.establishment else None,
+                    ur.department.name if ur.department else None,
+                ) if n) or None
+                entries.append((ur.role, ur.id, ctx))
+            else:
+                entries.append((ur.role, None, None))
+        if not entries:
+            entries = [(u.active_role if u.active_role else None, None, None)]
+        for role, ur_id, ctx in entries:
+            item = UserOut.from_user(u, role=role, user_role_id=ur_id, role_context=ctx)
             if u.id in favorites:
                 item.is_favorite = True
                 item.favorite_created_at = favorites[u.id]
