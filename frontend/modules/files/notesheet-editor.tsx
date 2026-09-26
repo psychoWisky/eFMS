@@ -44,6 +44,7 @@ interface EfmsFile {
   department_id: string | null;
   recipient_id: string | null; recipient_name: string | null;
   recipient_role?: string | null; recipient_user_role_id?: string | null;
+  description?: string | null;
   created_at: string; updated_at: string;
   is_released: boolean;
   creator_info?: PersonInfo | null; current_holder_info?: PersonInfo | null; recipient_info?: PersonInfo | null;
@@ -104,6 +105,7 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
   // Draft editing (30-minute window)
   const [editingDraft, setEditingDraft] = useState(false);
   const [draftSubject, setDraftSubject] = useState("");
+  const [draftDescription, setDraftDescription] = useState("");
   const [draftDepartmentId, setDraftDepartmentId] = useState("");
   const [draftCategory, setDraftCategory] = useState("");
   const [draftPriority, setDraftPriority] = useState("");
@@ -112,7 +114,7 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
   // Snapshot of the Edit Draft fields as they were when editing began —
   // dirty state compares live values against this, never a hardcoded true.
   const [draftBaseline, setDraftBaseline] = useState<{
-    subject: string; departmentId: string; category: string; priority: string; recipientId: string; notesheet: string;
+    subject: string; description: string; departmentId: string; category: string; priority: string; recipientId: string; notesheet: string;
   } | null>(null);
   // The current holder's OWN Notesheet (HolderNote.content) — server-
   // persisted, independent of the creator's Notesheet.content and of
@@ -538,6 +540,7 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
     try {
       await updateFileMutation.mutateAsync({
         subject: draftSubject,
+        description: draftDescription, // "" clears it
         category: draftCategory,
         priority: draftPriority,
         department_id: draftDepartmentId || null,
@@ -563,6 +566,7 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
     if (!file) return;
     const baseline = {
       subject: file.subject,
+      description: file.description ?? "",
       departmentId: file.department_id ?? "",
       category: file.category,
       priority: file.priority,
@@ -574,6 +578,7 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
       notesheet: file.notesheet?.content ?? "",
     };
     setDraftSubject(baseline.subject);
+    setDraftDescription(baseline.description);
     setDraftDepartmentId(baseline.departmentId);
     setDraftCategory(baseline.category);
     setDraftPriority(baseline.priority);
@@ -590,6 +595,7 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
   function discardEditDraft() {
     if (draftBaseline) {
       setDraftSubject(draftBaseline.subject);
+      setDraftDescription(draftBaseline.description);
       setDraftDepartmentId(draftBaseline.departmentId);
       setDraftCategory(draftBaseline.category);
       setDraftPriority(draftBaseline.priority);
@@ -759,6 +765,7 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
   // this — they're immutable and read-only, with no editable state to track.
   const editDraftDirty = editingDraft && !!draftBaseline && (
     draftSubject !== draftBaseline.subject ||
+    draftDescription !== draftBaseline.description ||
     draftDepartmentId !== draftBaseline.departmentId ||
     draftCategory !== draftBaseline.category ||
     draftPriority !== draftBaseline.priority ||
@@ -1058,6 +1065,9 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                 )}
               </div>
               <h1 className="text-xl font-bold text-gray-900 truncate">{file.subject}</h1>
+              {file.description && (
+                <p className="mt-1 text-sm text-gray-600 whitespace-pre-wrap break-words">{file.description}</p>
+              )}
               {/* One flowing metadata line: category · created · From → Holder.
                   Rendered as inline text (not flex items) so it fills the full
                   width and wraps only at spaces — never mid-word. */}
@@ -1199,6 +1209,12 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                   <label className="block text-sm font-semibold text-gray-700 mb-1.5">Subject</label>
                   <input value={draftSubject} onChange={(e) => setDraftSubject(e.target.value)}
                     className="w-full border border-gray-300 rounded-xl px-4 py-2.5 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]" />
+                </div>
+                <div>
+                  <label className="block text-sm font-semibold text-gray-700 mb-1.5">Description <span className="font-normal text-gray-400">(optional)</span></label>
+                  <textarea value={draftDescription} onChange={(e) => setDraftDescription(e.target.value)} rows={3}
+                    placeholder="Any additional details about this file…"
+                    className="w-full border border-gray-300 rounded-xl px-4 py-2.5 text-base resize-y min-h-[84px] focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]" />
                 </div>
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                   <div>

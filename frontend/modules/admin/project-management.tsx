@@ -4,15 +4,14 @@
 // conventions rather than inventing a new admin UI pattern. A project
 // profile is created here as an ordinary `users` row (see backend
 // app/api/v1/endpoints/projects.py) reachable only via the topnav's Switch
-// Profile menu — this screen never edits a profile's own fields directly
-// (name/department/designation are inherited/generated, per the confirmed
-// architecture).
+// Profile menu. Project details (name, funding, dates) are editable via
+// Edit Project; the PI profile via Edit PI; the PI person via Reassign.
 import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/services/api";
 import { toast } from "sonner";
 import { confirmAction, showSuccess } from "@/lib/alert";
-import { Plus, FolderKanban, CheckCircle2, RotateCcw, UserPlus, Repeat, UserPen } from "lucide-react";
+import { Plus, FolderKanban, CheckCircle2, RotateCcw, UserPlus, Repeat, UserPen, Pencil } from "lucide-react";
 import { SearchableSelect } from "@/components/shared/searchable-select";
 
 interface Project {
@@ -63,6 +62,9 @@ export function ProjectManagementSection() {
     mobile: "", department_id: "", role: "", can_sign: false,
   });
   const [profileLoading, setProfileLoading] = useState(false);
+  // Edit-project dialog (the project's own details, not its PI).
+  const [editProjectTarget, setEditProjectTarget] = useState<Project | null>(null);
+  const [projectForm, setProjectForm] = useState({ name: "", total_funding: "", funding_agency: "", start_date: "", end_date: "" });
 
   const { data: projects = [], isLoading } = useQuery<Project[]>({
     queryKey: ["projects"],
@@ -142,6 +144,40 @@ export function ProjectManagementSection() {
 
   async function handleReactivate(p: Project) {
     act(() => api.patch(`/projects/${p.id}/reactivate`, {}));
+  }
+
+  function openEditProject(p: Project) {
+    setProjectForm({
+      name: p.name,
+      total_funding: p.total_funding != null ? String(p.total_funding) : "",
+      funding_agency: p.funding_agency ?? "",
+      start_date: p.start_date ?? "",
+      end_date: p.end_date ?? "",
+    });
+    setEditProjectTarget(p);
+  }
+
+  async function handleEditProjectSubmit() {
+    if (!editProjectTarget) return;
+    if (!projectForm.name.trim()) { toast.error("Project name is required."); return; }
+    if (projectForm.start_date && projectForm.end_date && projectForm.end_date < projectForm.start_date) {
+      toast.error("End date cannot be before the start date.");
+      return;
+    }
+    let ok = false;
+    await act(async () => {
+      // Every field is sent; a blank optional field is sent as null, which
+      // clears it on the backend.
+      await api.patch(`/projects/${editProjectTarget.id}`, {
+        name: projectForm.name.trim(),
+        total_funding: projectForm.total_funding !== "" ? Number(projectForm.total_funding) : null,
+        funding_agency: projectForm.funding_agency.trim() || null,
+        start_date: projectForm.start_date || null,
+        end_date: projectForm.end_date || null,
+      });
+      ok = true;
+    });
+    if (ok) setEditProjectTarget(null);
   }
 
   async function openEditProfile(p: Project) {
@@ -237,6 +273,10 @@ export function ProjectManagementSection() {
                 </div>
               </div>
               <div className="flex gap-1 ml-3 shrink-0">
+                <button onClick={() => openEditProject(p)}
+                  className="flex items-center gap-1 px-3 py-1.5 border border-gray-300 text-gray-700 rounded-lg text-xs font-semibold hover:bg-gray-50">
+                  <Pencil size={13} /> Edit Project
+                </button>
                 {!p.current_profile_id ? (
                   <button onClick={() => setAssignTarget({ project: p, mode: "assign" })}
                     className="flex items-center gap-1 px-3 py-1.5 bg-[#0D6E6E] text-white rounded-lg text-xs font-semibold hover:bg-[#178F8F]">
@@ -296,6 +336,53 @@ export function ProjectManagementSection() {
               <button onClick={handleAssignSubmit} disabled={!assignUserId}
                 className="flex-1 px-4 py-2.5 text-sm bg-[#0D6E6E] text-white rounded-lg font-semibold hover:bg-[#178F8F] disabled:opacity-50">
                 {assignTarget.mode === "assign" ? "Assign" : "Reassign"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {editProjectTarget && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-6" onClick={() => setEditProjectTarget(null)}>
+          <div className="bg-white rounded-2xl p-6 max-w-lg w-full shadow-2xl max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+            <h3 className="text-lg font-bold text-gray-900 mb-1">
+              Edit Project — #{editProjectTarget.project_number}
+            </h3>
+            <p className="text-sm text-gray-500 mb-4">
+              Update this project&apos;s details. The project number stays the same. To change who the PI is, use
+              Reassign; to edit the PI&apos;s own profile, use Edit PI.
+            </p>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div className="sm:col-span-2">
+                <label className={LABEL}>Project Name *</label>
+                <input value={projectForm.name} onChange={(e) => setProjectForm((s) => ({ ...s, name: e.target.value }))}
+                  placeholder="e.g. ABC Research Project" className={INPUT} />
+              </div>
+              <div>
+                <label className={LABEL}>Funding Agency</label>
+                <input value={projectForm.funding_agency} onChange={(e) => setProjectForm((s) => ({ ...s, funding_agency: e.target.value }))}
+                  placeholder="e.g. ICAR" className={INPUT} />
+              </div>
+              <div>
+                <label className={LABEL}>Total Funding</label>
+                <input type="number" min={0} value={projectForm.total_funding} onChange={(e) => setProjectForm((s) => ({ ...s, total_funding: e.target.value }))}
+                  placeholder="e.g. 2500000" className={INPUT} />
+              </div>
+              <div>
+                <label className={LABEL}>Start Date</label>
+                <input type="date" value={projectForm.start_date} onChange={(e) => setProjectForm((s) => ({ ...s, start_date: e.target.value }))} className={INPUT} />
+              </div>
+              <div>
+                <label className={LABEL}>End Date</label>
+                <input type="date" value={projectForm.end_date} min={projectForm.start_date || undefined}
+                  onChange={(e) => setProjectForm((s) => ({ ...s, end_date: e.target.value }))} className={INPUT} />
+              </div>
+            </div>
+            <div className="flex gap-3 mt-5">
+              <button onClick={() => setEditProjectTarget(null)} className="flex-1 px-4 py-2.5 text-sm border border-gray-200 rounded-lg hover:bg-gray-50 font-medium">Cancel</button>
+              <button onClick={handleEditProjectSubmit} disabled={!projectForm.name.trim()}
+                className="flex-1 px-4 py-2.5 text-sm bg-[#0D6E6E] text-white rounded-lg font-semibold hover:bg-[#178F8F] disabled:opacity-50">
+                Save
               </button>
             </div>
           </div>

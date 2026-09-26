@@ -46,6 +46,18 @@ class ProjectCreate(BaseModel):
     assign_user_id: Optional[UUID] = None
 
 
+class ProjectUpdate(BaseModel):
+    """Super-admin edit of a project's own details. Only fields actually
+    sent are changed; sending null clears an optional field. The project
+    number (auto-generated), status (Complete / Reactivate) and PI (Assign /
+    Reassign / Edit PI) have their own actions and are not edited here."""
+    name: Optional[str] = None
+    total_funding: Optional[Decimal] = None
+    funding_agency: Optional[str] = None
+    start_date: Optional[date] = None
+    end_date: Optional[date] = None
+
+
 class ProjectOut(BaseModel):
     id: UUID
     project_number: str
@@ -237,6 +249,43 @@ async def list_projects(db: AsyncSession = Depends(get_db), _: User = Depends(_s
         select(Project).options(selectinload(Project.current_profile)).order_by(Project.created_at.desc())
     )
     return [_project_out(p, p.current_profile.full_name if p.current_profile else None) for p in result.scalars().all()]
+
+
+@router.patch("/{project_id}", response_model=ProjectOut)
+async def update_project(
+    project_id: UUID, body: ProjectUpdate,
+    db: AsyncSession = Depends(get_db), _: User = Depends(_super),
+):
+    """Edit a project's details (name, funding agency, total funding, start
+    and end date) — active or completed. Never touches the PI profile: its
+    display name is "<person> PI<project number>", which doesn't change."""
+    project = await db.scalar(
+        select(Project).options(selectinload(Project.current_profile)).where(Project.id == project_id)
+    )
+    if not project:
+        raise HTTPException(404, "Project not found.")
+
+    sent = body.model_fields_set
+    if "name" in sent:
+        name = (body.name or "").strip()
+        if not name:
+            raise HTTPException(400, "Project name cannot be empty.")
+        project.name = name
+    if "funding_agency" in sent:
+        project.funding_agency = (body.funding_agency or "").strip() or None
+    if "total_funding" in sent:
+        if body.total_funding is not None and body.total_funding < 0:
+            raise HTTPException(400, "Total funding cannot be negative.")
+        project.total_funding = body.total_funding
+    if "start_date" in sent:
+        project.start_date = body.start_date
+    if "end_date" in sent:
+        project.end_date = body.end_date
+    if project.start_date and project.end_date and project.end_date < project.start_date:
+        raise HTTPException(400, "End date cannot be before the start date.")
+
+    await db.commit()
+    return _project_out(project, project.current_profile.full_name if project.current_profile else None)
 
 
 @router.post("/{project_id}/assign", response_model=ProjectOut)

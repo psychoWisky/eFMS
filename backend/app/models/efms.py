@@ -43,6 +43,8 @@ class EfmsFile(Base, UUIDMixin, TimestampMixin):
 
     ref_number    = Column(String(60), unique=True, nullable=False)  # AVFU/AGR/2026/001
     subject       = Column(String(500), nullable=False)
+    # Optional free text, no length limit. Printed on the Notesheet PDF.
+    description   = Column(Text, nullable=True)
     category      = Column(String(80), default="general")
     status        = Column(PgEnum(FileStatus, name="file_status_enum"), default=FileStatus.draft)
     priority      = Column(PgEnum(FilePriority, name="file_priority_enum"), default=FilePriority.normal)

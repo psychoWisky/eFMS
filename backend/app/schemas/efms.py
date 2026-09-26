@@ -38,6 +38,8 @@ class SignatureOut(BaseModel):
 
 class FileCreate(BaseModel):
     subject: str = Field(..., min_length=5, max_length=500)
+    # Optional, unlimited free text. Blank is stored as NULL.
+    description: Optional[str] = None
     category: str = "general"
     priority: FilePriority = FilePriority.normal
     department_id: Optional[UUID] = None
@@ -53,6 +55,8 @@ class FileCreate(BaseModel):
 
 class FileUpdate(BaseModel):
     subject: Optional[str] = Field(None, min_length=5, max_length=500)
+    # "" clears it (None means "not sent", like every other field here).
+    description: Optional[str] = None
     category: Optional[str] = None
     priority: Optional[FilePriority] = None
     due_date: Optional[datetime] = None
@@ -103,6 +107,7 @@ class FileOut(BaseModel):
     id: UUID
     ref_number: str
     subject: str
+    description: Optional[str] = None
     category: str
     status: FileStatus
     priority: FilePriority

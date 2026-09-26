@@ -461,6 +461,7 @@ def _visible_file(f: EfmsFile, viewer: User, *, full_access: bool = True) -> Fil
     payload = FileOut.model_validate(f)
     if not full_access:
         payload.notesheet = None
+        payload.description = None
     if _has_full_remark_visibility(f, viewer):
         return payload
     first_fwd = _first_forward_time(f.route_entries)
@@ -489,6 +490,7 @@ def _list_safe_file(f: EfmsFile) -> FileOut:
     open individually via GET /{file_id}."""
     payload = FileOut.model_validate(f)
     payload.notesheet = None
+    payload.description = None  # free text written by the creator — content, like the notesheet
     payload.attachments = []
     return payload
 
@@ -872,6 +874,7 @@ async def create_file(
             recipient_name=recipient_name,
             recipient_role=recipient_role,
             recipient_user_role_id=recipient_user_role_id,
+            description=(body.description or "").strip() or None,
             created_by=user.id,
             current_holder_id=user.id,
             # The file belongs to the creator's current role-workspace (role +
@@ -932,6 +935,8 @@ async def update_file(
     else:
         update_data.pop("recipient_role", None)
         update_data.pop("recipient_user_role_id", None)
+    if "description" in update_data:
+        update_data["description"] = update_data["description"].strip() or None
     for field, val in update_data.items():
         setattr(f, field, val)
     await db.commit()
@@ -1379,6 +1384,7 @@ async def download_notesheet(
       - University name
       - File/reference number
       - Subject
+      - Description ("No description provided" when empty)
       - Download date/time
       - Creator/holder information
       - Notesheet sequence number
@@ -1538,6 +1544,18 @@ async def download_notesheet(
         if u and u != c:
             bits.append(f"updated {_escape_html(u)} IST")
         return '<div class="stamp-line">' + " &nbsp;&middot;&nbsp; ".join(bits) + "</div>"
+
+    # Description: escaped, line breaks kept; placeholder when blank.
+    if f.description and f.description.strip():
+        description_td_html = (
+            '<td class="file-info-td-value">'
+            + _escape_html(f.description.strip().replace("\r\n", "\n")).replace("\n", "<br>")
+            + "</td>"
+        )
+    else:
+        description_td_html = (
+            '<td class="file-info-td-value file-info-td-empty">No description provided</td>'
+        )
 
     creator_role_html = person_role_line(
         creator_designation, creator_department
@@ -1793,6 +1811,12 @@ strong, b {{ font-weight: 700; }}
     padding: 3px 0;
     font-size: 13.5px;
     color: #1A1A1A;
+    word-wrap: break-word;
+    overflow-wrap: anywhere;
+}}
+.file-info-td-empty {{
+    color: #6B7280;
+    font-style: italic;
 }}
 
 /* ================================================================
@@ -1960,6 +1984,10 @@ strong, b {{ font-weight: 700; }}
             <tr>
                 <td class="file-info-td-label">Subject</td>
                 <td class="file-info-td-value">{_escape_html(f.subject)}</td>
+            </tr>
+            <tr>
+                <td class="file-info-td-label">Description</td>
+                {description_td_html}
             </tr>
         </table>
     </div>

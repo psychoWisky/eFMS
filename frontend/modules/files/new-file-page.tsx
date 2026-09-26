@@ -34,6 +34,8 @@ const DEFAULT_NOTESHEET_HTML = "";
 export function NewFileForm({ onSuccess }: NewFileFormProps) {
   const qc = useQueryClient();
   const [subject, setSubject] = useState("");
+  // Optional, unlimited free text shown on the Notesheet PDF.
+  const [description, setDescription] = useState("");
   const [category, setCategory] = useState("");
   const [priority, setPriority] = useState("");
   // Confidentiality is derived solely from Priority — Secret/Confidential is the
@@ -89,9 +91,10 @@ export function NewFileForm({ onSuccess }: NewFileFormProps) {
     const saved = localStorage.getItem(DRAFT_KEY);
     if (saved && editor) {
       try {
-        const { content, subject: s, category: c, priority: p } = JSON.parse(saved);
+        const { content, subject: s, description: d, category: c, priority: p } = JSON.parse(saved);
         if (content) { editor.commands.setContent(content); setDraftRestored(true); setNotesheetDirty(!isNotesheetEmpty(content)); }
         if (s) setSubject(s);
+        if (d) setDescription(d);
         if (c) setCategory(c);
         if (p) setPriority(p);
       } catch { /* ignore */ }
@@ -103,12 +106,12 @@ export function NewFileForm({ onSuccess }: NewFileFormProps) {
     autoSaveRef.current = setInterval(() => {
       if (editor) {
         localStorage.setItem(DRAFT_KEY, JSON.stringify({
-          content: editor.getHTML(), subject, category, priority,
+          content: editor.getHTML(), subject, description, category, priority,
         }));
       }
     }, 30_000);
     return () => { if (autoSaveRef.current) clearInterval(autoSaveRef.current); };
-  }, [editor, subject, category, priority]);
+  }, [editor, subject, description, category, priority]);
 
   // Shared by both "Save Draft" and "Forward" — creates the file and
   // uploads any queued attachments, returning the new file's id. Forward
@@ -126,6 +129,7 @@ export function NewFileForm({ onSuccess }: NewFileFormProps) {
     const selectedUser = allUsers.find((u) => u.id === recUserId);
     const res = await api.post("/efms/files", {
       subject,
+      description: description.trim() || undefined,
       category,
       priority,
       is_confidential: isConfidential,
@@ -161,7 +165,7 @@ export function NewFileForm({ onSuccess }: NewFileFormProps) {
   }
 
   function resetFormAfterSuccess() {
-    setSubject(""); setCategory(""); setPriority(""); setRecipientId(""); attachmentQueue.clear(); setDraftRestored(false);
+    setSubject(""); setDescription(""); setCategory(""); setPriority(""); setRecipientId(""); attachmentQueue.clear(); setDraftRestored(false);
     localStorage.removeItem(DRAFT_KEY);
     editor?.commands.setContent(DEFAULT_NOTESHEET_HTML);
     setNotesheetDirty(false);
@@ -246,11 +250,11 @@ export function NewFileForm({ onSuccess }: NewFileFormProps) {
   // Notesheet/queued attachments); localStorage's own autosave is not a
   // substitute since it never actually persists the file to the backend.
   const isDirty =
-    subject.trim() !== "" || category !== "" || priority !== "" || recipientId !== "" ||
+    subject.trim() !== "" || description.trim() !== "" || category !== "" || priority !== "" || recipientId !== "" ||
     annexures.length > 0 || notesheetDirty;
 
   function handleDiscardNewFile() {
-    setSubject(""); setCategory(""); setPriority(""); setRecipientId("");
+    setSubject(""); setDescription(""); setCategory(""); setPriority(""); setRecipientId("");
     attachmentQueue.clear();
     setDraftRestored(false);
     setNotesheetDirty(false);
@@ -299,7 +303,7 @@ export function NewFileForm({ onSuccess }: NewFileFormProps) {
               banner reading "Draft restored" was previously mistaken for
               an actual saved-draft notification. */}
           <span>You have unsaved text from a previous visit to this page, recovered from this browser. No file was created or saved.</span>
-          <button type="button" onClick={() => { localStorage.removeItem(DRAFT_KEY); editor?.commands.setContent(DEFAULT_NOTESHEET_HTML); setNotesheetDirty(false); setSubject(""); setCategory(""); setPriority(""); setDraftRestored(false); }}
+          <button type="button" onClick={() => { localStorage.removeItem(DRAFT_KEY); editor?.commands.setContent(DEFAULT_NOTESHEET_HTML); setNotesheetDirty(false); setSubject(""); setDescription(""); setCategory(""); setPriority(""); setDraftRestored(false); }}
             className="text-xs font-semibold underline hover:no-underline shrink-0">Discard</button>
         </div>
       )}
@@ -317,6 +321,13 @@ export function NewFileForm({ onSuccess }: NewFileFormProps) {
               <label className={fieldLabel}>Subject *</label>
               <input value={subject} onChange={(e) => setSubject(e.target.value)} placeholder="Describe the purpose of this file…"
                 className={textInput} />
+            </div>
+
+            <div>
+              <label className={fieldLabel}>Description <span className="font-normal text-gray-400">(optional)</span></label>
+              <textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={3}
+                placeholder="Any additional details about this file…"
+                className={`${textInput} resize-y min-h-[84px]`} />
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -536,6 +547,9 @@ export function NewFileForm({ onSuccess }: NewFileFormProps) {
             </div>
             <div className="bg-gray-50 rounded-xl p-4 space-y-2 mb-6 text-base">
               <div><span className="font-semibold text-gray-600">Subject:</span> <span>{subject}</span></div>
+              {description.trim() && (
+                <div><span className="font-semibold text-gray-600">Description:</span> <span className="whitespace-pre-wrap break-words">{description.trim()}</span></div>
+              )}
               <div><span className="font-semibold text-gray-600">Category:</span> <span>{category}</span></div>
               <div><span className="font-semibold text-gray-600">Priority:</span> <span className="capitalize">{priority}</span></div>
               {isConfidential && <div><span className="font-semibold text-gray-600">Confidential:</span> <span className="text-purple-700 font-semibold">Yes — restricted to sender and recipient only</span></div>}
