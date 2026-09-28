@@ -4,7 +4,7 @@ import hashlib, smtplib
 import csv, io
 from email.mime.text import MIMEText
 from datetime import datetime, timezone, timedelta, date
-from typing import Optional, List
+from typing import Optional, List, Literal
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Query
 from fastapi.responses import Response
@@ -29,6 +29,7 @@ from app.models.efms_extra import OTP, Docket
 from app.models.organization import Establishment, Department
 from app.schemas.auth import LoginRequest, TokenResponse, RefreshRequest, UserBrief, HeldRoleBrief
 from app.utils.workspace import role_context
+from app.utils.sms import normalize_indian_mobile, mask_mobile, sms_configured, send_otp_sms, SmsSendError
 # Forgot Password reuses the SHARED OTP/email helpers (used elsewhere for
 # e-signature OTP), not this file's own private _create_otp/_verify_otp/
 # _send_email_otp below, which carry a login-only DEV_TEST_BYPASS_OTP.
@@ -58,8 +59,7 @@ def _gen_otp() -> str:
 
 
 async def _create_otp(db: AsyncSession, target: str, otp_type: str) -> str:
-    # Mobile OTP is fixed at 123456 for now (no SMS provider configured)
-    code = "123456" if otp_type == "mobile" else _gen_otp()
+    code = _gen_otp()
     otp = OTP(
         target=target,
         otp_type=otp_type,
@@ -183,64 +183,152 @@ async def _issue_tokens(user: User, db: AsyncSession) -> TokenResponse:
 
 
 # ── Two-step login ────────────────────────────────────────────────────────────
-# Step 1: verify password → send OTP to registered email
+# Step 1: email OR mobile number + password → OTP to that same place: an
+#         email address gets an email OTP, a mobile number gets an SMS OTP
 # Step 2: verify OTP → issue JWT (frontend then checks user.must_change_password)
+#
+# Login OTP rows are keyed by the account's email (unique per user) with
+# otp_type = the channel, so a mobile number shared by two accounts can never
+# unlock the wrong one. DEV_TEST_BYPASS_OTP works for both channels (it is
+# checked first in _verify_otp).
+
+LoginChannel = Literal["email", "mobile"]
+
 
 class LoginStep1Request(BaseModel):
-    email: str
+    # Email address or mobile number. `email` is the legacy field name.
+    identifier: Optional[str] = None
+    email: Optional[str] = None
     password: str
+    # Normally omitted: the channel follows the identifier (see
+    # _login_channel). Kept so a client can still ask explicitly.
+    channel: Optional[LoginChannel] = None
+
 
 class LoginStep2Request(BaseModel):
-    email: str
+    identifier: Optional[str] = None
+    email: Optional[str] = None
+    channel: Optional[LoginChannel] = None
     otp: str
+
+
+_BAD_CREDENTIALS = "Incorrect email/mobile number or password."
+
+
+def _login_channel(body, identifier: str) -> str:
+    """Email address → email OTP; mobile number → SMS OTP."""
+    return body.channel or ("email" if "@" in identifier else "mobile")
+
+
+def _login_identifier(body) -> str:
+    ident = (body.identifier or body.email or "").strip()
+    if not ident:
+        raise HTTPException(status_code=422, detail="Enter your email address or mobile number.")
+    return ident
+
+
+async def _login_candidates(db: AsyncSession, identifier: str) -> list[User]:
+    """Real (non project-profile) accounts matching an email or a mobile
+    number. Mobile numbers aren't unique in the schema, so this is a list."""
+    q = select(User).options(
+        selectinload(User.roles).selectinload(UserRole.department),
+        selectinload(User.roles).selectinload(UserRole.establishment),
+        selectinload(User.department),
+        selectinload(User.establishment),
+    )
+    if "@" in identifier:
+        q = q.where(User.email == identifier.lower())
+    else:
+        mobile = normalize_indian_mobile(identifier)
+        if not mobile:
+            return []
+        q = q.where(
+            User.origin_user_id.is_(None),
+            func.right(func.regexp_replace(User.mobile, r"\D", "", "g"), 10) == mobile,
+        )
+    return list((await db.execute(q)).scalars().all())
+
+
+def _mask_email(email: str) -> str:
+    local, _, domain = email.partition("@")
+    shown = local[:2] if len(local) > 2 else local[:1]
+    return f"{shown}{'*' * max(len(local) - len(shown), 3)}@{domain}"
+
 
 @router.post("/login/step1", status_code=200)
 async def login_step1(payload: LoginStep1Request, db: AsyncSession = Depends(get_db)):
-    """Verify email + password. On success, send a 6-digit OTP to the user's
-    registered email address. The client must then call /login/step2 with that
-    OTP to obtain a JWT."""
-    email = payload.email.lower().strip()
-    result = await db.execute(
-        select(User).options(selectinload(User.roles)).where(User.email == email)
-    )
-    user = result.scalar_one_or_none()
-
-    # Identical error for wrong email and wrong password (prevents user enumeration)
-    if not user or not user.hashed_password or not verify_password(payload.password, user.hashed_password):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect email or password.")
-
+    """Verify (email or mobile number) + password, then send a 6-digit OTP
+    to what the user typed: an email address gets an email OTP, a mobile
+    number gets an SMS OTP. The client then calls /login/step2 with the same
+    identifier and the OTP to obtain a JWT."""
+    identifier = _login_identifier(payload)
+    candidates = await _login_candidates(db, identifier)
+    # Identical error for unknown account and wrong password (no enumeration).
+    matches = [
+        u for u in candidates
+        if u.hashed_password and verify_password(payload.password, u.hashed_password)
+    ]
+    if not matches:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=_BAD_CREDENTIALS)
+    if len(matches) > 1:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This mobile number is linked to more than one account. Please sign in with your email address.",
+        )
+    user = matches[0]
     if not user.is_active:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Your account has been deactivated.")
 
-    code = await _create_otp(db, email, "email")
-    _send_email_otp(email, code)
-    # Return dev_otp only when SMTP is not configured so developers can test without email setup
-    dev_payload: dict = {"message": f"OTP sent to {email}."}
-    if not settings.SMTP_USER:
-        dev_payload["dev_otp"] = code
-    return dev_payload
+    channel = _login_channel(payload, identifier)
+    out: dict = {"channel": channel}
+    if channel == "mobile":
+        mobile = normalize_indian_mobile(user.mobile)
+        if not mobile:
+            raise HTTPException(
+                status_code=400,
+                detail="No valid mobile number is registered on your account. Please sign in with your email address.",
+            )
+        code = await _create_otp(db, user.email, "mobile")
+        out["destination"] = mask_mobile(mobile)
+        if sms_configured():
+            try:
+                await send_otp_sms(mobile, code)
+            except SmsSendError:
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail="Could not send the OTP by SMS right now. Please try again, or sign in with your email address.",
+                )
+        else:
+            out["dev_otp"] = code  # SMS not configured (dev only)
+    else:
+        code = await _create_otp(db, user.email, "email")
+        _send_email_otp(user.email, code)
+        out["destination"] = _mask_email(user.email)
+        # Return dev_otp only when SMTP is not configured so developers can test without email setup
+        if not settings.SMTP_USER:
+            out["dev_otp"] = code
+    out["message"] = f"OTP sent to {out['destination']}."
+    return out
 
 
 @router.post("/login/step2", response_model=TokenResponse)
 async def login_step2(payload: LoginStep2Request, db: AsyncSession = Depends(get_db)):
-    """Step 2: verify the OTP that was sent in step 1, then issue JWT tokens."""
-    email = payload.email.lower().strip()
-    ok = await _verify_otp(db, email, "email", payload.otp)
-    if not ok:
+    """Step 2: verify the OTP sent in step 1 (same identifier + channel),
+    then issue JWT tokens."""
+    identifier = _login_identifier(payload)
+    channel = _login_channel(payload, identifier)
+    candidates = [u for u in await _login_candidates(db, identifier) if u.hashed_password]
+    if len(candidates) > 1 and payload.otp == DEV_TEST_BYPASS_OTP:
+        # The bypass code can't tell shared-number accounts apart.
+        candidates = []
+    user = None
+    for cand in candidates:
+        if await _verify_otp(db, cand.email, channel, payload.otp):
+            user = cand
+            break
+    if user is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired OTP. Please request a new one.")
-
-    result = await db.execute(
-        select(User)
-        .options(
-            selectinload(User.roles).selectinload(UserRole.department),
-            selectinload(User.roles).selectinload(UserRole.establishment),
-            selectinload(User.department),
-            selectinload(User.establishment),
-        )
-        .where(User.email == email)
-    )
-    user = result.scalar_one_or_none()
-    if not user or not user.is_active:
+    if not user.is_active:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Account not found or deactivated.")
 
     resp = await _issue_tokens(user, db)

@@ -171,8 +171,14 @@ async def test_role_name_allows_mixed_case_and_punctuation_within_length_limit(c
         json={"name": "Manager / Team-Lead / A1", "description": "Mixed-case role"},
         headers=auth_headers(super_admin),
     )
-    assert r.status_code == 201, r.text
-    assert r.json()["name"] == "Manager / Team-Lead / A1"
+    try:
+        assert r.status_code == 201, r.text
+        assert r.json()["name"] == "Manager / Team-Lead / A1"
+    finally:
+        # Created via the API, so the `roles` fixture doesn't track it —
+        # remove it here or every later run fails with "already exists".
+        if r.status_code == 201:
+            await client.delete(f"/auth/admin/roles/{r.json()['id']}", headers=auth_headers(super_admin))
 
 
 @pytest.mark.asyncio

@@ -3,7 +3,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import Image from "next/image";
-import { Mail, Lock, Eye, EyeOff, ChevronRight, AlertCircle, Loader2, ArrowLeft } from "lucide-react";
+import { Lock, Eye, EyeOff, ChevronRight, AlertCircle, Loader2, ArrowLeft, UserRound } from "lucide-react";
 import { useMutation } from "@tanstack/react-query";
 import { api } from "@/services/api";
 import { useAuthStore } from "@/stores/auth.store";
@@ -17,21 +17,30 @@ export default function LoginPage() {
   const { setAuth } = useAuthStore();
 
   const [step, setStep] = useState<Step>("credentials");
-  const [email, setEmail] = useState("");
+  // Email address or mobile number — the backend accepts either.
+  const [identifier, setIdentifier] = useState("");
+  // The OTP goes where the user signed in with: email → email OTP, mobile
+  // number → SMS OTP (the backend decides the same way).
+  const channel = identifier.includes("@") ? "email" : "mobile";
+  // Masked destination from the backend, e.g. "******4321" / "ab***@avfu.ac.in".
+  const [destination, setDestination] = useState("");
   const [password, setPassword] = useState("");
   const [otp, setOtp] = useState("");
   const [showPwd, setShowPwd] = useState(false);
   const [error, setError] = useState("");
 
-  // Step 1: verify password, receive OTP on email
+  const sendOtp = () => api.post("/auth/login/step1", { identifier: identifier.trim(), password });
+
+  // Step 1: verify password, receive OTP on the chosen channel
   const step1 = useMutation({
-    mutationFn: () => api.post("/auth/login/step1", { email: email.trim(), password }),
+    mutationFn: sendOtp,
     onSuccess: (res) => {
       setError("");
       setOtp("");
+      setDestination(res.data?.destination ?? "");
       setStep("otp");
       const devOtp = res.data?.dev_otp;
-      toast.success(`OTP sent to ${email.trim()}.${devOtp ? ` [DEV: ${devOtp}]` : ""}`);
+      toast.success(`${res.data?.message ?? "OTP sent."}${devOtp ? ` [DEV: ${devOtp}]` : ""}`);
     },
     onError: (err: unknown) => {
       const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
@@ -41,7 +50,7 @@ export default function LoginPage() {
 
   // Step 2: submit OTP, receive JWT
   const step2 = useMutation({
-    mutationFn: () => api.post("/auth/login/step2", { email: email.trim(), otp }),
+    mutationFn: () => api.post("/auth/login/step2", { identifier: identifier.trim(), otp }),
     onSuccess: (res) => {
       const { user, access_token, refresh_token } = res.data;
       setAuth(user, access_token, refresh_token);
@@ -59,17 +68,22 @@ export default function LoginPage() {
     },
   });
 
-  // Resend OTP (re-runs step 1 silently)
+  // Resend OTP (re-runs step 1)
   const resend = useMutation({
-    mutationFn: () => api.post("/auth/login/step1", { email: email.trim(), password }),
+    mutationFn: sendOtp,
     onSuccess: (res) => {
       setOtp("");
       setError("");
+      setDestination(res.data?.destination ?? "");
       const devOtp = res.data?.dev_otp;
-      toast.success(`OTP resent.${devOtp ? ` [DEV: ${devOtp}]` : ""}`);
+      toast.success(`${res.data?.message ?? "OTP resent."}${devOtp ? ` [DEV: ${devOtp}]` : ""}`);
     },
-    onError: () => toast.error("Failed to resend OTP. Please go back and try again."),
+    onError: (err: unknown) => {
+      const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      toast.error(msg ?? "Failed to resend OTP. Please go back and try again.");
+    },
   });
+
 
   function handleCredentials(e: React.FormEvent) {
     e.preventDefault();
@@ -113,7 +127,9 @@ export default function LoginPage() {
             </div>
           </div>
           <p className="text-sm text-gray-500 mb-6">
-            {step === "credentials" ? "Step 1 — Verify your identity" : "Step 2 — Enter the OTP sent to your email"}
+            {step === "credentials"
+              ? "Step 1 — Verify your identity"
+              : `Step 2 — Enter the OTP sent to your ${channel === "mobile" ? "mobile" : "email"}`}
           </p>
 
           {error && (
@@ -122,22 +138,28 @@ export default function LoginPage() {
             </div>
           )}
 
-          {/* ── Step 1: email + password ── */}
+          {/* ── Step 1: email or mobile + password ── */}
           {step === "credentials" && (
             <form onSubmit={handleCredentials} className="space-y-4">
               <div>
-                <label className="block text-base font-semibold text-gray-700 mb-2">Email Address</label>
+                <label className="block text-base font-semibold text-gray-700 mb-2">Email or Mobile Number</label>
                 <div className="relative">
-                  <Mail size={17} className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400" />
+                  <UserRound size={17} className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400" />
                   <input
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
-                    type="email"
-                    placeholder="your@avfu.ac.in"
+                    value={identifier}
+                    onChange={(e) => setIdentifier(e.target.value)}
+                    type="text"
+                    inputMode="email"
+                    autoComplete="username"
+                    placeholder="your@avfu.ac.in or 98XXXXXXXX"
+                    aria-describedby="identifier-hint"
                     required
                     className="w-full border border-gray-300 rounded-xl pl-11 pr-4 py-3 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]"
                   />
                 </div>
+                <p id="identifier-hint" className="text-sm text-gray-500 mt-1.5">
+                  The OTP will be sent here — by email for an email address, by SMS for a mobile number.
+                </p>
               </div>
 
               <div>
@@ -182,7 +204,8 @@ export default function LoginPage() {
           {step === "otp" && (
             <form onSubmit={handleOtp} className="space-y-4">
               <div className="bg-blue-50 border border-blue-200 rounded-xl px-4 py-3 text-sm text-blue-800">
-                An OTP has been sent to <span className="font-semibold">{email.trim()}</span>. Enter it below to sign in.
+                An OTP has been sent to your {channel === "mobile" ? "mobile" : "email"}{" "}
+                <span className="font-semibold">{destination}</span>. Enter it below to sign in.
               </div>
 
               <div>

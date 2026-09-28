@@ -51,6 +51,11 @@ class Settings(BaseSettings):
     SMTP_PASSWORD: str = ""
     SMTP_FROM: str = "AVFU eFMS <noreply@avfu.ac.in>"
 
+    # SMS — Fast2SMS OTP API (login Mobile OTP). Set both in .env; never
+    # commit them. Empty = SMS not configured (dev: OTP returned in response).
+    FAST2SMS_API_KEY: str = ""
+    FAST2SMS_OTP_TEMPLATE_ID: str = ""
+
     # Google OAuth
     GOOGLE_CLIENT_ID: str = ""
     GOOGLE_CLIENT_SECRET: str = ""
