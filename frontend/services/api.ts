@@ -27,6 +27,21 @@ api.interceptors.request.use((config) => {
   return config;
 });
 
+// Public auth endpoints answer 401 as a normal result ("wrong password",
+// "wrong OTP") — never a sign that a session expired. Those must reach the
+// page as-is; treating them as expiry used to hard-reload /login and wipe
+// the error message before the user could read it.
+const NO_REFRESH_PATHS = ["/auth/login/", "/auth/refresh", "/auth/forgot-password"];
+
+function hasRefreshToken(): boolean {
+  try {
+    const { state } = JSON.parse(localStorage.getItem("efms-auth") ?? "{}");
+    return !!state?.refreshToken;
+  } catch {
+    return false;
+  }
+}
+
 // 401 handler with refresh token rotation
 let refreshing = false;
 let queue: Array<{ resolve: (token: string) => void; reject: (e: unknown) => void }> = [];
@@ -35,7 +50,11 @@ api.interceptors.response.use(
   (r) => r,
   async (error) => {
     const orig = error.config;
-    if (error.response?.status === 401 && !orig._retry) {
+    const url: string = orig?.url ?? "";
+    const isPublicAuthCall = NO_REFRESH_PATHS.some((p) => url.includes(p));
+    // Not signed in (no refresh token): nothing to refresh, and no reason
+    // to bounce the visitor to /login — let the caller show the error.
+    if (error.response?.status === 401 && orig && !orig._retry && !isPublicAuthCall && hasRefreshToken()) {
       orig._retry = true;
       if (refreshing) {
         return new Promise((resolve, reject) => {
@@ -66,7 +85,7 @@ api.interceptors.response.use(
         queue.forEach((p) => p.reject(e));
         queue = [];
         localStorage.removeItem("efms-auth");
-        window.location.href = "/login";
+        if (!window.location.pathname.startsWith("/login")) window.location.href = "/login";
         return Promise.reject(e);
       } finally {
         refreshing = false;

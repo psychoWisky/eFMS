@@ -6,7 +6,7 @@ from email.mime.text import MIMEText
 from datetime import datetime, timezone, timedelta, date
 from typing import Optional, List, Literal
 from uuid import UUID
-from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status, UploadFile, File, Query
 from fastapi.responses import Response
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, update, or_
@@ -212,7 +212,7 @@ class LoginStep2Request(BaseModel):
     otp: str
 
 
-_BAD_CREDENTIALS = "Incorrect email/mobile number or password."
+_BAD_CREDENTIALS = "The email/mobile number or password you entered is incorrect. Please check and try again."
 
 
 def _login_channel(body, identifier: str) -> str:
@@ -277,7 +277,7 @@ async def login_step1(payload: LoginStep1Request, db: AsyncSession = Depends(get
         )
     user = matches[0]
     if not user.is_active:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Your account has been deactivated.")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Your account has been deactivated. Please contact the administrator.")
 
     channel = _login_channel(payload, identifier)
     out: dict = {"channel": channel}
@@ -327,7 +327,7 @@ async def login_step2(payload: LoginStep2Request, db: AsyncSession = Depends(get
             user = cand
             break
     if user is None:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired OTP. Please request a new one.")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="The OTP is incorrect or has expired. Check the code, or use Resend OTP to get a new one.")
     if not user.is_active:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Account not found or deactivated.")
 
@@ -1006,14 +1006,34 @@ async def _create_user_record(db: AsyncSession, body: CreateUserRequest) -> User
     return user
 
 
+def _send_welcome_email(to: str, full_name: str, temp_password: str) -> None:
+    """New-account email: login email + temporary password + eFMS link.
+    Sent after the response (BackgroundTasks); a no-op when SMTP isn't
+    configured, and a delivery failure never affects account creation."""
+    body = (
+        f"Dear {full_name},\n\n"
+        f"Your account on the AVFU e-File Management System (eFMS) has been created.\n\n"
+        f"Login email: {to}\n"
+        f"Temporary password: {temp_password}\n\n"
+        f"Sign in at: {settings.EFMS_PUBLIC_URL}\n\n"
+        f"You will be asked to set a new password after your first sign-in. "
+        f"Please do not share this password with anyone.\n\n"
+        f"Regards,\n"
+        f"AVFU eFMS"
+    )
+    otp_send_email(to, "Your AVFU eFMS account details", body)
+
+
 @router.post("/admin/users", status_code=201, response_model=AdminUserOut)
 async def create_user(
     body: CreateUserRequest,
+    background: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
     _: User = Depends(_super),
 ):
     user = await _create_user_record(db, body)
     await db.commit()
+    background.add_task(_send_welcome_email, user.email, user.full_name, body.temp_password)
     db.expunge_all()
     return AdminUserOut.from_user(await _load_user(db, user.id))
 
@@ -1167,6 +1187,7 @@ async def _resolve_bulk_org_ref(db: AsyncSession, model, value: str) -> Optional
 
 @router.post("/admin/users/bulk", response_model=BulkUserUploadResult)
 async def bulk_create_users(
+    background: BackgroundTasks,
     file: UploadFile = File(...),
     db: AsyncSession = Depends(get_db),
     _: User = Depends(_super_admin_only),
@@ -1247,6 +1268,7 @@ async def bulk_create_users(
             continue
 
         created_count += 1
+        background.add_task(_send_welcome_email, user.email, full_name, temp_password)
         results.append(BulkUserRowResult(
             row=idx, email=email, full_name=full_name, status="created",
             temp_password=temp_password, password_generated=password_generated,

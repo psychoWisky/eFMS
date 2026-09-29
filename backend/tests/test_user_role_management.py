@@ -133,7 +133,7 @@ async def test_super_admin_can_create_role(client, users, roles):
 
 
 @pytest.mark.asyncio
-async def test_super_admin_can_create_user_without_mobile_number(client, users):
+async def test_super_admin_can_create_user_without_mobile_number(client, users, db):
     super_admin = await users.make(SystemRole.SUPER_ADMIN)
     r = await client.post(
         "/auth/admin/users",
@@ -148,8 +148,12 @@ async def test_super_admin_can_create_user_without_mobile_number(client, users):
         },
         headers=auth_headers(super_admin),
     )
-    assert r.status_code == 201, r.text
-    assert r.json()["mobile"] is None
+    try:
+        assert r.status_code == 201, r.text
+        assert r.json()["mobile"] is None
+    finally:
+        # Fixed email — remove it or every later run fails with "already exists".
+        await _delete_user_by_email(db, "nomobile@example.com")
 
 
 @pytest.mark.asyncio

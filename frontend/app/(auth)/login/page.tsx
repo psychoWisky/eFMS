@@ -12,6 +12,35 @@ import { showSuccess } from "@/lib/alert";
 
 type Step = "credentials" | "otp";
 
+// Plain-language message for a failed sign-in call. The backend's own
+// message is used when it sent one (wrong password, wrong OTP, deactivated,
+// …); the rest — no connection, server error, malformed input — are mapped
+// here so the user never sees a raw error.
+function loginErrorMessage(err: unknown, fallback: string): string {
+  const e = err as { response?: { status?: number; data?: { detail?: unknown } }; code?: string };
+  if (!e?.response) return "Can't reach the server right now. Please check your internet connection and try again.";
+  const { status, data } = e.response;
+  if (typeof data?.detail === "string" && data.detail) return data.detail;
+  if (status === 422) return "Please enter a valid email address or mobile number, and your password.";
+  if (status && status >= 500) return "Something went wrong on our side. Please try again in a moment.";
+  return fallback;
+}
+
+// Anything without "@" is treated as a mobile number (the backend decides the
+// same way); catch obviously invalid ones before calling the server.
+function mobileInputError(identifier: string): string | null {
+  const v = identifier.trim();
+  if (!v || v.includes("@")) return null;
+  const digits = v.replace(/\D/g, "");
+  const ten = digits.length === 12 && digits.startsWith("91") ? digits.slice(2)
+    : digits.length === 11 && digits.startsWith("0") ? digits.slice(1)
+    : digits;
+  if (/[^0-9+\s-]/.test(v) || ten.length !== 10) {
+    return "Enter a valid 10-digit mobile number, or your email address.";
+  }
+  return null;
+}
+
 export default function LoginPage() {
   const router = useRouter();
   const { setAuth } = useAuthStore();
@@ -43,8 +72,7 @@ export default function LoginPage() {
       toast.success(`${res.data?.message ?? "OTP sent."}${devOtp ? ` [DEV: ${devOtp}]` : ""}`);
     },
     onError: (err: unknown) => {
-      const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
-      setError(msg ?? "Sign in failed. Please check your credentials.");
+      setError(loginErrorMessage(err, "Sign in failed. Please check your details and try again."));
     },
   });
 
@@ -63,8 +91,7 @@ export default function LoginPage() {
       router.replace(isAdmin ? "/admin" : "/dashboard");
     },
     onError: (err: unknown) => {
-      const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
-      setError(msg ?? "OTP verification failed. Please try again.");
+      setError(loginErrorMessage(err, "The OTP could not be verified. Please try again."));
     },
   });
 
@@ -79,14 +106,15 @@ export default function LoginPage() {
       toast.success(`${res.data?.message ?? "OTP resent."}${devOtp ? ` [DEV: ${devOtp}]` : ""}`);
     },
     onError: (err: unknown) => {
-      const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
-      toast.error(msg ?? "Failed to resend OTP. Please go back and try again.");
+      toast.error(loginErrorMessage(err, "Couldn't resend the OTP. Please go back and try again."));
     },
   });
 
 
   function handleCredentials(e: React.FormEvent) {
     e.preventDefault();
+    const bad = mobileInputError(identifier);
+    if (bad) { setError(bad); return; }
     setError("");
     step1.mutate();
   }

@@ -66,6 +66,8 @@ class Settings(BaseSettings):
 
     # Frontend
     AMS_FRONTEND_URL: str = "http://localhost:3000"
+    # Public sign-in link put in the new-user welcome email.
+    EFMS_PUBLIC_URL: str = "http://efms.avfu.ac.in/"
     EFMS_FRONTEND_URL: str = "http://localhost:3001"
 
 
