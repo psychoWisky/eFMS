@@ -680,6 +680,10 @@ async def track_file(file_id: UUID, db: AsyncSession = Depends(get_db), user: Us
             "to_user_name":   to_info.full_name   if to_info   else None,
             "from_user_info": from_info.model_dump() if from_info else None,
             "to_user_info":   to_info.model_dump()   if to_info   else None,
+            "from_role":          e.from_role,
+            "from_role_formerly": e.from_role_formerly,
+            "to_role":            e.to_role,
+            "to_role_formerly":   e.to_role_formerly,
             "remarks":        visible_remark,
             # A remark existed on this movement but was redacted from
             # "remarks" above (as opposed to no remark ever having been

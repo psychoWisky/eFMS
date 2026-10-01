@@ -77,6 +77,12 @@ class RouteEntryOut(BaseModel):
     to_user_name: Optional[str] = None
     from_user_info: Optional[PersonInfo] = None
     to_user_info: Optional[PersonInfo] = None
+    # The role each person acted in at this hop; *_formerly is set when that
+    # role has been renamed since ("New Name (formerly Old Name)").
+    from_role: Optional[str] = None
+    from_role_formerly: Optional[str] = None
+    to_role: Optional[str] = None
+    to_role_formerly: Optional[str] = None
     action: RouteAction
     remarks: Optional[str] = None
     is_current: bool

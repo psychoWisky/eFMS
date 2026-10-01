@@ -180,6 +180,11 @@ class RouteEntry(Base, UUIDMixin, TimestampMixin):
     # NULL = "any role". to_role is what a recipient's Docket filters on.
     from_role     = Column(String(50), nullable=True)
     to_role       = Column(String(50), nullable=True)
+    # The role's name when this hop was recorded, set only on hops that
+    # predate a rename of that role (from_role/to_role then hold the new
+    # name). Shown as "New Name (formerly Old Name)".
+    from_role_formerly = Column(String(50), nullable=True)
+    to_role_formerly   = Column(String(50), nullable=True)
 
     file          = relationship("EfmsFile", back_populates="route_entries")
     from_user     = relationship("User", foreign_keys=[from_user_id])

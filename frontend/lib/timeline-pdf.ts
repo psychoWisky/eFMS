@@ -15,6 +15,9 @@ export interface TimelinePdfEvent {
   person?: PersonInfo | null;
   fromPerson?: PersonInfo | null;
   toPerson?: PersonInfo | null;
+  // "Role Name" or "New Name (formerly Old Name)" for fromPerson / toPerson.
+  fromRole?: string | null;
+  toRole?: string | null;
   hasContent: boolean;
   content: string | null;
   created_at: string;
@@ -35,9 +38,9 @@ export interface TimelinePdfMyNote {
   content: string;
 }
 
-function personLine(p?: PersonInfo | null, fallback = "System"): string {
+function personLine(p?: PersonInfo | null, fallback = "System", role?: string | null): string {
   if (!p) return `<span class="tl-muted">${escapeHtml(fallback)}</span>`;
-  const meta = [p.designation, p.department_name].filter(Boolean).join(" · ");
+  const meta = [p.designation, p.department_name, role].filter(Boolean).join(" · ");
   const name = p.is_active === false ? `${p.full_name} (Inactive)` : p.full_name;
   return (
     `<span class="tl-name">${escapeHtml(name)}</span>` +
@@ -50,8 +53,8 @@ function eventBlock(ev: TimelinePdfEvent): string {
   // A blank / never-written note produces neither a box nor a notice.
   const people =
     (ev.type === "route" || (ev.type === "created" && ev.toPerson))
-      ? `${personLine(ev.fromPerson)}` +
-        (ev.toPerson ? `<span class="tl-arrow"> &rarr; </span>${personLine(ev.toPerson)}` : "")
+      ? `${personLine(ev.fromPerson, "System", ev.fromRole)}` +
+        (ev.toPerson ? `<span class="tl-arrow"> &rarr; </span>${personLine(ev.toPerson, "System", ev.toRole)}` : "")
       : personLine(ev.person);
 
   let body = "";

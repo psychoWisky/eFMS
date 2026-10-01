@@ -3,7 +3,7 @@ import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/services/api";
 import { toast } from "sonner";
-import { confirmAction, showSuccess } from "@/lib/alert";
+import { confirmAction, showSuccess, showBlocked, apiErrorDetail } from "@/lib/alert";
 import {
   Plus, Trash2, Eye, EyeOff, Tag, Users, Building2, Layers,
   Loader2, AlertTriangle, PenLine, ShieldX, ShieldCheck, FolderKanban,
@@ -76,8 +76,11 @@ export function AdminPanel() {
       (Array.isArray(keys) ? keys : [keys]).forEach((k) => qc.invalidateQueries({ queryKey: [k] }));
       showSuccess("Done");
     } catch (err: unknown) {
-      const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
-      toast.error(msg ?? "Action failed");
+      const msg = apiErrorDetail(err);
+      // A refused delete explains itself over several lines — show it as a
+      // dialog the user can read, not a toast that disappears.
+      if (msg && msg.includes("\n")) await showBlocked(msg);
+      else toast.error(msg ?? "Action failed");
     }
   }
 
@@ -128,8 +131,8 @@ export function AdminPanel() {
             <p className="text-sm font-semibold text-gray-700 mb-3">Add Establishment</p>
             <div className="flex gap-3 items-end">
               <div className="flex-1"><label className={LABEL}>Name *</label><input value={newEst.name} onChange={(e) => setNewEst((s) => ({ ...s, name: e.target.value }))} placeholder="e.g. Main Campus" className={INPUT} /></div>
-              <div className="w-36"><label className={LABEL}>Code</label><input value={newEst.code} onChange={(e) => setNewEst((s) => ({ ...s, code: e.target.value }))} placeholder="e.g. MAIN" className={INPUT} /></div>
-              <button onClick={() => act(["admin-establishments-all","establishments"], async () => { await api.post("/admin/establishments", newEst); setNewEst({ name: "", code: "" }); })} disabled={!newEst.name}
+              <div className="w-36"><label className={LABEL}>Code *</label><input value={newEst.code} onChange={(e) => setNewEst((s) => ({ ...s, code: e.target.value }))} placeholder="e.g. MAIN" className={INPUT} /></div>
+              <button onClick={() => act(["admin-establishments-all","establishments"], async () => { await api.post("/admin/establishments", newEst); setNewEst({ name: "", code: "" }); })} disabled={!newEst.name.trim() || !newEst.code.trim()}
                 className="flex items-center gap-1 px-4 py-2.5 bg-[#0D6E6E] text-white rounded-lg text-sm font-semibold hover:bg-[#178F8F] disabled:opacity-50 whitespace-nowrap">
                 <Plus size={15} /> Add
               </button>
@@ -146,7 +149,7 @@ export function AdminPanel() {
             <p className="text-sm font-semibold text-gray-700 mb-3">Add Department</p>
             <div className="grid grid-cols-2 gap-3 mb-3">
               <div><label className={LABEL}>Name *</label><input value={newDept.name} onChange={(e) => setNewDept((s) => ({ ...s, name: e.target.value }))} placeholder="e.g. Agronomy" className={INPUT} /></div>
-              <div><label className={LABEL}>Code (4 letters, used in file ref)</label><input value={newDept.code} onChange={(e) => setNewDept((s) => ({ ...s, code: e.target.value.toUpperCase().slice(0,4) }))} placeholder="e.g. AGRO" className={INPUT} /></div>
+              <div><label className={LABEL}>Code * (4 letters, used in file ref)</label><input value={newDept.code} onChange={(e) => setNewDept((s) => ({ ...s, code: e.target.value.toUpperCase().slice(0,4) }))} placeholder="e.g. AGRO" className={INPUT} /></div>
             </div>
             <div className="flex gap-3 items-end">
               <div className="flex-1"><label className={LABEL}>Establishment *</label>
@@ -159,7 +162,7 @@ export function AdminPanel() {
                   searchPlaceholder="Search establishments…"
                 />
               </div>
-              <button onClick={() => act(["admin-departments-all","departments"], async () => { await api.post("/admin/departments", newDept); setNewDept({ name: "", code: "", establishment_id: "" }); })} disabled={!newDept.name}
+              <button onClick={() => act(["admin-departments-all","departments"], async () => { await api.post("/admin/departments", newDept); setNewDept({ name: "", code: "", establishment_id: "" }); })} disabled={!newDept.name.trim() || !newDept.code.trim()}
                 className="flex items-center gap-1 px-4 py-2.5 bg-[#0D6E6E] text-white rounded-lg text-sm font-semibold hover:bg-[#178F8F] disabled:opacity-50 whitespace-nowrap">
                 <Plus size={15} /> Add
               </button>

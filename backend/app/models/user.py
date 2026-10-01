@@ -1,5 +1,5 @@
 from sqlalchemy import Column, String, Boolean, Enum, ForeignKey, Date, DateTime, UniqueConstraint, CheckConstraint
-from sqlalchemy.sql import func
+from sqlalchemy.sql import func, true as sa_true
 from sqlalchemy.orm import relationship
 from sqlalchemy.dialects.postgresql import UUID
 import enum
@@ -58,6 +58,20 @@ class Role(Base, UUIDMixin, TimestampMixin):
     name = Column(String(50), unique=True, nullable=False, index=True)
     description = Column(String(255), nullable=True)
     is_system = Column(Boolean, default=False, nullable=False)
+
+
+class RoleRename(Base, UUIDMixin):
+    """One row per rename of a custom role — drives the "New Name (formerly
+    Old Name)" label on the Roles screen. Removed with the role."""
+    __tablename__ = "role_renames"
+
+    role_id = Column(UUID(as_uuid=True), ForeignKey("roles.id", ondelete="CASCADE"), nullable=False, index=True)
+    old_name = Column(String(50), nullable=False)
+    new_name = Column(String(50), nullable=False)
+    renamed_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    # The Super Admin's choice at rename time: True = show the old name as
+    # "formerly"; False = show only the new name.
+    show_formerly = Column(Boolean, server_default=sa_true(), nullable=False, default=True)
 
 
 class User(Base, UUIDMixin, TimestampMixin):

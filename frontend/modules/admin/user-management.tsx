@@ -7,11 +7,11 @@ import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/services/api";
 import { toast } from "sonner";
-import { showSuccess } from "@/lib/alert";
+import { showSuccess, confirmAction, escapeHtml, showBlocked, apiErrorDetail } from "@/lib/alert";
 import { useActiveRole } from "@/stores/auth.store";
 import {
   Plus, Loader2, X, Copy, RefreshCw, Eye, EyeOff, Pencil, KeyRound,
-  Power, PowerOff, ShieldAlert, Upload, Download, CheckCircle2, XCircle, ClipboardCopy, ArrowRightLeft,
+  Power, PowerOff, ShieldAlert, Upload, Download, CheckCircle2, XCircle, ClipboardCopy, ArrowRightLeft, Trash2,
 } from "lucide-react";
 import { SearchableSelect } from "@/components/shared/searchable-select";
 import { paginate, TablePagination } from "@/components/shared/table-pagination";
@@ -1028,6 +1028,32 @@ export function UserManagementSection() {
     },
   });
 
+  // Permanent delete — allowed by the server only for a user who has done
+  // nothing in eFMS; otherwise it answers with the exact reasons.
+  const deleteUser = useMutation({
+    mutationFn: (id: string) => api.delete(`/auth/admin/users/${id}`),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["user-management-users"] });
+      showSuccess("User deleted.");
+    },
+    onError: async (err: unknown) => {
+      const msg = apiErrorDetail(err);
+      if (msg && msg.includes("\n")) await showBlocked(msg);
+      else toast.error(msg ?? "Could not delete user.");
+    },
+  });
+
+  async function handleDeleteUser(u: AdminUser) {
+    const confirmed = await confirmAction({
+      title: "Delete this user?",
+      html: `<strong>${escapeHtml(u.full_name)}</strong> (${escapeHtml(u.email)}) will be permanently deleted. This cannot be undone.<br><br>` +
+        `This only works for a user who has not done anything in eFMS. If they have, you will be told exactly why, and can deactivate them instead.`,
+      confirmText: "Delete",
+      danger: true,
+    });
+    if (confirmed) deleteUser.mutate(u.id);
+  }
+
   const resetPassword = useMutation({
     mutationFn: (id: string) => api.post<{ temp_password: string }>(`/auth/admin/users/${id}/reset-password`),
     onSuccess: (response, id) => {
@@ -1165,6 +1191,16 @@ export function UserManagementSection() {
                           className={`p-2 rounded-lg hover:bg-gray-100 ${u.is_active ? "text-gray-400 hover:text-red-500" : "text-gray-400 hover:text-green-600"}`}
                         >
                           {u.is_active ? <PowerOff size={15} /> : <Power size={15} />}
+                        </button>
+                      )}
+                      {isSuperAdmin && (
+                        <button
+                          onClick={() => handleDeleteUser(u)}
+                          disabled={deleteUser.isPending}
+                          title="Delete (only if this user has not done anything yet)"
+                          className="p-2 rounded-lg text-gray-400 hover:bg-red-50 hover:text-red-500 disabled:opacity-50"
+                        >
+                          <Trash2 size={15} />
                         </button>
                       )}
                     </div>

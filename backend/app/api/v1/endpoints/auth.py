@@ -9,7 +9,7 @@ from uuid import UUID
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status, UploadFile, File, Query
 from fastapi.responses import Response
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, update, or_
+from sqlalchemy import select, func, update, or_, delete as sa_delete
 from sqlalchemy.orm import selectinload
 from sqlalchemy.exc import IntegrityError
 from pydantic import BaseModel, EmailStr, ValidationError
@@ -24,11 +24,15 @@ from app.core.config import settings
 from app.core.dependencies import get_current_user, require_roles
 import re
 
-from app.models.user import User, UserRole, RefreshToken, SystemRole, DeactivationReasonType, Role
+from app.models.user import User, UserRole, RefreshToken, SystemRole, DeactivationReasonType, Role, RoleRename
+from app.models.efms import EfmsFile, RouteEntry
 from app.models.efms_extra import OTP, Docket
 from app.models.organization import Establishment, Department
 from app.schemas.auth import LoginRequest, TokenResponse, RefreshRequest, UserBrief, HeldRoleBrief
 from app.utils.workspace import role_context
+from app.utils.integrity import (
+    blocked, user_activity, role_blockers, seats_of_user, seat_of, assert_new_seats_free,
+)
 from app.utils.sms import normalize_indian_mobile, mask_mobile, sms_configured, send_otp_sms, SmsSendError
 # Forgot Password reuses the SHARED OTP/email helpers (used elsewhere for
 # e-signature OTP), not this file's own private _create_otp/_verify_otp/
@@ -1003,6 +1007,9 @@ async def _create_user_record(db: AsyncSession, body: CreateUserRequest) -> User
     db.add(user)
     await db.flush()
     db.add(UserRole(user_id=user.id, role=role))
+    await db.flush()
+    # One holder per (role, establishment, department) seat.
+    await assert_new_seats_free(db, user, set())
     return user
 
 
@@ -1314,6 +1321,7 @@ async def edit_user(
 ):
     user = await _load_user(db, uid)
     _assert_not_project_profile(user)
+    seats_before = await seats_of_user(db, user)
 
     if body.email is not None:
         email = body.email.lower().strip()
@@ -1385,9 +1393,64 @@ async def edit_user(
             )
         await _set_single_role(db, user, role)
 
+    # Role changes AND a changed establishment/department can move the user
+    # into a seat someone else already holds — refuse before committing.
+    await db.flush()
+    await assert_new_seats_free(db, user, seats_before)
+
     await db.commit()
     db.expunge_all()
     return AdminUserOut.from_user(await _load_user(db, uid))
+
+
+@router.delete("/admin/users/{uid}", status_code=204)
+async def delete_user(
+    uid: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(_super),
+):
+    """Permanently delete a user — allowed only while the user has done
+    nothing in eFMS. Any recorded activity (files created/held, routing,
+    notes, attachments, signatures, projects, …) makes deletion impossible,
+    and the response lists exactly what; such users can still be
+    deactivated, which keeps their history intact. Their own sessions, role
+    rows, favourites and notifications go with them."""
+    user = await _load_user(db, uid)
+    _assert_not_project_profile(user)
+    who = f"{user.full_name} ({user.email})"
+    if user.id == current_user.id:
+        raise HTTPException(status.HTTP_409_CONFLICT, "You cannot delete the account you are signed in with.")
+    if (
+        user.is_active
+        and any(ur.role == SystemRole.SUPER_ADMIN for ur in user.roles)
+        and await _count_other_active_super_admins(db, uid) == 0
+    ):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"Cannot delete {who} — they are the only active Super Admin. Assign Super Admin to another user first.",
+        )
+
+    activity = await user_activity(db, uid)
+    if activity:
+        raise blocked(
+            f"Cannot delete {who} — this user has already worked in eFMS:",
+            [a[0].upper() + a[1:] for a in activity],
+            "A user with recorded activity can only be deactivated, so that the history stays intact.",
+        )
+
+    email = user.email
+    try:
+        # DB-level cascades remove the user's role rows, sessions,
+        # notifications and favourites together with the user.
+        await db.execute(sa_delete(OTP).where(OTP.target == email))
+        await db.execute(sa_delete(User).where(User.id == uid))
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"Cannot delete {who} — other records still refer to this user. Deactivate the account instead.",
+        )
 
 
 class UserStatusRequest(BaseModel):
@@ -1599,17 +1662,29 @@ async def transfer_role(
 
     # Add the role to target if they don't already hold it in this context — never replaces
     # or removes any role/PI-profile/file target already has.
+    target_seats_before = await seats_of_user(db, target)
+    # A role row without a context of its own means "the holder's own
+    # establishment/department". When that makes it a real seat, the target
+    # must receive THAT seat — so stamp the leaver's effective context on the
+    # new row; a plain copy would silently turn into the target's own context.
+    carries_seat = seat_of(leaver, leaver_role) is not None
+    seat_estb, seat_dept = (
+        role_context(leaver, leaver_role) if carries_seat
+        else (leaver_role.establishment_id, leaver_role.department_id)
+    )
     target_role = next(
         (ur for ur in target.roles
          if ur.role == body.role
-         and ur.department_id == leaver_role.department_id
-         and ur.establishment_id == leaver_role.establishment_id),
+         and (
+             role_context(target, ur) == (seat_estb, seat_dept) if carries_seat
+             else (ur.department_id == seat_dept and ur.establishment_id == seat_estb)
+         )),
         None,
     )
     if target_role is None:
         target_role = UserRole(
             user_id=target.id, role=body.role,
-            department_id=leaver_role.department_id, establishment_id=leaver_role.establishment_id,
+            department_id=seat_dept, establishment_id=seat_estb,
         )
         db.add(target_role)
 
@@ -1627,6 +1702,11 @@ async def transfer_role(
 
     # Remove the role from the leaver — it has now fully moved.
     await db.delete(leaver_role)
+    await db.flush()
+    # The seat now belongs to the target; refuse if it would collide with
+    # someone else's (e.g. the role row had no context of its own and the
+    # target's own establishment/department already has a holder).
+    await assert_new_seats_free(db, target, target_seats_before)
     remaining = [ur for ur in leaver.roles if ur.id != leaver_role.id]
     if not remaining:
         # Last role gone: hand over any released files still attributed to
@@ -1666,14 +1746,13 @@ async def transfer_role(
 # (creating an account) and is unchanged.
 
 
-# User deletion is intentionally NOT implemented anywhere in this API.
-# Deactivation (PATCH /admin/users/{uid}/status) is the only supported way
-# to disable a user — this preserves historical file/tracking/signature
-# references (which have no ON DELETE clause pointing at users.id) and
-# avoids ever needing to reason about "was this user hard-deletable."
-# There used to be a DELETE /admin/users/{uid} endpoint here; it has been
-# removed rather than merely hidden in the frontend, per the product
-# decision that deletion is not a supported user-lifecycle action.
+# User deletion (DELETE /admin/users/{uid}, above) is allowed ONLY for a
+# user who has done nothing in eFMS — see app/utils/integrity.py. Any
+# recorded activity (files, routing, notes, attachments, signatures,
+# projects, …) refuses the delete with the exact reasons, because the
+# historical references have no ON DELETE clause pointing at users.id and
+# must never be orphaned. Deactivation (PATCH /admin/users/{uid}/status)
+# remains the way to retire a user who has history.
 
 
 # ── Admin: Role Management ────────────────────────────────────────────────────
@@ -1697,6 +1776,9 @@ class RoleOut(BaseModel):
     description: Optional[str] = None
     is_system: bool
     user_count: int
+    # Earlier names, oldest first — the Roles screen shows
+    # "New Name (formerly Old Name)". Empty for a role never renamed.
+    former_names: list[str] = []
     model_config = {"from_attributes": True}
 
 
@@ -1708,6 +1790,10 @@ class RoleCreateRequest(BaseModel):
 class RoleUpdateRequest(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
+    # Only meaningful when `name` actually changes. True: show the old name
+    # as "New Name (formerly Old Name)" on the Roles list and file history.
+    # False: show only the new name (files still follow the rename).
+    show_formerly: bool = True
 
 
 async def _role_user_count(db: AsyncSession, role_name: str) -> int:
@@ -1769,8 +1855,16 @@ async def list_roles(db: AsyncSession = Depends(get_db), _: User = Depends(_supe
             .group_by(UserRole.role)
         )
         counts = dict(count_result.all())
+    former: dict[UUID, list[str]] = {}
+    for rr in (await db.execute(
+        select(RoleRename).where(RoleRename.show_formerly == True).order_by(RoleRename.renamed_at)
+    )).scalars().all():
+        former.setdefault(rr.role_id, []).append(rr.old_name)
     return [
-        RoleOut(id=r.id, name=r.name, description=r.description, is_system=r.is_system, user_count=counts.get(r.name, 0))
+        RoleOut(
+            id=r.id, name=r.name, description=r.description, is_system=r.is_system,
+            user_count=counts.get(r.name, 0), former_names=former.get(r.id, []),
+        )
         for r in roles
     ]
 
@@ -1812,8 +1906,42 @@ async def update_role(role_id: UUID, body: RoleUpdateRequest, db: AsyncSession =
             # pointing at the same role, so the rename is propagated to
             # every user/user_roles row currently holding the old name —
             # otherwise those users would silently lose their role.
-            await db.execute(update(User).where(User.active_role == role.name).values(active_role=new_name))
-            await db.execute(update(UserRole).where(UserRole.role == role.name).values(role=new_name))
+            old_name = role.name
+            await db.execute(update(User).where(User.active_role == old_name).values(active_role=new_name))
+            await db.execute(update(UserRole).where(UserRole.role == old_name).values(role=new_name))
+            # Files carry the role name as their workspace key: Docket / My
+            # Files show a file only to the role whose name it is stamped
+            # with. Left on the old name they would match nobody and vanish,
+            # so they follow the rename. (updated_at is kept as is — a
+            # rename must not reorder anyone's file lists.)
+            for col in (EfmsFile.creator_role, EfmsFile.current_holder_role, EfmsFile.recipient_role):
+                await db.execute(
+                    update(EfmsFile).where(col == old_name)
+                    .values({col.key: new_name, "updated_at": EfmsFile.updated_at})
+                )
+            # Routing history keeps what happened, now under the new name.
+            # If the Super Admin chose to show the old name, each hop also
+            # remembers the name the role had at the time ("formerly");
+            # otherwise only the new name is shown, and any earlier
+            # "formerly" for this role is cleared too.
+            for col, formerly in (
+                (RouteEntry.from_role, RouteEntry.from_role_formerly),
+                (RouteEntry.to_role, RouteEntry.to_role_formerly),
+            ):
+                await db.execute(
+                    update(RouteEntry).where(col == old_name).values({
+                        col.key: new_name,
+                        formerly.key: func.coalesce(formerly, old_name) if body.show_formerly else None,
+                        "updated_at": RouteEntry.updated_at,
+                    })
+                )
+            if not body.show_formerly:
+                await db.execute(
+                    update(RoleRename).where(RoleRename.role_id == role.id).values(show_formerly=False)
+                )
+            db.add(RoleRename(
+                role_id=role.id, old_name=old_name, new_name=new_name, show_formerly=body.show_formerly,
+            ))
             role.name = new_name
 
     if body.description is not None:
@@ -1825,7 +1953,17 @@ async def update_role(role_id: UUID, body: RoleUpdateRequest, db: AsyncSession =
     await db.commit()
     await db.refresh(role)
     user_count = await _role_user_count(db, role.name)
-    return RoleOut(id=role.id, name=role.name, description=role.description, is_system=role.is_system, user_count=user_count)
+    former_names = [
+        rr.old_name for rr in (await db.execute(
+            select(RoleRename)
+            .where(RoleRename.role_id == role.id, RoleRename.show_formerly == True)
+            .order_by(RoleRename.renamed_at)
+        )).scalars().all()
+    ]
+    return RoleOut(
+        id=role.id, name=role.name, description=role.description, is_system=role.is_system,
+        user_count=user_count, former_names=former_names,
+    )
 
 
 @router.delete("/admin/roles/{role_id}", status_code=204)
@@ -1834,13 +1972,12 @@ async def delete_role(role_id: UUID, db: AsyncSession = Depends(get_db), _: User
     if role.is_system:
         raise HTTPException(400, "The Super Admin role cannot be deleted.")
 
-    count = await _role_user_count(db, role.name)
-    if count > 0:
-        raise HTTPException(
-            409,
-            f"Cannot delete this role because {count} user{'s' if count != 1 else ''} "
-            f"{'are' if count != 1 else 'is'} currently assigned to it. "
-            "Reassign those users before deleting the role.",
+    reasons = await role_blockers(db, role.name)
+    if reasons:
+        raise blocked(
+            f"Cannot delete the role “{_pretty_role_name(role.name)}”:",
+            reasons,
+            "Reassign the people above first. A role that has been used for file work is permanent.",
         )
 
     await db.delete(role)

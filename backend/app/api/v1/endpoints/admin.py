@@ -10,6 +10,7 @@ from sqlalchemy.orm import selectinload
 from pydantic import BaseModel
 
 from app.db.base import get_db
+from app.utils.integrity import blocked, department_blockers, establishment_blockers
 from app.core.dependencies import require_roles, get_current_user
 from app.models.user import User, UserRole, SystemRole, FavoriteRecipient
 from app.models.admin import FileCategory, FilePriority, FileRecipient, Notification
@@ -423,7 +424,12 @@ async def list_all_establishments(db: AsyncSession = Depends(get_db), _=Depends(
 
 @router.post("/establishments", response_model=EstablishmentOut, status_code=201)
 async def create_establishment(body: EstablishmentIn, db: AsyncSession = Depends(get_db), _=Depends(_super)):
-    e = Establishment(**body.model_dump())
+    # The database column is NOT NULL — without this a blank code was a 500.
+    if not (body.name or "").strip():
+        raise HTTPException(400, "Enter a name for the establishment.")
+    if not (body.code or "").strip():
+        raise HTTPException(400, "Enter a code for the establishment (for example MAIN).")
+    e = Establishment(**{**body.model_dump(), "name": body.name.strip(), "code": body.code.strip()})
     db.add(e); await db.commit(); await db.refresh(e)
     return e
 
@@ -442,7 +448,7 @@ def _fk_violation_table(exc: IntegrityError) -> Optional[str]:
     when it's a table this codebase doesn't own (e.g. `courses` — this
     Postgres database is shared with a sibling application, so a table with
     no SQLAlchemy model here can still hold a `department_id`/
-    `establishment_id` FK and block a delete _org_ref_blockers can't see).
+    `establishment_id` FK and block a delete the explicit checks can't see).
     asyncpg's driver puts Postgres's own DETAIL text on the wrapped
     exception's __cause__; falls back to None if the shape ever changes."""
     detail = str(getattr(exc, "orig", None) or exc)
@@ -453,77 +459,17 @@ def _fk_violation_table(exc: IntegrityError) -> Optional[str]:
     return None
 
 
-async def _org_ref_blockers(db: AsyncSession, *, establishment_id: Optional[UUID] = None, department_id: Optional[UUID] = None) -> list[str]:
-    """Every table that can FK-reference an establishment/department, checked
-    explicitly instead of relying on a caught IntegrityError — a blind catch
-    can't tell you WHICH of these actually blocked the delete, and reports
-    "users linked" even when the real blocker is a role assignment, a file,
-    or a released docket that no user-list screen would ever surface.
-
-    User/UserRole checks are scoped to is_active=True AND origin_user_id IS
-    NULL: this system never hard-deletes a user, only deactivates them, so a
-    deactivated user's old department/role reference must not block a
-    delete an admin can't otherwise resolve (there is no user to reassign —
-    they're gone from every user-facing list). Project/PI profiles
-    (origin_user_id IS NOT NULL) are excluded for the same reason —
-    _create_project_profile snapshots the origin person's department/
-    establishment/roles onto a synthetic, separately-active `users` row
-    that no admin would ever find or reassign from the Users screen. Files
-    and dockets are permanent historical records and still block
-    regardless of the creator's current status."""
-    col_name = "establishment_id" if establishment_id is not None else "department_id"
-    value = establishment_id if establishment_id is not None else department_id
-    blockers: list[str] = []
-
-    user_count = (await db.execute(
-        select(func.count()).select_from(User).where(
-            getattr(User, col_name) == value, User.is_active == True, User.origin_user_id.is_(None),
-        )
-    )).scalar_one()
-    if user_count:
-        blockers.append(f"{user_count} user{'s' if user_count != 1 else ''} (primary {col_name.replace('_id', '')})")
-
-    role_count = (await db.execute(
-        select(func.count(func.distinct(UserRole.user_id)))
-        .select_from(UserRole)
-        .join(User, User.id == UserRole.user_id)
-        .where(
-            getattr(UserRole, col_name) == value, User.is_active == True, User.origin_user_id.is_(None),
-        )
-    )).scalar_one()
-    if role_count:
-        blockers.append(f"{role_count} role assignment{'s' if role_count != 1 else ''} (a user's secondary role uses this)")
-
-    if department_id is not None:
-        file_count = (await db.execute(
-            select(func.count()).select_from(EfmsFile).where(EfmsFile.department_id == department_id)
-        )).scalar_one()
-        if file_count:
-            blockers.append(f"{file_count} file{'s' if file_count != 1 else ''}")
-
-        docket_count = (await db.execute(
-            select(func.count()).select_from(Docket).where(Docket.department_id == department_id)
-        )).scalar_one()
-        if docket_count:
-            blockers.append(f"{docket_count} released docket entr{'ies' if docket_count != 1 else 'y'}")
-
-    if establishment_id is not None:
-        dept_count = (await db.execute(
-            select(func.count()).select_from(Department).where(Department.establishment_id == establishment_id)
-        )).scalar_one()
-        if dept_count:
-            blockers.append(f"{dept_count} department{'s' if dept_count != 1 else ''}")
-
-    return blockers
-
-
 @router.delete("/establishments/{eid}", status_code=204)
 async def delete_establishment(eid: UUID, db: AsyncSession = Depends(get_db), _=Depends(_super)):
     e = await db.get(Establishment, eid)
     if not e: raise HTTPException(404, "Not found")
-    blockers = await _org_ref_blockers(db, establishment_id=eid)
-    if blockers:
-        raise HTTPException(400, f"Cannot delete — still referenced by {', '.join(blockers)}. Reassign or remove those first, or toggle to hide instead.")
+    reasons = await establishment_blockers(db, eid)
+    if reasons:
+        raise blocked(
+            f"Cannot delete the establishment “{e.name}”:",
+            reasons,
+            "You can hide it instead (the eye icon) — that keeps everything intact.",
+        )
     try:
         await db.delete(e); await db.commit()
     except IntegrityError as exc:
@@ -549,7 +495,12 @@ async def list_all_departments(db: AsyncSession = Depends(get_db), _=Depends(_su
 
 @router.post("/departments", response_model=DeptOut, status_code=201)
 async def create_department(body: DeptIn, db: AsyncSession = Depends(get_db), _=Depends(_super)):
-    d = Department(**body.model_dump())
+    # The database column is NOT NULL — without this a blank code was a 500.
+    if not (body.name or "").strip():
+        raise HTTPException(400, "Enter a name for the department.")
+    if not (body.code or "").strip():
+        raise HTTPException(400, "Enter a code for the department (up to 4 letters, for example AGRO).")
+    d = Department(**{**body.model_dump(), "name": body.name.strip(), "code": body.code.strip()})
     db.add(d); await db.commit(); await db.refresh(d)
     return d
 
@@ -565,9 +516,13 @@ async def toggle_department(did: UUID, db: AsyncSession = Depends(get_db), _=Dep
 async def delete_department(did: UUID, db: AsyncSession = Depends(get_db), _=Depends(_super)):
     d = await db.get(Department, did)
     if not d: raise HTTPException(404, "Not found")
-    blockers = await _org_ref_blockers(db, department_id=did)
-    if blockers:
-        raise HTTPException(400, f"Cannot delete — still referenced by {', '.join(blockers)}. Reassign or remove those first, or toggle to hide instead.")
+    reasons = await department_blockers(db, did)
+    if reasons:
+        raise blocked(
+            f"Cannot delete the department “{d.name}”:",
+            reasons,
+            "You can hide it instead (the eye icon) — that keeps everything intact.",
+        )
     try:
         await db.delete(d); await db.commit()
     except IntegrityError as exc:

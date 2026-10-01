@@ -1,5 +1,6 @@
 """Tests for the User Management + Role Management feature:
-  1. User deletion removed (deactivation is the only lifecycle-end action).
+  1. User deletion: only for a user with no recorded activity (the guards
+     themselves are covered in test_delete_guards_and_seats.py).
   2. All/Active/Inactive status filter on GET /auth/admin/users.
   3. Role Management (list/create/edit/delete), SUPER_ADMIN-only, with
      assigned-role deletion protection and system-role protection.
@@ -33,23 +34,14 @@ async def _delete_user_by_id(db, user_id) -> None:
     await db.commit()
 
 
-# ── USER MANAGEMENT: deletion removed ────────────────────────────────────────
+# ── USER MANAGEMENT: deletion (idle users only) ──────────────────────────────
 
 @pytest.mark.asyncio
-async def test_delete_user_endpoint_no_longer_available(client, users):
-    super_admin = await users.make(SystemRole.SUPER_ADMIN)
+async def test_only_super_admin_can_delete_a_user(client, users, db):
+    normal = await users.make(SystemRole.EFMS_OFFICER)
     target = await users.make(SystemRole.EFMS_OFFICER)
-    r = await client.delete(f"/auth/admin/users/{target.id}", headers=auth_headers(super_admin))
-    assert r.status_code in (404, 405)
-
-
-@pytest.mark.asyncio
-async def test_super_admin_cannot_delete_a_user_even_via_direct_call(client, users, db):
-    """Confirms the removal is real (not just hidden) — the row still
-    exists afterward regardless of the response status."""
-    super_admin = await users.make(SystemRole.SUPER_ADMIN)
-    target = await users.make(SystemRole.EFMS_OFFICER)
-    await client.delete(f"/auth/admin/users/{target.id}", headers=auth_headers(super_admin))
+    r = await client.delete(f"/auth/admin/users/{target.id}", headers=auth_headers(normal))
+    assert r.status_code == 403
     result = await db.execute(select(User).where(User.id == target.id))
     assert result.scalar_one_or_none() is not None
 

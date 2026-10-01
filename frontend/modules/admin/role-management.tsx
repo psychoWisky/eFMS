@@ -3,11 +3,11 @@ import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/services/api";
 import { toast } from "sonner";
-import { confirmAction, showSuccess } from "@/lib/alert";
+import { confirmAction, showSuccess, showBlocked, apiErrorDetail, askRenameDisplay } from "@/lib/alert";
 import { useActiveRole } from "@/stores/auth.store";
 import { Plus, Pencil, Trash2, Loader2, X, ShieldCheck, Lock } from "lucide-react";
 
-interface RoleSummary { id: string; name: string; description: string | null; is_system: boolean; user_count: number; }
+interface RoleSummary { id: string; name: string; description: string | null; is_system: boolean; user_count: number; former_names?: string[]; }
 
 const INPUT = "w-full border border-gray-300 rounded-lg px-3 py-2.5 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]";
 const LABEL = "block text-sm font-semibold text-gray-600 mb-1";
@@ -23,11 +23,12 @@ function RoleFormModal({ role, onClose }: { role: RoleSummary | null; onClose: (
   const [description, setDescription] = useState(role?.description ?? "");
 
   const save = useMutation({
-    mutationFn: () => {
+    // showFormerly only matters when an edit changes the name.
+    mutationFn: (showFormerly: boolean = true) => {
       const trimmedName = name.trim();
       const trimmedDescription = (description || "").trim() || null;
       return isEdit
-        ? api.patch(`/auth/admin/roles/${role!.id}`, { name: trimmedName, description: trimmedDescription })
+        ? api.patch(`/auth/admin/roles/${role!.id}`, { name: trimmedName, description: trimmedDescription, show_formerly: showFormerly })
         : api.post("/auth/admin/roles", { name: trimmedName, description: trimmedDescription });
     },
     onSuccess: () => {
@@ -81,13 +82,20 @@ function RoleFormModal({ role, onClose }: { role: RoleSummary | null; onClose: (
         <div className="px-6 py-4 border-t border-gray-200 flex justify-end gap-3">
           <button onClick={onClose} className="px-4 py-2.5 rounded-lg text-sm font-semibold text-gray-600 hover:bg-gray-100">Cancel</button>
           <button
-            onClick={() => {
+            onClick={async () => {
               const trimmedName = name.trim();
               if (trimmedName.length < 2 || trimmedName.length > 50) {
                 toast.error("Role name must be between 2 and 50 characters.");
                 return;
               }
-              save.mutate();
+              // Renaming: ask how the old name should be shown.
+              if (isEdit && role && trimmedName !== role.name) {
+                const choice = await askRenameDisplay(roleLabelFor(role.name), roleLabelFor(trimmedName));
+                if (!choice) return;
+                save.mutate(choice === "formerly");
+                return;
+              }
+              save.mutate(true);
             }}
             disabled={save.isPending || !isValidRoleName}
             className="flex items-center gap-1 px-5 py-2.5 bg-[#0D6E6E] text-white rounded-lg text-sm font-semibold hover:bg-[#178F8F] disabled:opacity-50"
@@ -119,24 +127,18 @@ export function RoleManagementSection() {
       qc.invalidateQueries({ queryKey: ["admin-roles"] });
       showSuccess("Role deleted.");
     },
-    onError: (err: unknown) => {
-      const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
-      toast.error(typeof msg === "string" ? msg : "Could not delete role.");
+    onError: async (err: unknown) => {
+      // The server lists the exact reasons (who is assigned, what the role
+      // was used for) — show them in full.
+      const msg = apiErrorDetail(err);
+      if (msg && msg.includes("\n")) await showBlocked(msg);
+      else toast.error(msg ?? "Could not delete role.");
     },
   });
 
   async function handleDelete(role: RoleSummary) {
     if (role.is_system) {
       toast.error("The Super Admin role cannot be deleted.");
-      return;
-    }
-    if (role.user_count > 0) {
-      await confirmAction({
-        title: "Cannot delete this role",
-        text: `Cannot delete this role because ${role.user_count} user${role.user_count === 1 ? " is" : "s are"} currently assigned to it. Reassign those users before deleting the role.`,
-        confirmText: "OK",
-        danger: false,
-      });
       return;
     }
     const confirmed = await confirmAction({
@@ -183,6 +185,11 @@ export function RoleManagementSection() {
                     <span className="flex items-center gap-1.5">
                       {r.name === "super_admin" && <ShieldCheck size={14} className="text-[#0D6E6E]" />}
                       {roleLabelFor(r.name)}
+                      {(r.former_names?.length ?? 0) > 0 && (
+                        <span className="text-xs font-normal text-gray-500">
+                          (formerly {r.former_names!.map(roleLabelFor).join(" → ")})
+                        </span>
+                      )}
                     </span>
                   </td>
                   <td className="px-4 py-3 text-gray-500">{r.description ?? "—"}</td>

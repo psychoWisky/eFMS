@@ -26,6 +26,7 @@ import { cn, formatDate, hasRealNotesheetContent } from "@/lib/utils";
 import { toSafeNotesheetHtml, NOTESHEET_PROSE_CLASS } from "@/lib/notesheet-html";
 import { downloadTimelinePdf } from "@/lib/timeline-pdf";
 import { PersonBadge, type PersonInfo } from "@/components/shared/person-badge";
+import { roleWithFormerly } from "@/lib/role-label";
 import { X, FileText, ArrowRight, PenLine, Unlock, Loader2, Lock, Download, Clock } from "lucide-react";
 
 interface TrackingItem {
@@ -45,6 +46,9 @@ interface TrackingItem {
 interface TrackEntry {
   id: string; type?: "route" | "sign"; from_user_id: string | null; to_user_id: string | null;
   from_user_info?: PersonInfo | null; to_user_info?: PersonInfo | null; action: string;
+  // The role each person acted in at this step; *_formerly when that role was renamed since.
+  from_role?: string | null; from_role_formerly?: string | null;
+  to_role?: string | null; to_role_formerly?: string | null;
   remarks: string | null; has_remark?: boolean; is_current: boolean; created_at: string;
 }
 
@@ -61,6 +65,9 @@ interface TimelineEvent {
   person?: PersonInfo | null;
   fromPerson?: PersonInfo | null;
   toPerson?: PersonInfo | null;
+  // "Role Name" or "New Name (formerly Old Name)" for the people above.
+  fromRole?: string | null;
+  toRole?: string | null;
   // Whether a remark/notesheet exists at all for this event, independent of
   // whether the viewer can see it — lets "no access" be shown only when
   // something is genuinely being withheld, never for an event with nothing
@@ -97,6 +104,8 @@ function buildTimeline(item: TrackingItem, trackEntries: TrackEntry[], initialNo
       ? {
           key: "created", type: "created", label: "Created and forwarded",
           fromPerson: item.creator_info, toPerson: firstEntry.to_user_info,
+          fromRole: roleWithFormerly(firstEntry.from_role, firstEntry.from_role_formerly),
+          toRole: roleWithFormerly(firstEntry.to_role, firstEntry.to_role_formerly),
           hasContent: initialWithheld,
           content: initialContent,
           // The combined entry is dated by when the forward actually
@@ -124,7 +133,10 @@ function buildTimeline(item: TrackingItem, trackEntries: TrackEntry[], initialNo
     } else {
       events.push({
         key: e.id, type: "route", label: e.action === "dispatch" ? "Dispatched" : "Forwarded",
-        fromPerson: e.from_user_info, toPerson: e.to_user_info, hasContent: withheld, content: realRemark, created_at: e.created_at,
+        fromPerson: e.from_user_info, toPerson: e.to_user_info,
+        fromRole: roleWithFormerly(e.from_role, e.from_role_formerly),
+        toRole: roleWithFormerly(e.to_role, e.to_role_formerly),
+        hasContent: withheld, content: realRemark, created_at: e.created_at,
       });
     }
   }
@@ -262,11 +274,17 @@ export function TimelineModal({ item, onClose }: { item: TrackingItem; onClose: 
                       <div className="mt-1.5 flex flex-wrap items-center gap-2 text-sm">
                         {ev.type === "route" || (ev.type === "created" && ev.toPerson) ? (
                           <>
-                            <PersonBadge person={ev.fromPerson} fallback="System" compact />
+                            <span className="inline-block">
+                              <PersonBadge person={ev.fromPerson} fallback="System" compact />
+                              {ev.fromRole && <span className="block text-xs font-medium text-[#0D6E6E]">{ev.fromRole}</span>}
+                            </span>
                             {ev.toPerson && (
                               <>
                                 <ArrowRight size={12} className="text-gray-400 shrink-0" />
-                                <PersonBadge person={ev.toPerson} compact />
+                                <span className="inline-block">
+                                  <PersonBadge person={ev.toPerson} compact />
+                                  {ev.toRole && <span className="block text-xs font-medium text-[#0D6E6E]">{ev.toRole}</span>}
+                                </span>
                               </>
                             )}
                           </>
