@@ -23,13 +23,15 @@ function RoleFormModal({ role, onClose }: { role: RoleSummary | null; onClose: (
   const [description, setDescription] = useState(role?.description ?? "");
 
   const save = useMutation({
-    // showFormerly only matters when an edit changes the name.
-    mutationFn: (showFormerly: boolean = true) => {
+    // showFormerly only matters when an edit changes the name. The explicit
+    // Promise<unknown> keeps the patch/post branches from being inferred as
+    // two different response types (newer TypeScript versions reject that).
+    mutationFn: async (showFormerly: boolean = true): Promise<unknown> => {
       const trimmedName = name.trim();
       const trimmedDescription = (description || "").trim() || null;
       return isEdit
-        ? api.patch(`/auth/admin/roles/${role!.id}`, { name: trimmedName, description: trimmedDescription, show_formerly: showFormerly })
-        : api.post("/auth/admin/roles", { name: trimmedName, description: trimmedDescription });
+        ? await api.patch(`/auth/admin/roles/${role!.id}`, { name: trimmedName, description: trimmedDescription, show_formerly: showFormerly })
+        : await api.post("/auth/admin/roles", { name: trimmedName, description: trimmedDescription });
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["admin-roles"] });
