@@ -29,6 +29,12 @@ export interface FavoritableUser {
   // department: the exact user_roles row, and its "<estb> · <dept>" label.
   user_role_id?: string | null;
   role_context?: string | null;
+  // A retired person (deactivated with the reason "Retired") can still be
+  // sent files. They are listed once, with the roles they held and the date
+  // they retired — which also tells apart several retired people of a role.
+  is_retired?: boolean;
+  retired_at?: string | null;
+  retired_roles?: string[];
 }
 
 /** A recipient-picker option value is "<userId>::<role>", or
@@ -61,6 +67,9 @@ export function resolveRecipientValue(
   if (!hit.role) return hit.id;
   return hit.user_role_id ? `${hit.id}::${hit.role}::${hit.user_role_id}` : `${hit.id}::${hit.role}`;
 }
+
+const formatRetiredDate = (iso: string) =>
+  new Date(iso).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
 
 const prettyRoleName = (name: string) =>
   ({ efms_officer: "eFMS Officer", efms_admin: "eFMS Admin" } as Record<string, string>)[name]
@@ -123,6 +132,11 @@ export function useFavoriteRecipients() {
       return project ? `${person} · ${pi} · ${project}` : `${person} · ${pi}`;
     }
     const base = u.employee_code ? `${u.full_name} (${u.employee_code})` : u.full_name;
+    if (u.is_retired) {
+      const roles = (u.retired_roles ?? []).map(prettyRoleName).join(" / ");
+      const when = u.retired_at ? ` ${formatRetiredDate(u.retired_at)}` : "";
+      return `${base}${roles ? ` — ${roles}` : ""} (Retired${when})`;
+    }
     // Multi-role recipient: the list has one entry per role — spell out
     // which role this entry routes to.
     if (!u.role) return base;
@@ -142,6 +156,7 @@ export function useFavoriteRecipients() {
   ): SearchableSelectGroup[] {
     const favorites: SearchableSelectOption[] = [];
     const others: SearchableSelectOption[] = [];
+    const retired: SearchableSelectOption[] = [];
     for (const u of users) {
       const value = resolveRecipientValue([u], u.id, u.role, u.user_role_id);
       // Structured search: typing a name matches every role-entry this
@@ -151,13 +166,17 @@ export function useFavoriteRecipients() {
       const option: SearchableSelectOption = {
         value, label: label(u),
         searchName: searchNameFor(u),
-        searchRole: u.role ? prettyRoleName(u.role) : undefined,
+        // Typing "retired" (or the role they held) narrows to retired people.
+        searchRole: u.is_retired
+          ? ["Retired", ...(u.retired_roles ?? []).map(prettyRoleName)].join(" ")
+          : u.role ? prettyRoleName(u.role) : undefined,
       };
-      (u.is_favorite ? favorites : others).push(option);
+      (u.is_favorite ? favorites : u.is_retired ? retired : others).push(option);
     }
     const groups: SearchableSelectGroup[] = [];
     if (favorites.length > 0) groups.push({ label: "⭐ Favorite Recipients", options: favorites });
     groups.push({ label: "All Recipients", options: others });
+    if (retired.length > 0) groups.push({ label: "Retired", options: retired });
     return groups;
   }
 

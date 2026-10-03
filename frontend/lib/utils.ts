@@ -52,6 +52,8 @@ export function getInitials(name: string): string {
 // tags must be stripped before checking for visible text.
 export function isNotesheetEmpty(html: string | null | undefined): boolean {
   if (!html) return true;
+  // A pasted image or a table is content even with no text beside it.
+  if (/<(?:img|table)\b/i.test(html)) return false;
   return html.replace(/<[^>]*>/g, "").trim().length === 0;
 }
 
@@ -62,6 +64,7 @@ export function isNotesheetEmpty(html: string | null | undefined): boolean {
 // shows up as a blank box or a misleading "no access" line.
 export function hasRealNotesheetContent(html: string | null | undefined): boolean {
   if (isNotesheetEmpty(html)) return false;
+  if (/<(?:img|table)\b/i.test(html ?? "")) return true;
   const text = (html ?? "")
     .replace(/<[^>]*>/g, "")
     .replace(/&nbsp;|&#160;/g, " ")

@@ -12,7 +12,8 @@ from pydantic import BaseModel
 from app.db.base import get_db
 from app.utils.integrity import blocked, department_blockers, establishment_blockers
 from app.core.dependencies import require_roles, get_current_user
-from app.models.user import User, UserRole, SystemRole, FavoriteRecipient
+from app.models.user import User, UserRole, SystemRole, FavoriteRecipient, FormerRoleHolding, DeactivationReasonType
+from app.utils.retirement import retired_role_names
 from app.models.admin import FileCategory, FilePriority, FileRecipient, Notification
 from app.models.organization import Establishment, Department
 from app.models.efms import EfmsFile
@@ -63,6 +64,13 @@ class UserOut(BaseModel):
     is_project_profile: bool = False
     project_number: Optional[str] = None
     project_name: Optional[str] = None
+    # A person deactivated with the reason "Retired" can still be sent files
+    # (their Docket). They are listed once, with the roles they held and the
+    # retirement date, which is how several retired people of one role are
+    # told apart. `role` stays empty for them.
+    is_retired: bool = False
+    retired_at: Optional[datetime] = None
+    retired_roles: List[str] = []
     # The specific role this recipient entry represents. For a single-role
     # user it equals active_role. For a multi-role user the picker returns
     # one entry PER role, each with its own `role` — the sender forwards to
@@ -301,6 +309,39 @@ async def list_users(
             entries = [(u.active_role if u.active_role else None, None, None)]
         for role, ur_id, ctx in entries:
             item = UserOut.from_user(u, role=role, user_role_id=ur_id, role_context=ctx)
+            if u.id in favorites:
+                item.is_favorite = True
+                item.favorite_created_at = favorites[u.id]
+            out.append(item)
+
+    # Retired people: files can still be forwarded to them.
+    retired = (await db.execute(
+        select(User)
+        .options(selectinload(User.department), selectinload(User.project), selectinload(User.roles))
+        .where(
+            User.is_active == False,
+            User.origin_user_id.is_(None),
+            User.deactivation_reason_type == DeactivationReasonType.RETIRED,
+            User.id != current_user.id,
+        )
+        .order_by(User.first_name)
+    )).scalars().all()
+    if retired:
+        if establishment_id:
+            retired = [u for u in retired if u.establishment_id == establishment_id]
+        if department_id:
+            retired = [u for u in retired if u.department_id == department_id]
+        holdings: dict = {}
+        for h in (await db.execute(
+            select(FormerRoleHolding).where(FormerRoleHolding.user_id.in_([u.id for u in retired]))
+        )).scalars().all():
+            holdings.setdefault(h.user_id, []).append(h)
+        for u in retired:
+            item = UserOut.from_user(u, role=None)
+            item.role = None
+            item.is_retired = True
+            item.retired_at = u.deactivated_at
+            item.retired_roles = retired_role_names(u, holdings.get(u.id, []))
             if u.id in favorites:
                 item.is_favorite = True
                 item.favorite_created_at = favorites[u.id]

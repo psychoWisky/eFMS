@@ -1,5 +1,5 @@
 from sqlalchemy import Column, String, Boolean, Enum, ForeignKey, Date, DateTime, UniqueConstraint, CheckConstraint
-from sqlalchemy.sql import func, true as sa_true
+from sqlalchemy.sql import func, true as sa_true, false as sa_false
 from sqlalchemy.orm import relationship
 from sqlalchemy.dialects.postgresql import UUID
 import enum
@@ -58,6 +58,22 @@ class Role(Base, UUIDMixin, TimestampMixin):
     name = Column(String(50), unique=True, nullable=False, index=True)
     description = Column(String(255), nullable=True)
     is_system = Column(Boolean, default=False, nullable=False)
+    # May several people hold this role in the same establishment +
+    # department? False = exactly one (a "seat"); see app/utils/integrity.py.
+    allow_multiple_holders = Column(Boolean, default=False, server_default=sa_false(), nullable=False)
+
+
+class FormerRoleHolding(Base, UUIDMixin):
+    """A role a person used to hold (handed over or retired from). Only used
+    to label retired people ("Registrar (Retired …)"); grants no access."""
+    __tablename__ = "former_role_holdings"
+
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    role = Column(String(50), nullable=False)
+    establishment_id = Column(UUID(as_uuid=True), ForeignKey("establishments.id", ondelete="SET NULL"), nullable=True)
+    department_id = Column(UUID(as_uuid=True), ForeignKey("departments.id", ondelete="SET NULL"), nullable=True)
+    reason = Column(String(20), nullable=False)  # "transferred" | "retired"
+    ended_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
 class RoleRename(Base, UUIDMixin):
@@ -180,7 +196,24 @@ class User(Base, UUIDMixin, TimestampMixin):
         """SUPER_ADMIN is the only globally privileged role — the single
         source of truth for the system-wide admin bypass. No other role
         (including plain ADMIN) may satisfy this."""
-        return self.active_role == SystemRole.SUPER_ADMIN
+        # `is_active` matters: a retired person (deactivated with the reason
+        # "retired") can still sign in with limited access, and must never
+        # carry admin powers over from a leftover Super Admin role.
+        return self.is_active and self.active_role == SystemRole.SUPER_ADMIN
+
+    @property
+    def is_retired(self) -> bool:
+        """Deactivated with the reason "Retired". Such a person keeps a
+        limited login: only their Docket, no creating files, no admin."""
+        return (
+            not self.is_active
+            and self.origin_user_id is None
+            and self.deactivation_reason_type == DeactivationReasonType.RETIRED
+        )
+
+    @property
+    def retired_at(self):
+        return self.deactivated_at if self.is_retired else None
 
     @property
     def is_project_profile(self) -> bool:

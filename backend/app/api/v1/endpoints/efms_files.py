@@ -40,7 +40,7 @@ def _send_email(to: str, subject: str, body: str) -> None:
         pass  # Don't fail the request if email fails
 
 from app.db.base import get_db
-from app.core.dependencies import get_current_verified_user
+from app.core.dependencies import get_current_verified_user, forbid_retired
 from app.models.user import User, UserRole
 from app.models.efms import (
     EfmsFile, Notesheet, NotesheetVersion, HolderNote,
@@ -59,6 +59,7 @@ from app.schemas.efms import (
 from app.utils.otp import create_otp, verify_otp, send_email as _send_otp_email
 from app.utils.person_info import PersonInfo, person_info_map
 from app.utils.workspace import workspace_filter, role_context
+from app.utils.html_sanitize import sanitize_notesheet_html, ContentTooLarge
 from app.api.v1.endpoints.admin import create_notification
 
 # SUPER_ADMIN is the only globally privileged role — see User.is_super_admin.
@@ -495,6 +496,16 @@ def _list_safe_file(f: EfmsFile) -> FileOut:
     return payload
 
 
+def _clean_html(value: Optional[str]) -> str:
+    """Sanitise rich-text HTML before it is stored (see utils/html_sanitize):
+    strips scripts, event handlers, remote images etc., and refuses an
+    oversized notesheet with a clear message instead of a server error."""
+    try:
+        return sanitize_notesheet_html(value)
+    except ContentTooLarge as exc:
+        raise HTTPException(status_code=413, detail=str(exc))
+
+
 # ── Files CRUD ────────────────────────────────────────────────────────────────
 
 @router.get("", response_model=list[FileOut])
@@ -504,7 +515,7 @@ async def list_files(
     inbox: bool = Query(False),
     outbox: bool = Query(False),
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_verified_user),
+    user: User = Depends(forbid_retired),
 ):
     q = select(EfmsFile).options(
         selectinload(EfmsFile.notesheet),
@@ -588,7 +599,7 @@ async def search_files(
     from_date: Optional[str] = Query(None),
     to_date: Optional[str] = Query(None),
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_verified_user),
+    user: User = Depends(forbid_retired),
 ):
     from sqlalchemy import or_, and_, String, cast
     from datetime import datetime
@@ -832,7 +843,7 @@ async def _resolve_recipient_role(
 async def create_file(
     body: FileCreate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_verified_user),
+    user: User = Depends(forbid_retired),
 ):
     # Get department code from user's department
     dept_code = "GEN"
@@ -902,7 +913,7 @@ async def create_file(
             continue
         break
 
-    notesheet = Notesheet(file_id=efms_file.id, content=body.initial_content, last_saved_by=user.id)
+    notesheet = Notesheet(file_id=efms_file.id, content=_clean_html(body.initial_content), last_saved_by=user.id)
     db.add(notesheet)
     await db.commit()
 
@@ -1013,7 +1024,7 @@ async def save_notesheet(
     else:
         raise HTTPException(status_code=400, detail="Notesheet cannot be edited at this file stage.")
     if not f.notesheet:
-        ns = Notesheet(file_id=file_id, content=body.content, last_saved_by=user.id)
+        ns = Notesheet(file_id=file_id, content=_clean_html(body.content), last_saved_by=user.id)
         db.add(ns)
     else:
         # Save version snapshot
@@ -1024,7 +1035,7 @@ async def save_notesheet(
             saved_by=user.id,
         )
         db.add(version)
-        f.notesheet.content = body.content
+        f.notesheet.content = _clean_html(body.content)
         f.notesheet.version += 1
         f.notesheet.last_saved_by = user.id
     await db.commit()
@@ -1352,9 +1363,9 @@ async def save_my_holder_notesheet(
                 detail="This file already has a current holder's Notesheet open; cannot start another.",
             )
         note = await _start_holding_period(db, file_id, user.id)
-        note.content = body.content
+        note.content = _clean_html(body.content)
     else:
-        note.content = body.content
+        note.content = _clean_html(body.content)
 
     # Touch updated_at so a file the current holder just worked on floats to
     # the top of their Docket / the creator's My Files. The workflow
@@ -1568,7 +1579,7 @@ async def download_notesheet(
         "Created", f.notesheet.created_at, f.notesheet.updated_at
     )
 
-    initial_content = f.notesheet.content or ""
+    initial_content = sanitize_notesheet_html(f.notesheet.content or "", enforce_limit=False)
     if not initial_content.strip():
         initial_content = (
             '<p class="empty-notesheet">'
@@ -1605,7 +1616,7 @@ async def download_notesheet(
             "Recorded", note.created_at, note.updated_at
         )
 
-        holder_content = note.content or ""
+        holder_content = sanitize_notesheet_html(note.content or "", enforce_limit=False)
         if not holder_content.strip():
             holder_content = (
                 '<p class="empty-notesheet">'
@@ -1925,6 +1936,13 @@ strong, b {{ font-weight: 700; }}
     background: #EEF6F5;
 }}
 
+.note-body img {{
+    max-width: 100%;
+    height: auto;
+    display: inline-block;
+    page-break-inside: avoid;
+}}
+
 .note-body blockquote {{
     margin: 9px 0;
     padding: 3px 12px;
@@ -2121,6 +2139,9 @@ def _is_notesheet_content_empty(content: Optional[str]) -> bool:
     validate client-side."""
     if not content:
         return True
+    # A pasted image or a table is content even with no text beside it.
+    if re.search(r"<(?:img|table)\b", content, re.I):
+        return False
     return not _HTML_TAG_RE.sub("", content).strip()
 
 
@@ -2171,7 +2192,9 @@ async def route_file(
         # that alone doesn't stop a direct API call from naming one, which
         # would otherwise hand current_holder_id to an identity nobody can
         # act as anymore.
-        if to_user and not to_user.is_active:
+        # A retired person is deactivated but can still be sent files — their
+        # Docket is the one thing a retired account keeps.
+        if to_user and not (to_user.is_active or to_user.is_retired):
             raise HTTPException(status_code=400, detail="Cannot forward a file to an inactive recipient.")
 
     # Resolve the recipient's target role-workspace (multi-role users). The
@@ -2230,7 +2253,7 @@ async def route_file(
         # access to read this" for an entry that never had real content.
         # Enforced here (not just in the frontend) so the guarantee holds
         # regardless of caller.
-        remarks=(body.remarks or None),
+        remarks=(_clean_html(body.remarks) or None),
         is_current=True,
     )
     db.add(new_route)

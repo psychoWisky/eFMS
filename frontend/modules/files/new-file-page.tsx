@@ -105,9 +105,14 @@ export function NewFileForm({ onSuccess }: NewFileFormProps) {
   useEffect(() => {
     autoSaveRef.current = setInterval(() => {
       if (editor) {
-        localStorage.setItem(DRAFT_KEY, JSON.stringify({
-          content: editor.getHTML(), subject, description, category, priority,
-        }));
+        try {
+          localStorage.setItem(DRAFT_KEY, JSON.stringify({
+            content: editor.getHTML(), subject, description, category, priority,
+          }));
+        } catch {
+          // Pasted pictures can exceed the browser's storage limit — the
+          // recovery copy is a convenience, so skip it rather than error.
+        }
       }
     }, 30_000);
     return () => { if (autoSaveRef.current) clearInterval(autoSaveRef.current); };

@@ -8,7 +8,7 @@ from sqlalchemy import select, func
 from pydantic import BaseModel
 
 from app.db.base import get_db
-from app.core.dependencies import get_current_verified_user
+from app.core.dependencies import get_current_verified_user, forbid_retired
 from app.models.user import User
 from app.models.efms import EfmsFile, FileStatus
 from app.models.efms_extra import Docket, FileRemark
@@ -44,7 +44,9 @@ async def my_docket(db: AsyncSession = Depends(get_db), user: User = Depends(get
             # Multi-role: strictly only files stamped with THIS role-workspace
             # (role name, plus establishment/department when the user holds
             # this role in several contexts — see app/utils/workspace.py).
-            workspace_filter(
+            # A retired person has no current role: their Docket is simply
+            # every file that is held by them.
+            True if user.is_retired else workspace_filter(
                 user, EfmsFile.current_holder_role,
                 EfmsFile.current_holder_establishment_id, EfmsFile.current_holder_department_id,
             ),
@@ -159,7 +161,7 @@ async def release_file(file_id: UUID, db: AsyncSession = Depends(get_db), user: 
 # ── Reopen a released file (only original creator) ────────────────────────────
 
 @router.post("/{file_id}/reopen")
-async def reopen_file(file_id: UUID, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_verified_user)):
+async def reopen_file(file_id: UUID, db: AsyncSession = Depends(get_db), user: User = Depends(forbid_retired)):
     """Reopen a file the caller both created and released. Reuses the same
     file record — no new file, no new reference number, no route entry, no
     notification, no email, no history of any kind. Exactly three fields
@@ -204,7 +206,7 @@ async def reopen_file(file_id: UUID, db: AsyncSession = Depends(get_db), user: U
 # ── Released files (visible to whole department) ──────────────────────────────
 
 @router.get("/released", response_model=List[dict])
-async def released_files(db: AsyncSession = Depends(get_db), user: User = Depends(get_current_verified_user)):
+async def released_files(db: AsyncSession = Depends(get_db), user: User = Depends(forbid_retired)):
     q = select(Docket).where(Docket.is_released == True)
     if user.department_id:
         q = q.where(Docket.department_id == user.department_id)
@@ -231,7 +233,7 @@ async def released_files(db: AsyncSession = Depends(get_db), user: User = Depend
 # ── My released files (creator's own — feeds the Reopen picker only) ──────────
 
 @router.get("/released/mine", response_model=List[dict])
-async def my_released_files(db: AsyncSession = Depends(get_db), user: User = Depends(get_current_verified_user)):
+async def my_released_files(db: AsyncSession = Depends(get_db), user: User = Depends(forbid_retired)):
     """Released files this user both created and released, in the role-
     workspace they are currently acting in. Distinct from /released
     (department-wide) — this is the exact "My Released Files" list used by

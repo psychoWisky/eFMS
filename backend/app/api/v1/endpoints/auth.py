@@ -24,7 +24,7 @@ from app.core.config import settings
 from app.core.dependencies import get_current_user, require_roles
 import re
 
-from app.models.user import User, UserRole, RefreshToken, SystemRole, DeactivationReasonType, Role, RoleRename
+from app.models.user import User, UserRole, RefreshToken, SystemRole, DeactivationReasonType, Role, RoleRename, FormerRoleHolding
 from app.models.efms import EfmsFile, RouteEntry
 from app.models.efms_extra import OTP, Docket
 from app.models.organization import Establishment, Department
@@ -32,6 +32,7 @@ from app.schemas.auth import LoginRequest, TokenResponse, RefreshRequest, UserBr
 from app.utils.workspace import role_context
 from app.utils.integrity import (
     blocked, user_activity, role_blockers, seats_of_user, seat_of, assert_new_seats_free,
+    duplicate_seat_reasons,
 )
 from app.utils.sms import normalize_indian_mobile, mask_mobile, sms_configured, send_otp_sms, SmsSendError
 # Forgot Password reuses the SHARED OTP/email helpers (used elsewhere for
@@ -160,6 +161,8 @@ def build_user_brief(user: User) -> UserBrief:
         roles=[r.role for r in user.roles],
         can_sign=user.can_sign,
         is_active=user.is_active,
+        is_retired=user.is_retired,
+        retired_at=user.retired_at.isoformat() if user.retired_at else None,
         project_number=proj.project_number if proj else None,
         project_name=proj.name if proj else None,
         department_id=str(user.department_id) if user.department_id else None,
@@ -280,7 +283,9 @@ async def login_step1(payload: LoginStep1Request, db: AsyncSession = Depends(get
             detail="This mobile number is linked to more than one account. Please sign in with your email address.",
         )
     user = matches[0]
-    if not user.is_active:
+    # A retired person may sign in (limited access); any other deactivated
+    # account may not.
+    if not (user.is_active or user.is_retired):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Your account has been deactivated. Please contact the administrator.")
 
     channel = _login_channel(payload, identifier)
@@ -332,7 +337,7 @@ async def login_step2(payload: LoginStep2Request, db: AsyncSession = Depends(get
             break
     if user is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="The OTP is incorrect or has expired. Check the code, or use Resend OTP to get a new one.")
-    if not user.is_active:
+    if not (user.is_active or user.is_retired):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Account not found or deactivated.")
 
     resp = await _issue_tokens(user, db)
@@ -528,10 +533,10 @@ async def refresh_token(payload: RefreshRequest, db: AsyncSession = Depends(get_
     stored.revoked = True
 
     result = await db.execute(
-        select(User).options(selectinload(User.roles)).where(User.id == user_id, User.is_active == True)
+        select(User).options(selectinload(User.roles)).where(User.id == user_id)
     )
     user = result.scalar_one_or_none()
-    if not user:
+    if not user or not (user.is_active or user.is_retired):
         raise HTTPException(status_code=401, detail="User not found.")
 
     resp = await _issue_tokens(user, db)
@@ -755,6 +760,8 @@ class AdminUserOut(BaseModel):
     # with its per-role department/establishment context.
     roles: list[RoleContextOut] = []
     is_active: bool
+    # Deactivated with the reason "Retired" (limited login: Docket only).
+    is_retired: bool = False
     must_change_password: bool
     can_sign: bool
     deactivation_reason_type: Optional[str] = None
@@ -806,6 +813,7 @@ class AdminUserOut(BaseModel):
             active_role=u.active_role,
             roles=ordered,
             is_active=u.is_active,
+            is_retired=u.is_retired,
             must_change_password=u.must_change_password,
             can_sign=u.can_sign,
             deactivation_reason_type=u.deactivation_reason_type.value if u.deactivation_reason_type else None,
@@ -1518,6 +1526,18 @@ async def set_user_status(
         user.deactivation_remarks = remarks
         user.deactivated_at = datetime.now(timezone.utc)
         user.deactivated_by = current_user.id
+        if reason == DeactivationReasonType.RETIRED:
+            # Remember the roles they still hold, so they can be labelled
+            # ("Registrar (Retired …)") even after the role changes hands.
+            already = {(h.role, h.establishment_id, h.department_id) for h in (await db.execute(
+                select(FormerRoleHolding).where(FormerRoleHolding.user_id == user.id)
+            )).scalars().all()}
+            for ur in user.roles:
+                key = (ur.role, *role_context(user, ur))
+                if key not in already and ur.role != SystemRole.SUPER_ADMIN:
+                    db.add(FormerRoleHolding(
+                        user_id=user.id, role=ur.role, establishment_id=key[1], department_id=key[2], reason="retired",
+                    ))
 
     await db.commit()
     return AdminUserOut.from_user(await _load_user(db, uid))
@@ -1700,7 +1720,13 @@ async def transfer_role(
         old_context=old_context, new_context=role_context(target, target_role),
     )
 
-    # Remove the role from the leaver — it has now fully moved.
+    # Remove the role from the leaver — it has now fully moved. Remember it
+    # on their record: if they retire, it is how they are labelled.
+    est_id, dept_id = role_context(leaver, leaver_role)
+    if leaver_role.role != SystemRole.SUPER_ADMIN:
+        db.add(FormerRoleHolding(
+            user_id=leaver.id, role=leaver_role.role, establishment_id=est_id, department_id=dept_id, reason="transferred",
+        ))
     await db.delete(leaver_role)
     await db.flush()
     # The seat now belongs to the target; refuse if it would collide with
@@ -1776,6 +1802,7 @@ class RoleOut(BaseModel):
     description: Optional[str] = None
     is_system: bool
     user_count: int
+    allow_multiple_holders: bool = False
     # Earlier names, oldest first — the Roles screen shows
     # "New Name (formerly Old Name)". Empty for a role never renamed.
     former_names: list[str] = []
@@ -1785,6 +1812,9 @@ class RoleOut(BaseModel):
 class RoleCreateRequest(BaseModel):
     name: str
     description: Optional[str] = None
+    # True: several people may hold this role in one establishment +
+    # department (e.g. Faculty). False: exactly one holder per seat.
+    allow_multiple_holders: bool = False
 
 
 class RoleUpdateRequest(BaseModel):
@@ -1794,6 +1824,9 @@ class RoleUpdateRequest(BaseModel):
     # as "New Name (formerly Old Name)" on the Roles list and file history.
     # False: show only the new name (files still follow the rename).
     show_formerly: bool = True
+    # Only when sent. Turning it OFF is refused while a seat of this role
+    # already has several holders (the response names them).
+    allow_multiple_holders: Optional[bool] = None
 
 
 async def _role_user_count(db: AsyncSession, role_name: str) -> int:
@@ -1864,6 +1897,7 @@ async def list_roles(db: AsyncSession = Depends(get_db), _: User = Depends(_supe
         RoleOut(
             id=r.id, name=r.name, description=r.description, is_system=r.is_system,
             user_count=counts.get(r.name, 0), former_names=former.get(r.id, []),
+            allow_multiple_holders=r.allow_multiple_holders,
         )
         for r in roles
     ]
@@ -1879,11 +1913,14 @@ async def create_role(body: RoleCreateRequest, db: AsyncSession = Depends(get_db
     if description and len(description) > 255:
         raise HTTPException(400, "Description must be 255 characters or fewer.")
 
-    role = Role(name=name, description=description, is_system=False)
+    role = Role(name=name, description=description, is_system=False, allow_multiple_holders=body.allow_multiple_holders)
     db.add(role)
     await db.commit()
     await db.refresh(role)
-    return RoleOut(id=role.id, name=role.name, description=role.description, is_system=role.is_system, user_count=0)
+    return RoleOut(
+        id=role.id, name=role.name, description=role.description, is_system=role.is_system,
+        user_count=0, allow_multiple_holders=role.allow_multiple_holders,
+    )
 
 
 @router.patch("/admin/roles/{role_id}", response_model=RoleOut)
@@ -1950,6 +1987,17 @@ async def update_role(role_id: UUID, body: RoleUpdateRequest, db: AsyncSession =
             raise HTTPException(400, "Description must be 255 characters or fewer.")
         role.description = description
 
+    if body.allow_multiple_holders is not None and body.allow_multiple_holders != role.allow_multiple_holders:
+        if not body.allow_multiple_holders:
+            clashes = await duplicate_seat_reasons(db, role.name)
+            if clashes:
+                raise blocked(
+                    f"Cannot limit “{_pretty_role_name(role.name)}” to one person per department:",
+                    clashes,
+                    "Move or remove the extra people first, then try again.",
+                )
+        role.allow_multiple_holders = body.allow_multiple_holders
+
     await db.commit()
     await db.refresh(role)
     user_count = await _role_user_count(db, role.name)
@@ -1963,6 +2011,7 @@ async def update_role(role_id: UUID, body: RoleUpdateRequest, db: AsyncSession =
     return RoleOut(
         id=role.id, name=role.name, description=role.description, is_system=role.is_system,
         user_count=user_count, former_names=former_names,
+        allow_multiple_holders=role.allow_multiple_holders,
     )
 
 

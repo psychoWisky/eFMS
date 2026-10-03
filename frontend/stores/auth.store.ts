@@ -28,6 +28,10 @@ export interface AuthUser {
   must_change_password: boolean;
   roles: EfmsRole[];
   held_roles?: HeldRole[];
+  // Deactivated with the reason "Retired": signs in with limited access —
+  // the Docket only, no new files.
+  is_retired?: boolean;
+  retired_at?: string | null;
   // The role this token is acting as. For a multi-role user this is the one
   // they last switched to; may differ from roles[0].
   active_role?: EfmsRole | null;

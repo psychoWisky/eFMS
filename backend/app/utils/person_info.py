@@ -22,6 +22,8 @@ class PersonInfo(BaseModel):
     designation: Optional[str] = None
     department_name: Optional[str] = None
     is_active: bool = True
+    # Deactivated with the reason "Retired" (shown as "(Retired)", not "(Inactive)").
+    is_retired: bool = False
     model_config = {"from_attributes": True}
 
 
@@ -50,6 +52,7 @@ async def person_info_map(
             designation=u.designation,
             department_name=dept_names.get(u.department_id) if u.department_id else None,
             is_active=u.is_active,
+            is_retired=u.is_retired,
         )
         for u in users
     }

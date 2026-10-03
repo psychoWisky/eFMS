@@ -41,7 +41,7 @@ export interface TimelinePdfMyNote {
 function personLine(p?: PersonInfo | null, fallback = "System", role?: string | null): string {
   if (!p) return `<span class="tl-muted">${escapeHtml(fallback)}</span>`;
   const meta = [p.designation, p.department_name, role].filter(Boolean).join(" · ");
-  const name = p.is_active === false ? `${p.full_name} (Inactive)` : p.full_name;
+  const name = p.is_retired ? `${p.full_name} (Retired)` : p.is_active === false ? `${p.full_name} (Inactive)` : p.full_name;
   return (
     `<span class="tl-name">${escapeHtml(name)}</span>` +
     (meta ? `<span class="tl-role"> · ${escapeHtml(meta)}</span>` : "")

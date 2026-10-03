@@ -816,7 +816,7 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
   const personInline = (p?: PersonInfo | null) => {
     if (!p) return <span className="italic text-gray-400">Not yet forwarded</span>;
     const meta = [p.designation, p.department_name].filter(Boolean).join(" · ");
-    const name = p.is_active === false ? `${p.full_name} (Inactive)` : p.full_name;
+    const name = p.is_retired ? `${p.full_name} (Retired)` : p.is_active === false ? `${p.full_name} (Inactive)` : p.full_name;
     return (
       <span className="text-gray-800">
         <span className="font-semibold">{name}</span>

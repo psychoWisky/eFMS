@@ -2,7 +2,7 @@
 import { motion, AnimatePresence } from "framer-motion";
 import { usePathname, useRouter } from "next/navigation";
 import { LayoutDashboard, ShieldCheck, PanelLeftClose, PanelLeftOpen, Search, History } from "lucide-react";
-import { useActiveRole } from "@/stores/auth.store";
+import { useActiveRole, useUser } from "@/stores/auth.store";
 import { guardedNavigate } from "@/hooks/use-unsaved-changes-guard";
 import { cn } from "@/lib/utils";
 import Image from "next/image";
@@ -22,8 +22,11 @@ export function EFMSSidebar({ collapsed, canToggle, onToggle }: SidebarProps) {
   const pathname = usePathname();
   const router = useRouter();
   const role = useActiveRole();
+  const retired = !!useUser()?.is_retired;
   const visible = NAV_ITEMS.filter((item) =>
-    !role ? true : item.audience === "super_admin" ? role === "super_admin" : role !== "super_admin"
+    // A retired person has the Dashboard (their Docket) only.
+    retired ? item.href === "/dashboard"
+      : !role ? true : item.audience === "super_admin" ? role === "super_admin" : role !== "super_admin"
   );
 
   return (

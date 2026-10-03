@@ -754,7 +754,7 @@ function DeactivateUserModal({ user, onClose, onConfirm, isPending }: {
       <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md" onClick={(e) => e.stopPropagation()}>
         <div className="px-6 py-5 border-b border-gray-200">
           <h3 className="text-xl font-bold text-gray-900">Deactivate User</h3>
-          <p className="text-sm text-gray-500 mt-1">{user.full_name} will no longer be able to sign in. Their historical records remain unchanged.</p>
+          <p className="text-sm text-gray-500 mt-1">Their historical records remain unchanged.</p>
         </div>
         <div className="px-6 py-5 space-y-4">
           <div>
@@ -762,6 +762,17 @@ function DeactivateUserModal({ user, onClose, onConfirm, isPending }: {
             <select value={reasonType} onChange={(e) => setReasonType(e.target.value)} className={INPUT}>
               {DEACTIVATION_REASON_OPTIONS.map((r) => <option key={r.value} value={r.value}>{r.label}</option>)}
             </select>
+            {reasonType === "retired" ? (
+              <p className="mt-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                <span className="font-semibold">{user.full_name} can still sign in</span>, with limited access: their Docket only, to
+                open and act on files sent to them. They cannot create files. Their role can be given to someone else —
+                use Transfer Ownership first to hand over their files.
+              </p>
+            ) : (
+              <p className="mt-2 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-600">
+                {user.full_name} will no longer be able to sign in at all.
+              </p>
+            )}
           </div>
           <div>
             <label className={LABEL}>Additional Remarks {reasonType === "other" ? "*" : "(optional)"}</label>
@@ -1014,6 +1025,15 @@ export function UserManagementSection() {
   });
   const roleOptions = buildRoleOptions(roles);
 
+  // Everyone who can receive a transfer: ALL active people, independent of
+  // the table's search box and status filter (those used to narrow this list
+  // — searching for the leaver's name left nobody to pick).
+  const { data: transferPeople = [] } = useQuery<AdminUser[]>({
+    queryKey: ["user-management-users", "active-all"],
+    queryFn: async () => (await api.get("/auth/admin/users?status=active")).data,
+    enabled: isSuperAdmin && !!transferUser,
+  });
+
   const toggleStatus = useMutation({
     mutationFn: ({ id, is_active, reason_type, remarks }: { id: string; is_active: boolean; reason_type?: string; remarks?: string }) =>
       api.patch(`/auth/admin/users/${id}/status`, { is_active, reason_type, remarks }),
@@ -1263,7 +1283,7 @@ export function UserManagementSection() {
       {transferUser && (
         <TransferOwnershipModal
           user={transferUser}
-          candidates={t.view
+          candidates={transferPeople
             .filter((u) => u.is_active && u.id !== transferUser.id)
             .map((u) => ({ value: u.id, label: u.employee_code ? `${u.full_name} (${u.employee_code})` : `${u.full_name} — ${u.email}` }))}
           onClose={() => setTransferUser(null)}

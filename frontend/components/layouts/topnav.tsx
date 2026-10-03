@@ -228,7 +228,7 @@ export function EFMSTopNav({ sidebarWidth }: { sidebarWidth: number }) {
             <div className="hidden md:block text-left max-w-[260px]">
               <p className="text-sm font-semibold text-[#1A1A2E] leading-tight truncate">{user?.full_name ?? "User"}</p>
               <p className="text-xs text-[#0D6E6E] font-medium leading-tight mt-0.5 break-words whitespace-normal">
-                {activeRole ? formatRoleTitle(activeRole, user?.establishment_name, user?.department_name) : ""}
+                {user?.is_retired ? "Retired" : activeRole ? formatRoleTitle(activeRole, user?.establishment_name, user?.department_name) : ""}
               </p>
             </div>
             <ChevronDown size={14} className="text-[#9CA3AF] shrink-0" />
@@ -246,7 +246,7 @@ export function EFMSTopNav({ sidebarWidth }: { sidebarWidth: number }) {
                   <div className="mt-2.5 pt-2 border-t border-gray-200">
                     <span className="text-[10px] uppercase font-bold tracking-wider text-gray-500 block">Current Active Role</span>
                     <p className="text-xs text-[#0D6E6E] font-semibold mt-0.5 break-words whitespace-normal leading-relaxed">
-                      {activeRole ? formatRoleTitle(activeRole, user?.establishment_name, user?.department_name) : "—"}
+                      {user?.is_retired ? "Retired — Docket access only" : activeRole ? formatRoleTitle(activeRole, user?.establishment_name, user?.department_name) : "—"}
                     </p>
                   </div>
                 </div>

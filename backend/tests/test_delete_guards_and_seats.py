@@ -465,3 +465,119 @@ async def test_two_simultaneous_assignments_of_one_seat_only_one_wins(client, us
         for m in emails:
             await _drop_user(db, m)
         await _drop_org(db, [e["id"]], [d["id"]])
+
+
+# ═══════════════ PER-ROLE: MAY SEVERAL PEOPLE HOLD IT? ═══════════════════════
+
+@pytest.mark.asyncio
+async def test_role_can_allow_several_holders_per_seat(client, users, roles, db):
+    admin = await users.make(SystemRole.SUPER_ADMIN)
+    e = await _estb(client, admin)
+    d = await _dept(client, admin, e["id"])
+    many = await roles.make("test_many_holders")
+    one = await roles.make("test_one_holder")
+    emails = []
+    try:
+        # A role starts as one-holder-only; the Super Admin turns "many" on.
+        r = await client.get("/auth/admin/roles", headers=H(admin))
+        flags = {x["name"]: x["allow_multiple_holders"] for x in r.json()}
+        assert flags[many.name] is False and flags["faculty"] is True and flags["student"] is True
+        r = await client.patch(f"/auth/admin/roles/{many.id}", json={"allow_multiple_holders": True}, headers=H(admin))
+        assert r.status_code == 200 and r.json()["allow_multiple_holders"] is True
+
+        # Many-holder role: three people in the same establishment + department.
+        for i in range(3):
+            r, m = await _api_user(client, admin, role=many.name, estb=e["id"], dept=d["id"], tag=f"many{i}")
+            assert r.status_code == 201, r.text
+            emails.append(m)
+        # One-holder role: the second person is refused.
+        r, m = await _api_user(client, admin, role=one.name, estb=e["id"], dept=d["id"], tag="one1")
+        assert r.status_code == 201, r.text
+        emails.append(m)
+        r, m = await _api_user(client, admin, role=one.name, estb=e["id"], dept=d["id"], tag="one2")
+        assert r.status_code == 409 and "already assigned" in r.json()["detail"], r.text
+
+        # A new role can be created as many-holder from the start.
+        r = await client.post("/auth/admin/roles", json={"name": "test_made_many", "allow_multiple_holders": True}, headers=H(admin))
+        assert r.status_code == 201 and r.json()["allow_multiple_holders"] is True
+        made_id = r.json()["id"]
+        await client.delete(f"/auth/admin/roles/{made_id}", headers=H(admin))
+
+        # Cannot limit a role to one person while a seat already has several.
+        r = await client.patch(f"/auth/admin/roles/{many.id}", json={"allow_multiple_holders": False}, headers=H(admin))
+        assert r.status_code == 409, r.text
+        assert "held by 3 people" in r.json()["detail"] and emails[0] in r.json()["detail"]
+        r = await client.get("/auth/admin/roles", headers=H(admin))
+        assert next(x for x in r.json() if x["id"] == str(many.id))["allow_multiple_holders"] is True  # unchanged
+
+        # Once only one person is left it can be limited, and it then behaves as one-holder.
+        for m in emails[1:3]:
+            await _drop_user(db, m)
+        r = await client.patch(f"/auth/admin/roles/{many.id}", json={"allow_multiple_holders": False}, headers=H(admin))
+        assert r.status_code == 200 and r.json()["allow_multiple_holders"] is False
+        r, m = await _api_user(client, admin, role=many.name, estb=e["id"], dept=d["id"], tag="late")
+        assert r.status_code == 409
+
+        # ...and the other way: allow the one-holder role and the refused person fits.
+        await client.patch(f"/auth/admin/roles/{one.id}", json={"allow_multiple_holders": True}, headers=H(admin))
+        r, m = await _api_user(client, admin, role=one.name, estb=e["id"], dept=d["id"], tag="one3")
+        assert r.status_code == 201, r.text
+        emails.append(m)
+    finally:
+        for m in emails:
+            await _drop_user(db, m)
+        await _drop_org(db, [e["id"]], [d["id"]])
+
+
+@pytest.mark.asyncio
+async def test_bulk_import_follows_the_roles_holder_setting(client, users, roles, db):
+    import csv, io
+    admin = await users.make(SystemRole.SUPER_ADMIN)
+    e = await _estb(client, admin)
+    d = await _dept(client, admin, e["id"])
+    many = await roles.make("test_bulk_many")
+    one = await roles.make("test_bulk_one")
+    await client.patch(f"/auth/admin/roles/{many.id}", json={"allow_multiple_holders": True}, headers=H(admin))
+    mails = [_mail(f"bm{i}") for i in range(2)] + [_mail(f"bo{i}") for i in range(2)]
+    try:
+        buf = io.StringIO()
+        w = csv.DictWriter(buf, fieldnames=["first_name", "last_name", "email", "mobile", "designation", "role", "establishment_id", "department_id", "temp_password"])
+        w.writeheader()
+        for i, (m, role) in enumerate(zip(mails, [many.name, many.name, one.name, one.name])):
+            w.writerow({"first_name": f"B{i}", "last_name": "User", "email": m, "mobile": f"90000{i}2111", "designation": "Clerk",
+                        "role": role, "establishment_id": e["id"], "department_id": d["id"], "temp_password": ""})
+        r = await client.post("/auth/admin/users/bulk", files={"file": ("u.csv", buf.getvalue().encode(), "text/csv")}, headers=H(admin))
+        assert r.status_code == 200, r.text
+        res = {x["email"]: x for x in r.json()["results"]}
+        assert res[mails[0]]["status"] == "created" and res[mails[1]]["status"] == "created"   # many-holder role: both fit
+        assert res[mails[2]]["status"] == "created"
+        assert res[mails[3]]["status"] == "failed" and "already assigned" in res[mails[3]]["error"]  # one-holder role: second refused
+    finally:
+        for m in mails:
+            await _drop_user(db, m)
+        await _drop_org(db, [e["id"]], [d["id"]])
+
+
+@pytest.mark.asyncio
+async def test_role_history_never_blocks_deleting_a_department_or_establishment(client, users, db):
+    """The history of roles a person used to hold (for "Retired" labels) must
+    not stop an establishment / department from being deleted."""
+    from app.models.user import FormerRoleHolding
+    admin = await users.make(SystemRole.SUPER_ADMIN)
+    ghost = await users.make(SystemRole.EFMS_OFFICER, first_name="Ghost")
+    e = await _estb(client, admin)
+    d = await _dept(client, admin, e["id"])
+    db.add(FormerRoleHolding(user_id=ghost.id, role="registrar", reason="transferred",
+                             establishment_id=uuid.UUID(e["id"]), department_id=uuid.UUID(d["id"])))
+    await db.commit()
+    try:
+        r = await client.delete(f"/admin/departments/{d['id']}", headers=H(admin))
+        assert r.status_code == 204, r.text
+        r = await client.delete(f"/admin/establishments/{e['id']}", headers=H(admin))
+        assert r.status_code == 204, r.text
+        row = (await db.execute(select(FormerRoleHolding).where(FormerRoleHolding.user_id == ghost.id)
+               .execution_options(populate_existing=True))).scalar_one()
+        assert row.establishment_id is None and row.department_id is None   # history kept, link cleared
+    finally:
+        await db.execute(sa_delete(FormerRoleHolding).where(FormerRoleHolding.user_id == ghost.id))
+        await db.commit()

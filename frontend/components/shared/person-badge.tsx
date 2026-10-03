@@ -10,6 +10,7 @@ export interface PersonInfo {
   designation?: string | null;
   department_name?: string | null;
   is_active?: boolean;
+  is_retired?: boolean;
 }
 
 export function PersonBadge({
@@ -27,7 +28,9 @@ export function PersonBadge({
   if (!person) return <span className={cn("text-gray-400", className)}>{fallback}</span>;
 
   const meta = [person.designation, person.department_name].filter(Boolean).join(" • ");
-  const displayName = person.is_active === false ? `${person.full_name} (Inactive)` : person.full_name;
+  const displayName = person.is_retired
+    ? `${person.full_name} (Retired)`
+    : person.is_active === false ? `${person.full_name} (Inactive)` : person.full_name;
 
   if (compact) {
     return (

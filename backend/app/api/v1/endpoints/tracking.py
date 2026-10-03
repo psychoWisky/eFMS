@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.db.base import get_db
-from app.core.dependencies import get_current_verified_user
+from app.core.dependencies import get_current_verified_user, forbid_retired
 from app.models.user import User
 from app.models.efms import EfmsFile, RouteEntry
 from app.models.efms_extra import Docket
@@ -26,7 +26,7 @@ async def tracking_history(
     from_date: Optional[str] = Query(None, alias="from"),
     to_date: Optional[str] = Query(None, alias="to"),
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_verified_user),
+    user: User = Depends(forbid_retired),
 ):
     """Every file the caller created, received, or forwarded — one row per
     file, not per movement. Ref-number search is handled client-side by the

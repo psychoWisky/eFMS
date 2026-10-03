@@ -7,7 +7,7 @@ import { confirmAction, showSuccess, showBlocked, apiErrorDetail, askRenameDispl
 import { useActiveRole } from "@/stores/auth.store";
 import { Plus, Pencil, Trash2, Loader2, X, ShieldCheck, Lock } from "lucide-react";
 
-interface RoleSummary { id: string; name: string; description: string | null; is_system: boolean; user_count: number; former_names?: string[]; }
+interface RoleSummary { id: string; name: string; description: string | null; is_system: boolean; user_count: number; former_names?: string[]; allow_multiple_holders?: boolean; }
 
 const INPUT = "w-full border border-gray-300 rounded-lg px-3 py-2.5 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]";
 const LABEL = "block text-sm font-semibold text-gray-600 mb-1";
@@ -21,6 +21,8 @@ function RoleFormModal({ role, onClose }: { role: RoleSummary | null; onClose: (
   const isEdit = !!role;
   const [name, setName] = useState(role?.name ?? "");
   const [description, setDescription] = useState(role?.description ?? "");
+  // Several people may hold this role in the same establishment + department.
+  const [multi, setMulti] = useState(role?.allow_multiple_holders ?? false);
 
   const save = useMutation({
     // showFormerly only matters when an edit changes the name. The explicit
@@ -30,17 +32,22 @@ function RoleFormModal({ role, onClose }: { role: RoleSummary | null; onClose: (
       const trimmedName = name.trim();
       const trimmedDescription = (description || "").trim() || null;
       return isEdit
-        ? await api.patch(`/auth/admin/roles/${role!.id}`, { name: trimmedName, description: trimmedDescription, show_formerly: showFormerly })
-        : await api.post("/auth/admin/roles", { name: trimmedName, description: trimmedDescription });
+        ? await api.patch(`/auth/admin/roles/${role!.id}`, {
+            name: trimmedName, description: trimmedDescription, show_formerly: showFormerly,
+            ...(role!.is_system ? {} : { allow_multiple_holders: multi }),
+          })
+        : await api.post("/auth/admin/roles", { name: trimmedName, description: trimmedDescription, allow_multiple_holders: multi });
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["admin-roles"] });
       showSuccess(isEdit ? "Role updated." : "Role created.");
       onClose();
     },
-    onError: (err: unknown) => {
-      const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail || (err as Error)?.message;
-      toast.error(typeof msg === "string" ? msg : "Could not save role.");
+    onError: async (err: unknown) => {
+      const msg = apiErrorDetail(err) || (err as Error)?.message;
+      // e.g. "cannot limit to one person" lists who is in the way — show it in full.
+      if (typeof msg === "string" && msg.includes("\n")) await showBlocked(msg, "Cannot change this role");
+      else toast.error(typeof msg === "string" ? msg : "Could not save role.");
     },
   });
 
@@ -80,6 +87,20 @@ function RoleFormModal({ role, onClose }: { role: RoleSummary | null; onClose: (
               placeholder="What this role is for (optional)"
             />
           </div>
+          {!nameLocked && (
+            <label className="flex items-start gap-3 p-3 rounded-xl border border-gray-200 bg-gray-50 cursor-pointer">
+              <input type="checkbox" checked={multi} onChange={(e) => setMulti(e.target.checked)}
+                className="mt-0.5 w-4 h-4 rounded border-gray-300 text-[#0D6E6E] focus:ring-[#0D6E6E]" />
+              <span>
+                <span className="block text-sm font-semibold text-gray-800">Allow several people in the same department</span>
+                <span className="block text-xs text-gray-500 mt-0.5">
+                  {multi
+                    ? "Many people can hold this role in one establishment's department (for example Faculty)."
+                    : "Only one person can hold this role in an establishment's department (for example Registrar). A second person is refused."}
+                </span>
+              </span>
+            </label>
+          )}
         </div>
         <div className="px-6 py-4 border-t border-gray-200 flex justify-end gap-3">
           <button onClick={onClose} className="px-4 py-2.5 rounded-lg text-sm font-semibold text-gray-600 hover:bg-gray-100">Cancel</button>
@@ -176,7 +197,7 @@ export function RoleManagementSection() {
         <div className="bg-white rounded-xl border border-gray-200 overflow-x-auto">
           <table className="w-full text-sm">
             <thead className="bg-gray-50 border-b">
-              <tr>{["Role Name", "Description", "Users", "Type", "Actions"].map((h) => (
+              <tr>{["Role Name", "Description", "Users", "Per department", "Type", "Actions"].map((h) => (
                 <th key={h} className="text-left px-4 py-3 font-semibold text-gray-600 whitespace-nowrap">{h}</th>
               ))}</tr>
             </thead>
@@ -196,6 +217,13 @@ export function RoleManagementSection() {
                   </td>
                   <td className="px-4 py-3 text-gray-500">{r.description ?? "—"}</td>
                   <td className="px-4 py-3 text-gray-500">{r.user_count}</td>
+                  <td className="px-4 py-3 whitespace-nowrap">
+                    {r.is_system
+                      ? <span className="text-gray-400">—</span>
+                      : r.allow_multiple_holders
+                        ? <span className="px-2 py-0.5 bg-emerald-100 text-emerald-700 rounded-full text-xs font-semibold">Many people</span>
+                        : <span className="px-2 py-0.5 bg-amber-100 text-amber-700 rounded-full text-xs font-semibold">One person</span>}
+                  </td>
                   <td className="px-4 py-3">
                     {r.is_system
                       ? <span className="px-2 py-0.5 bg-blue-100 text-blue-700 rounded-full text-xs font-semibold">System</span>

@@ -35,7 +35,7 @@ from app.models.audit import AuditLog
 from app.models.efms import EfmsFile, RouteEntry
 from app.models.efms_extra import Docket
 from app.models.organization import Department, Establishment
-from app.models.user import SystemRole, User, UserRole
+from app.models.user import Role, SystemRole, User, UserRole
 from app.utils.workspace import role_context
 
 _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -190,8 +190,11 @@ async def _generic_refs(db: AsyncSession, target_table: str, target_id: UUID, ha
     """Reasons for every other table that references the item (e.g. the
     sibling app's courses/theses) — anything not already explained."""
     out: list[str] = []
-    for table, column, _rule in await _referrers(db, target_table):
-        if table in handled:
+    for table, column, rule in await _referrers(db, target_table):
+        # Rows removed together with the item (cascade) or just un-linked
+        # (set null) don't stop a delete — only references that would be
+        # orphaned do.
+        if table in handled or rule in ("c", "n"):
             continue
         n = await _count(db, table, column, target_id)
         if n:
@@ -315,6 +318,12 @@ async def establishment_blockers(db: AsyncSession, estb_id: UUID) -> list[str]:
 Seat = tuple[str, Optional[UUID], Optional[UUID]]
 
 
+async def multi_holder_roles(db: AsyncSession) -> set[str]:
+    """Names of roles the Super Admin allowed several holders per seat."""
+    rows = await db.execute(select(Role.name).where(Role.allow_multiple_holders == True))
+    return set(rows.scalars().all())
+
+
 def seat_of(user: User, ur: UserRole) -> Optional[Seat]:
     """The seat a role row occupies, or None when it isn't a seat."""
     if ur.role == SystemRole.SUPER_ADMIN:
@@ -352,8 +361,11 @@ async def assert_new_seats_free(db: AsyncSession, user: User, before: set[Seat])
     advisory lock makes two simultaneous assignments of one seat take turns,
     so the second sees the first."""
     after = await seats_of_user(db, user)
+    many = await multi_holder_roles(db)
     for seat in sorted(after - before, key=str):
         role, estb_id, dept_id = seat
+        if role in many:
+            continue  # Super Admin allowed several holders for this role
         await db.execute(
             text("SELECT pg_advisory_xact_lock(hashtext(:k))"),
             {"k": f"seat:{role}:{estb_id}:{dept_id}"},
@@ -364,7 +376,8 @@ async def assert_new_seats_free(db: AsyncSession, user: User, before: set[Seat])
         )).scalars().all()
         for ur in others:
             holder = ur.user
-            if holder is None or holder.origin_user_id is not None:
+            # A retired person has handed the seat over — it is free again.
+            if holder is None or holder.origin_user_id is not None or holder.is_retired:
                 continue
             if seat_of(holder, ur) == seat:
                 status = "" if holder.is_active else " (a deactivated account)"
@@ -377,3 +390,28 @@ async def assert_new_seats_free(db: AsyncSession, user: User, before: set[Seat])
                         f"from them first, or use Transfer Ownership."
                     ),
                 )
+
+
+async def duplicate_seat_reasons(db: AsyncSession, role_name: str, limit: int = 6) -> list[str]:
+    """Seats of `role_name` that already have more than one holder — used to
+    refuse switching a role back to one-holder-only while that is untrue."""
+    rows = (await db.execute(
+        select(UserRole).options(selectinload(UserRole.user)).where(UserRole.role == role_name)
+    )).scalars().all()
+    seats: dict[Seat, list[User]] = {}
+    for ur in rows:
+        holder = ur.user
+        if holder is None or holder.origin_user_id is not None or holder.is_retired:
+            continue
+        seat = seat_of(holder, ur)
+        if seat is not None and all(h.id != holder.id for h in seats.get(seat, [])):
+            seats.setdefault(seat, []).append(holder)
+    out: list[str] = []
+    for seat, holders in seats.items():
+        if len(holders) > 1:
+            who = ", ".join(f"{h.full_name} ({h.email})" for h in holders)
+            out.append(f"The {await _seat_label(db, seat)} is held by {len(holders)} people: {who}.")
+    shown = out[:limit]
+    if len(out) > limit:
+        shown.append(f"…and {len(out) - limit} more.")
+    return shown

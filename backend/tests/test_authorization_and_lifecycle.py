@@ -197,9 +197,10 @@ async def test_super_admin_can_deactivate_and_reactivate_user(client, users, db)
     assert body["deactivated_at"] is not None
     assert body["deactivated_by"] == str(super_admin.id)
 
-    # Deactivated user is now locked out.
+    # "Retired" keeps a limited login (Docket only — see test_retired_users.py).
     r = await client.get("/auth/me", headers=auth_headers(target))
-    assert r.status_code == 401
+    assert r.status_code == 200
+    assert r.json()["is_retired"] is True
 
     # Reactivate.
     r = await client.patch(
@@ -212,6 +213,17 @@ async def test_super_admin_can_deactivate_and_reactivate_user(client, users, db)
 
     r = await client.get("/auth/me", headers=auth_headers(target))
     assert r.status_code == 200
+    assert r.json()["is_retired"] is False
+
+    # Any other reason locks the user out completely.
+    r = await client.patch(
+        f"/auth/admin/users/{target.id}/status",
+        json={"is_active": False, "reason_type": "resigned"},
+        headers=auth_headers(super_admin),
+    )
+    assert r.status_code == 200
+    r = await client.get("/auth/me", headers=auth_headers(target))
+    assert r.status_code == 401
 
 
 @pytest.mark.asyncio

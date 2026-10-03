@@ -37,11 +37,14 @@ async def get_current_user(
             selectinload(User.department),
             selectinload(User.establishment),
         )
-        .where(User.id == user_id, User.is_active == True)
+        .where(User.id == user_id)
     )
     user = result.scalar_one_or_none()
 
-    if not user:
+    # A retired person (deactivated with the reason "retired") is let in with
+    # limited access — see forbid_retired / require_roles. Everyone else who
+    # is inactive stays locked out.
+    if not user or not (user.is_active or user.is_retired):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="User account not found or inactive",
@@ -53,6 +56,20 @@ async def get_current_user(
 async def get_current_verified_user(
     current_user: User = Depends(get_current_user),
 ) -> User:
+    return current_user
+
+
+RETIRED_MESSAGE = (
+    "Your account is retired. You can open and act on the files sent to you in your Docket, "
+    "but you cannot use this feature."
+)
+
+
+async def forbid_retired(current_user: User = Depends(get_current_verified_user)) -> User:
+    """For everything a retired person may not do: creating files, My Files,
+    search, tracking history. They keep the Docket and the files in it."""
+    if current_user.is_retired:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=RETIRED_MESSAGE)
     return current_user
 
 
@@ -80,6 +97,8 @@ async def require_kyc(
 
 def require_roles(*roles: SystemRole):
     async def role_checker(current_user: User = Depends(require_kyc)) -> User:
+        if current_user.is_retired:  # a retired person has no administrative access, whatever roles remain on file
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=RETIRED_MESSAGE)
         user_roles = {r.role for r in current_user.roles}
         if not any(r in user_roles for r in roles):
             raise HTTPException(

@@ -269,6 +269,30 @@ select.form-input { cursor: pointer; }
   font-weight: 600 !important;
 }
 
+/* ── Notesheet editor: tables and pictures ───────────────────────────────────
+   Column-border dragging, selected cells and scrolling for wide tables. */
+.ProseMirror .tableWrapper { overflow-x: auto; margin: 12px 0; }
+/* A new table fills the page; once its columns are sized, the inline width
+   Tiptap sets (a pixel value) takes over. */
+.ProseMirror table { table-layout: fixed; border-collapse: collapse; margin: 0; width: 100%; max-width: 100%; }
+.ProseMirror td, .ProseMirror th { position: relative; vertical-align: top; min-width: 30px; overflow-wrap: anywhere; }
+.ProseMirror .column-resize-handle {
+  position: absolute; right: -2px; top: 0; bottom: -2px; width: 4px;
+  background: #0D6E6E; pointer-events: none; z-index: 3;
+}
+.ProseMirror.resize-cursor { cursor: col-resize; }
+.ProseMirror .selectedCell::after {
+  content: ""; position: absolute; inset: 0; background: rgba(13, 110, 110, 0.18);
+  pointer-events: none; z-index: 2;
+}
+.ProseMirror img { max-width: 100%; height: auto; }
+.ProseMirror [data-image-wrap].ProseMirror-selectednode { outline: 2px solid #0D6E6E; outline-offset: 1px; }
+.ProseMirror [data-image-handle] {
+  display: none; width: 11px; height: 11px; background: #0D6E6E; border: 2px solid #fff;
+  border-radius: 3px; box-shadow: 0 0 0 1px #0D6E6E; z-index: 5; touch-action: none;
+}
+.ProseMirror [data-image-wrap].ProseMirror-selectednode [data-image-handle] { display: block; }
+
 /* ── Print styles ────────────────────────────────────────────────────────────── */
 @media print {
   .print\:hidden { display: none !important; }

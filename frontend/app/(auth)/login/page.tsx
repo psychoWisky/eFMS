@@ -88,7 +88,7 @@ export default function LoginPage() {
         return;
       }
       const isAdmin = ["admin", "super_admin"].includes(user.active_role ?? "");
-      router.replace(isAdmin ? "/admin" : "/dashboard");
+      router.replace(isAdmin && !user.is_retired ? "/admin" : "/dashboard");
     },
     onError: (err: unknown) => {
       setError(loginErrorMessage(err, "The OTP could not be verified. Please try again."));

@@ -143,9 +143,12 @@ export function EFMSDashboard() {
   });
 
   // My Files: files I created
+  // (A retired person has the Docket only — these two are not loaded for them.)
+  const isRetired = !!user?.is_retired;
   const { data: myFiles = [], isLoading: loadFiles } = useQuery<EfmsFile[]>({
     queryKey: ["efms-files-outbox"],
     queryFn: async () => (await api.get("/efms/files?outbox=true")).data,
+    enabled: !isRetired,
   });
 
   // Released Files: files the current user themself created AND released —
@@ -157,6 +160,7 @@ export function EFMSDashboard() {
   const { data: releasedFiles = [], isLoading: loadReleased } = useQuery<ReleasedItem[]>({
     queryKey: ["docket-released-mine"],
     queryFn: async () => (await api.get("/docket/released/mine")).data,
+    enabled: !isRetired,
   });
 
   const releaseMutation = useMutation({
@@ -198,11 +202,13 @@ export function EFMSDashboard() {
   const myFilesPaged = paginate(myFilesT.view, myFilesPage);
   const releasedPaged = paginate(releasedT.view, releasedPage);
 
-  const SECTIONS: { id: Section; label: string; icon: React.ElementType; count?: number }[] = [
+  const ALL_SECTIONS: { id: Section; label: string; icon: React.ElementType; count?: number }[] = [
     { id: "docket", label: "Docket",   icon: Inbox,      count: docketItems.length },
     { id: "files",  label: "My Files", icon: FolderOpen, count: myFiles.length },
     { id: "new",    label: "New File", icon: FilePlus2 },
   ];
+  // A retired person works from the Docket only.
+  const SECTIONS = isRetired ? ALL_SECTIONS.filter((s) => s.id === "docket") : ALL_SECTIONS;
 
   function markRead(id: string) {
     setReadFiles((s) => {
@@ -240,6 +246,13 @@ export function EFMSDashboard() {
           </div>
         }
       />
+
+      {isRetired && (
+        <div className="mx-[15px] mt-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+          <span className="font-semibold">Retired account.</span> You can open and act on the files sent to you
+          here in your Docket. You cannot create new files.
+        </div>
+      )}
 
       {/* Section tabs */}
       <div className="bg-white border-b border-gray-200 px-[15px]">
