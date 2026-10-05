@@ -95,8 +95,8 @@ function RoleFormModal({ role, onClose }: { role: RoleSummary | null; onClose: (
                 <span className="block text-sm font-semibold text-gray-800">Allow several people in the same department</span>
                 <span className="block text-xs text-gray-500 mt-0.5">
                   {multi
-                    ? "Many people can hold this role in one establishment's department (for example Faculty)."
-                    : "Only one person can hold this role in an establishment's department (for example Registrar). A second person is refused."}
+                    ? "Many people can hold this role in the same department, or in the same establishment when it has no department (for example Faculty)."
+                    : "Only one person can hold this role in a department, or in an establishment when it has no department (for example Registrar). A second person is refused."}
                 </span>
               </span>
             </label>

@@ -15,7 +15,10 @@ item is safe to delete. `blocked()` turns reasons into the HTTP error.
 
 ROLE SEATS
 A "seat" is (role, establishment, department): e.g. Registrar of Dept X in
-Establishment Y. A seat can have only one holder. A role row with no
+Establishment Y. The department is optional — with only an establishment the
+seat is the whole establishment's (e.g. Registrar of Establishment Y), which
+is independent of the department seats inside it. A seat can have only one
+holder unless the role was marked "several people" (Role.allow_multiple_holders). A role row with no
 context of its own takes its holder's own establishment/department (see
 workspace.role_context). A seat with neither an establishment nor a
 department isn't a seat (organisation-wide roles) and super_admin is exempt.

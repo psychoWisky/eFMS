@@ -181,15 +181,18 @@ function UserFields({
             placeholder="Select…"
             searchPlaceholder="Search establishments…"
           /></div>
-        <div><label className={LABEL}>Department</label>
+        <div><label className={LABEL}>Department <span className="font-normal text-gray-400">(optional)</span></label>
           <SearchableSelect
             options={filteredDepts.map((d) => ({ value: d.id, label: d.name }))}
             value={form.department_id}
             onChange={(v) => setForm((f) => ({ ...f, department_id: v }))}
-            placeholder="Select…"
+            placeholder={form.establishment_id ? "Whole establishment" : "Select…"}
             searchPlaceholder="Search departments…"
           /></div>
       </div>
+      <p className="-mt-2 text-xs text-gray-500">
+        Choose only an Establishment to give the role to the whole establishment, or also pick a Department to limit it to that department.
+      </p>
       <div className="grid grid-cols-2 gap-4">
         <div><label className={LABEL}>Role *</label>
           <SearchableSelect
@@ -396,19 +399,17 @@ function EditUserModal({ user, onClose, establishments, departments, roleOptions
   );
   const save = useMutation({
     mutationFn: () => {
-      // Validate that any extra role row has all three fields (establishment, department, role)
+      // An extra role needs an establishment and a role. The department is
+      // optional: leave it empty to give the role to the whole establishment.
       for (let i = 0; i < extraRoles.length; i++) {
         const r = extraRoles[i];
         if (r.role || r.department_id || r.establishment_id) {
           if (!r.establishment_id) throw new Error(`Role ${i + 1}: Please select an establishment.`);
-          if (!r.department_id) throw new Error(`Role ${i + 1}: Please select a department.`);
           if (!r.role) throw new Error(`Role ${i + 1}: Please select a role.`);
         }
       }
 
-      const validExtras = extraRoles.filter(
-        (r) => r.role && r.department_id && r.establishment_id
-      );
+      const validExtras = extraRoles.filter((r) => r.role && r.establishment_id);
 
       // Assemble all role assignments
       const allRoles = [
@@ -425,7 +426,7 @@ function EditUserModal({ user, onClose, establishments, departments, roleOptions
       for (const r of allRoles) {
         const key = `${r.role}__${r.establishment_id ?? ""}__${r.department_id ?? ""}`;
         if (seen.has(key)) {
-          throw new Error("Duplicate role assignment: the same establishment, department, and role combination cannot be assigned twice.");
+          throw new Error("Duplicate role assignment: this person already has the same role in the same establishment and department (or the same whole-establishment role).");
         }
         seen.add(key);
       }
@@ -463,7 +464,7 @@ function EditUserModal({ user, onClose, establishments, departments, roleOptions
           <div className="mt-5 border-t border-gray-100 pt-4">
             <div className="flex items-center justify-between mb-2">
               <label className={LABEL}>
-                Additional roles <span className="font-normal text-gray-400">(hierarchical: choose Establishment 1st, Department 2nd, Role 3rd)</span>
+                Additional roles <span className="font-normal text-gray-400">(choose an Establishment, optionally a Department, then the Role)</span>
               </label>
             </div>
             <div className="space-y-3">
@@ -476,10 +477,11 @@ function EditUserModal({ user, onClose, establishments, departments, roleOptions
                   .filter((d) => d.is_active !== false && (!row.establishment_id || d.establishment_id === row.establishment_id));
 
                 // Identify roles already taken for the exact SAME establishment and department
+                // (department "" = the whole establishment, which counts as its own place)
                 const takenRolesForContext = new Set<string>();
-                if (row.establishment_id && row.department_id) {
+                if (row.establishment_id) {
                   // Primary role check
-                  if (form.establishment_id === row.establishment_id && form.department_id === row.department_id && form.role) {
+                  if (form.establishment_id === row.establishment_id && (form.department_id || "") === (row.department_id || "") && form.role) {
                     takenRolesForContext.add(form.role);
                   }
                   // Other extra role rows check
@@ -487,7 +489,7 @@ function EditUserModal({ user, onClose, establishments, departments, roleOptions
                     if (
                       j !== i &&
                       other.establishment_id === row.establishment_id &&
-                      other.department_id === row.department_id &&
+                      (other.department_id || "") === (row.department_id || "") &&
                       other.role
                     ) {
                       takenRolesForContext.add(other.role);
@@ -525,13 +527,13 @@ function EditUserModal({ user, onClose, establishments, departments, roleOptions
                       </div>
                       {/* 2nd: Department (depends on Establishment) */}
                       <div>
-                        <label className="block text-xs font-semibold text-gray-500 mb-1">Department *</label>
+                        <label className="block text-xs font-semibold text-gray-500 mb-1">Department <span className="font-normal text-gray-400">(optional)</span></label>
                         <SearchableSelect
                           options={rowDepts.map((d) => ({ value: d.id, label: d.name }))}
                           value={row.department_id}
                           disabled={!row.establishment_id}
                           onChange={(v) => setRow({ department_id: v, role: "" })}
-                          placeholder={row.establishment_id ? "Select department…" : "Select establishment first"}
+                          placeholder={row.establishment_id ? "Whole establishment (no department)" : "Select establishment first"}
                           searchPlaceholder="Search departments…"
                         />
                       </div>
@@ -541,10 +543,10 @@ function EditUserModal({ user, onClose, establishments, departments, roleOptions
                         <SearchableSelect
                           options={roleOpts}
                           value={row.role}
-                          disabled={!row.establishment_id || !row.department_id}
+                          disabled={!row.establishment_id}
                           onChange={(v) => setRow({ role: v })}
                           clearable={false}
-                          placeholder={!row.establishment_id ? "Select establishment first" : (!row.department_id ? "Select dept first" : "Select role…")}
+                          placeholder={!row.establishment_id ? "Select establishment first" : "Select role…"}
                           searchPlaceholder="Search roles…"
                         />
                       </div>
@@ -556,7 +558,7 @@ function EditUserModal({ user, onClose, establishments, departments, roleOptions
             <button
               type="button"
               onClick={() => setExtraRoles((s) => [...s, { role: "", department_id: "", establishment_id: "" }])}
-              disabled={extraRoles.some((r) => !r.establishment_id || !r.department_id || !r.role)}
+              disabled={extraRoles.some((r) => !r.establishment_id || !r.role)}
               className="mt-3 flex items-center gap-1.5 px-3 py-2 text-sm font-semibold text-[#0D6E6E] border border-dashed border-[#0D6E6E]/40 rounded-lg hover:bg-[#F0F7F7] disabled:opacity-40 disabled:cursor-not-allowed"
             >
               <Plus size={15} /> Add another role
