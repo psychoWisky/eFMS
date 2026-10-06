@@ -14,6 +14,7 @@ import {
   Power, PowerOff, ShieldAlert, Upload, Download, CheckCircle2, XCircle, ClipboardCopy, ArrowRightLeft, Trash2,
 } from "lucide-react";
 import { SearchableSelect } from "@/components/shared/searchable-select";
+import { makeDepartmentLabel } from "@/lib/department-label";
 import { paginate, TablePagination } from "@/components/shared/table-pagination";
 import { useTableSearchSort, TableSearchInput, SortTh } from "@/components/shared/table-controls";
 
@@ -147,6 +148,7 @@ function UserFields({
   disabledEmail?: boolean;
 }) {
   const filteredDepts = departments.filter((d) => !form.establishment_id || d.establishment_id === form.establishment_id);
+  const deptLabel = makeDepartmentLabel(filteredDepts, establishments);
   return (
     <div className="space-y-4">
       <div className="grid grid-cols-3 gap-4">
@@ -183,7 +185,7 @@ function UserFields({
           /></div>
         <div><label className={LABEL}>Department <span className="font-normal text-gray-400">(optional)</span></label>
           <SearchableSelect
-            options={filteredDepts.map((d) => ({ value: d.id, label: d.name }))}
+            options={filteredDepts.map((d) => ({ value: d.id, label: deptLabel(d) }))}
             value={form.department_id}
             onChange={(v) => setForm((f) => ({ ...f, department_id: v }))}
             placeholder={form.establishment_id ? "Whole establishment" : "Select…"}
@@ -475,6 +477,7 @@ function EditUserModal({ user, onClose, establishments, departments, roleOptions
                 // Filter departments belonging to selected establishment
                 const rowDepts = departments
                   .filter((d) => d.is_active !== false && (!row.establishment_id || d.establishment_id === row.establishment_id));
+                const rowDeptLabel = makeDepartmentLabel(rowDepts, establishments);
 
                 // Identify roles already taken for the exact SAME establishment and department
                 // (department "" = the whole establishment, which counts as its own place)
@@ -520,7 +523,7 @@ function EditUserModal({ user, onClose, establishments, departments, roleOptions
                         <SearchableSelect
                           options={establishments.filter((e) => e.is_active !== false).map((e) => ({ value: e.id, label: e.name }))}
                           value={row.establishment_id}
-                          onChange={(v) => setRow({ establishment_id: v, department_id: "", role: "" })}
+                          onChange={(v) => setRow({ establishment_id: v, department_id: "" })}
                           placeholder="Select establishment…"
                           searchPlaceholder="Search establishments…"
                         />
@@ -529,10 +532,10 @@ function EditUserModal({ user, onClose, establishments, departments, roleOptions
                       <div>
                         <label className="block text-xs font-semibold text-gray-500 mb-1">Department <span className="font-normal text-gray-400">(optional)</span></label>
                         <SearchableSelect
-                          options={rowDepts.map((d) => ({ value: d.id, label: d.name }))}
+                          options={rowDepts.map((d) => ({ value: d.id, label: rowDeptLabel(d) }))}
                           value={row.department_id}
                           disabled={!row.establishment_id}
-                          onChange={(v) => setRow({ department_id: v, role: "" })}
+                          onChange={(v) => setRow({ department_id: v })}
                           placeholder={row.establishment_id ? "Whole establishment (no department)" : "Select establishment first"}
                           searchPlaceholder="Search departments…"
                         />

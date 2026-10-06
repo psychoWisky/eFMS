@@ -1344,17 +1344,24 @@ async def edit_user(
         user.middle_name = body.middle_name.strip() or None
     if body.last_name is not None:
         user.last_name = body.last_name.strip()
-    if body.mobile is not None:
-        user.mobile = body.mobile
-    if body.employee_code is not None:
-        user.employee_code = body.employee_code
-    if body.date_of_birth is not None:
-        user.date_of_birth = _parse_dob(body.date_of_birth)
+    # "Sent as empty" must clear a value, while "not sent" must leave it
+    # alone — `is not None` cannot tell these apart, which made clearing a
+    # department / establishment / employee code / date of birth look saved
+    # and then reappear. model_fields_set records what the client actually sent.
+    sent = body.model_fields_set
+    if "mobile" in sent:
+        user.mobile = (body.mobile or "").strip() or None
+    if "employee_code" in sent:
+        user.employee_code = (body.employee_code or "").strip() or None
+    if "date_of_birth" in sent:
+        user.date_of_birth = _parse_dob(body.date_of_birth) if body.date_of_birth else None
     if body.designation is not None:
         user.designation = body.designation
-    if body.establishment_id is not None:
+    if "establishment_id" in sent:
+        if body.establishment_id != user.establishment_id and "department_id" not in sent:
+            user.department_id = None  # a department belongs to its establishment
         user.establishment_id = body.establishment_id
-    if body.department_id is not None:
+    if "department_id" in sent:
         user.department_id = body.department_id
     # Multi-role edit (`roles`): the full set the user may switch between,
     # each with its own optional department/establishment context.

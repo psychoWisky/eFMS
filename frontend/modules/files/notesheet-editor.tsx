@@ -21,6 +21,7 @@ import { SearchableSelect } from "@/components/shared/searchable-select";
 import { useRichTextEditor, RichTextToolbar } from "@/components/shared/rich-text-editor";
 import { EditorContent } from "@tiptap/react";
 import { useFavoriteRecipients, splitRecipientValue, resolveRecipientValue } from "@/hooks/use-favorite-recipients";
+import { makeDepartmentLabel } from "@/lib/department-label";
 import { useRecipientFilter } from "@/hooks/use-recipient-filter";
 import { OfficeSectionFilter } from "@/components/shared/office-section-filter";
 import { useAttachmentQueue } from "@/hooks/use-attachment-queue";
@@ -65,7 +66,7 @@ interface EfmsFile {
 // still visible here as their historical contribution.
 interface HolderNotesheet { id: string; file_id: string; user_id: string; content: string; sequence: number; is_current: boolean; created_at: string; updated_at: string; user_info?: PersonInfo | null; accessible?: boolean; }
 interface DropItem { id: string; name: string; label?: string; is_active?: boolean; }
-interface DeptItem { id: string; name: string; }
+interface DeptItem { id: string; name: string; establishment_id?: string | null; }
 
 const STATUS_STYLES: Record<string, { bg: string; text: string; label: string }> = {
   draft:      { bg: "bg-gray-100",  text: "text-gray-700",  label: "Draft" },
@@ -185,11 +186,17 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
   const { officeId, setOfficeId, sectionId, setSectionId, offices, sections, users, loadingUsers } = useRecipientFilter();
 
   // Draft-edit dropdown sources — same endpoints New File creation already uses.
+  const { data: establishmentsList = [] } = useQuery<{ id: string; name: string }[]>({
+    queryKey: ["admin-establishments"],
+    queryFn: async () => (await api.get("/admin/establishments")).data,
+    enabled: editingDraft,
+  });
   const { data: departments = [] } = useQuery<DeptItem[]>({
     queryKey: ["admin-departments"],
     queryFn: async () => (await api.get("/admin/departments")).data,
     enabled: editingDraft,
   });
+  const departmentLabel = makeDepartmentLabel(departments, establishmentsList);
   const { data: categories = [] } = useQuery<DropItem[]>({
     queryKey: ["admin-categories"],
     queryFn: async () => (await api.get("/admin/categories")).data,
@@ -1220,7 +1227,7 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                   <div>
                     <label className="block text-sm font-semibold text-gray-700 mb-1.5">Department</label>
                     <SearchableSelect
-                      options={departments.map((d) => ({ value: d.id, label: d.name }))}
+                      options={departments.map((d) => ({ value: d.id, label: departmentLabel(d) }))}
                       value={draftDepartmentId}
                       onChange={setDraftDepartmentId}
                       placeholder="None"

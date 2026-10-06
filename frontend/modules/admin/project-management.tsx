@@ -13,6 +13,7 @@ import { toast } from "sonner";
 import { confirmAction, showSuccess } from "@/lib/alert";
 import { Plus, FolderKanban, CheckCircle2, RotateCcw, UserPlus, Repeat, UserPen, Pencil } from "lucide-react";
 import { SearchableSelect } from "@/components/shared/searchable-select";
+import { makeDepartmentLabel } from "@/lib/department-label";
 
 interface Project {
   id: string;
@@ -36,7 +37,8 @@ interface AdminUser {
   is_active: boolean;
 }
 
-interface DeptOpt { id: string; name: string; is_active: boolean; }
+interface DeptOpt { id: string; name: string; is_active: boolean; establishment_id?: string | null; }
+interface EstbOpt { id: string; name: string; }
 interface RoleOpt { id: string; name: string; is_system: boolean; }
 
 const prettyRole = (name: string) =>
@@ -87,6 +89,12 @@ export function ProjectManagementSection() {
     queryKey: ["admin-departments-all"],
     queryFn: async () => (await api.get("/admin/departments/all")).data,
   });
+  const { data: establishments = [] } = useQuery<EstbOpt[]>({
+    queryKey: ["admin-establishments-all"],
+    queryFn: async () => (await api.get("/admin/establishments/all")).data,
+  });
+  const activeDepartments = departments.filter((d) => d.is_active !== false);
+  const deptLabel = makeDepartmentLabel(activeDepartments, establishments);
   const { data: roles = [] } = useQuery<RoleOpt[]>({
     queryKey: ["admin-roles"],
     queryFn: async () => (await api.get("/auth/admin/roles")).data,
@@ -434,7 +442,7 @@ export function ProjectManagementSection() {
                   <div>
                     <label className={LABEL}>Department</label>
                     <SearchableSelect
-                      options={departments.filter((d) => d.is_active !== false).map((d) => ({ value: d.id, label: d.name }))}
+                      options={activeDepartments.map((d) => ({ value: d.id, label: deptLabel(d) }))}
                       value={profileForm.department_id}
                       onChange={(v) => setProfileForm((s) => ({ ...s, department_id: v }))}
                       placeholder="None"

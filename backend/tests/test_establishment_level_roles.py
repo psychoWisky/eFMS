@@ -225,3 +225,120 @@ async def test_bulk_import_accepts_establishment_only_rows(client, users, db):
         for m in mails:
             await _drop_user(db, m)
         await _drop_org(db, [e["id"]], [])
+
+
+# ═══════════ Clearing a person's department / establishment sticks ═══════════
+
+@pytest.mark.asyncio
+async def test_clearing_a_department_in_edit_user_is_saved(client, users, db):
+    admin = await users.make(SystemRole.SUPER_ADMIN)
+    e = await _estb(client, admin)
+    d = await _dept(client, admin, e["id"])
+    emails = []
+    try:
+        r, m = await _api_user(client, admin, role="registrar", estb=e["id"], dept=d["id"], tag="clear"); assert r.status_code == 201
+        emails.append(m); uid = r.json()["id"]
+        assert r.json()["department_id"] == d["id"]
+
+        # what the Edit User screen sends when the Department is removed
+        r = await client.patch(f"/auth/admin/users/{uid}", json={
+            "establishment_id": e["id"], "department_id": None,
+            "roles": [{"role": "registrar", "establishment_id": e["id"], "department_id": None}]}, headers=H(admin))
+        assert r.status_code == 200, r.text
+        assert r.json()["department_id"] is None
+        # ... and it is still gone when the screen is opened again
+        again = next(u for u in (await client.get("/auth/admin/users", headers=H(admin))).json() if u["id"] == uid)
+        assert again["department_id"] is None and again["establishment_id"] == e["id"]
+        assert [(x["role"], x["department_id"]) for x in again["roles"]] == [("registrar", None)]
+
+        # a field that is NOT sent is left alone (here the department comes back only when set again)
+        r = await client.patch(f"/auth/admin/users/{uid}", json={"department_id": d["id"]}, headers=H(admin))
+        assert r.json()["department_id"] == d["id"]
+        r = await client.patch(f"/auth/admin/users/{uid}", json={"designation": "Registrar II"}, headers=H(admin))
+        assert r.json()["department_id"] == d["id"] and r.json()["designation"] == "Registrar II"
+    finally:
+        for m in emails:
+            await _drop_user(db, m)
+        await _drop_org(db, [e["id"]], [d["id"]])
+
+
+@pytest.mark.asyncio
+async def test_clearing_establishment_employee_code_and_birth_date_is_saved(client, users, db):
+    admin = await users.make(SystemRole.SUPER_ADMIN)
+    e = await _estb(client, admin)
+    d = await _dept(client, admin, e["id"])
+    emails = []
+    try:
+        r, m = await _api_user(client, admin, role="registrar", estb=e["id"], dept=d["id"], tag="clear2"); assert r.status_code == 201
+        emails.append(m); uid = r.json()["id"]
+        r = await client.patch(f"/auth/admin/users/{uid}", json={"employee_code": "EMP-7", "date_of_birth": "1980-02-03"}, headers=H(admin))
+        assert r.json()["employee_code"] == "EMP-7" and r.json()["date_of_birth"] == "1980-02-03"
+
+        r = await client.patch(f"/auth/admin/users/{uid}", json={"employee_code": None, "date_of_birth": None, "mobile": ""}, headers=H(admin))
+        assert r.status_code == 200, r.text
+        assert r.json()["employee_code"] is None and r.json()["date_of_birth"] is None and r.json()["mobile"] is None
+
+        # removing the establishment also removes its department (a department belongs to its establishment)
+        r = await client.patch(f"/auth/admin/users/{uid}", json={"establishment_id": None}, headers=H(admin))
+        assert r.status_code == 200, r.text
+        assert r.json()["establishment_id"] is None and r.json()["department_id"] is None
+    finally:
+        for m in emails:
+            await _drop_user(db, m)
+        await _drop_org(db, [e["id"]], [d["id"]])
+
+
+# ═══════════ The same department in several establishments ═══════════════════
+
+@pytest.mark.asyncio
+async def test_the_same_department_can_exist_in_several_establishments(client, users, db):
+    admin = await users.make(SystemRole.SUPER_ADMIN)
+    e1, e2, e3 = await _estb(client, admin), await _estb(client, admin), await _estb(client, admin)
+    emails, files, depts = [], [], []
+    try:
+        # same name AND same code in three establishments
+        for e in (e1, e2, e3):
+            r = await client.post("/admin/departments", json={"name": "Accounts", "code": "ACCT", "establishment_id": e["id"]}, headers=H(admin))
+            assert r.status_code == 201, r.text
+            depts.append(r.json()["id"])
+        assert len(set(depts)) == 3
+        # each establishment lists its own
+        for e, d in zip((e1, e2, e3), depts):
+            r = await client.get("/admin/departments", params={"establishment_id": e["id"]}, headers=H(admin))
+            assert [x["id"] for x in r.json()] == [d]
+
+        # a one-person role (Registrar) can be held in "Accounts" of EACH establishment
+        holders = []
+        for e, d in zip((e1, e2, e3), depts):
+            r, m = await _api_user(client, admin, role="registrar", estb=e["id"], dept=d, tag="acct")
+            assert r.status_code == 201, r.text
+            emails.append(m); holders.append(r.json()["id"])
+        # ...but not twice in the same one
+        r, _ = await _api_user(client, admin, role="registrar", estb=e1["id"], dept=depts[0], tag="dup")
+        assert r.status_code == 409
+
+        # files from the identical departments get distinct reference numbers
+        refs = set()
+        for uid in holders:
+            await _ready(db, uid)
+            h = await _headers_of(db, uid)
+            r = await client.post("/efms/files", json={"subject": "Same department file", "category": "general", "initial_content": "x"}, headers=h)
+            assert r.status_code == 201, r.text
+            files.append(r.json()["id"]); refs.add(r.json()["ref_number"])
+        assert len(refs) == 3
+
+        # deleting one establishment's copy leaves the others untouched
+        await _files(db, files); files.clear()          # files first: they reference their creators
+        for uid_mail in list(emails):
+            await _drop_user(db, uid_mail)
+        emails.clear()
+        r = await client.delete(f"/admin/departments/{depts[0]}", headers=H(admin))
+        assert r.status_code == 204, r.text
+        still = {x["id"] for e in (e2, e3) for x in (await client.get("/admin/departments", params={"establishment_id": e["id"]}, headers=H(admin))).json()}
+        assert still == {depts[1], depts[2]}
+        depts = depts[1:]
+    finally:
+        await _files(db, files)
+        for m in emails:
+            await _drop_user(db, m)
+        await _drop_org(db, [e1["id"], e2["id"], e3["id"]], depts)
