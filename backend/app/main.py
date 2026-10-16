@@ -15,6 +15,8 @@ import app.models.efms          # noqa: F401
 import app.models.audit         # noqa: F401
 import app.models.admin         # noqa: F401
 import app.models.efms_extra    # noqa: F401
+import app.models.project       # noqa: F401
+import app.models.foc           # noqa: F401
 from app.core.exceptions import (
     AppException, app_exception_handler,
     validation_exception_handler, generic_exception_handler

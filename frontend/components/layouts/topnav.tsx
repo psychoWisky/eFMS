@@ -75,6 +75,8 @@ export function EFMSTopNav({ sidebarWidth }: { sidebarWidth: number }) {
     if (!n.is_read) {
       try { await markOneRead(n.id); } catch { /* non-fatal — still try to open the file */ }
     }
+    // FOC notifications open the FOC Docket.
+    if (n.type === "foc") { router.push("/foc"); return; }
     if (!n.file_id) return;
     try {
       await api.get(`/efms/files/${n.file_id}`);

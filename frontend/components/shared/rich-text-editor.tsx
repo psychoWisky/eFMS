@@ -10,10 +10,11 @@
 // height, cell colour, drag a column border to resize).
 import { useEffect, useRef, useState } from "react";
 import { useEditor, EditorContent, useEditorState } from "@tiptap/react";
-import { findParentNode, type Editor } from "@tiptap/core";
+import { Extension, Mark, findParentNode, type Editor } from "@tiptap/core";
 import StarterKit from "@tiptap/starter-kit";
 import TextAlign from "@tiptap/extension-text-align";
 import Highlight from "@tiptap/extension-highlight";
+import { TextStyleKit } from "@tiptap/extension-text-style";
 import Image from "@tiptap/extension-image";
 import { Table } from "@tiptap/extension-table";
 import { TableRow } from "@tiptap/extension-table-row";
@@ -21,10 +22,12 @@ import { TableCell } from "@tiptap/extension-table-cell";
 import { TableHeader } from "@tiptap/extension-table-header";
 import { TableMap, selectionCell } from "@tiptap/pm/tables";
 import type { EditorView } from "@tiptap/pm/view";
+import { Slice } from "@tiptap/pm/model";
 import { toast } from "sonner";
+import { cleanPastedHtml, plainTextToHtml } from "@/lib/notesheet-paste";
 import {
   Bold, Italic, Underline as UIcon, AlignLeft, AlignCenter, AlignRight, List, ListOrdered,
-  Grid2x2, Highlighter, ImagePlus, Trash2, Merge, Split, PaintBucket,
+  Grid2x2, Highlighter, ImagePlus, Trash2, Merge, Split, PaintBucket, AlignJustify, RemoveFormatting,
 } from "lucide-react";
 
 // This project has no @tailwindcss/typography plugin, so the bare "prose"
@@ -34,7 +37,7 @@ import {
 // table borders) look non-functional even though the underlying Tiptap
 // commands were always executing correctly and producing valid HTML.
 export const NOTESHEET_EDITOR_CONTENT_CLASS =
-  "prose max-w-none focus:outline-none min-h-[400px] p-5 text-base leading-relaxed " +
+  "ns-rich prose max-w-none focus:outline-none min-h-[400px] p-5 text-base leading-relaxed " +
   "[&_h1]:text-2xl [&_h1]:font-bold [&_h1]:mt-4 [&_h1]:mb-2 " +
   "[&_h2]:text-xl [&_h2]:font-bold [&_h2]:mt-4 [&_h2]:mb-2 " +
   "[&_h3]:text-lg [&_h3]:font-semibold [&_h3]:mt-3 [&_h3]:mb-1 " +
@@ -215,26 +218,90 @@ function pictureFiles(list: FileList | null | undefined): File[] {
   return Array.from(list ?? []).filter((f) => f.type.startsWith("image/"));
 }
 
+// Set by transformPastedHTML for the paste in progress, so the user can be
+// told once that Word pictures did not come across.
+let droppedPastedImages = 0;
+
 function transformPastedHTML(html: string): string {
-  // Remove MS Word / LibreOffice proprietary tags and attributes while
-  // keeping structural HTML (headings, bold, italic, lists, tables)
-  return html
-    .replace(/<\/?o:[^>]*>/gi, "")
-    .replace(/<\/?w:[^>]*>/gi, "")
-    .replace(/<\/?m:[^>]*>/gi, "")
-    .replace(/<\/?v:[^>]*>/gi, "")
-    .replace(/<!--\[if[^>]*>[\s\S]*?<!\[endif\]-->/gi, "")
-    .replace(/\s*class="[^"]*Mso[^"]*"/gi, "")
-    .replace(/\s*class="[^"]*"/gi, "")
-    .replace(/\s*style="[^"]*mso-[^"]*"/gi, "")
-    .replace(/\s*style="[^"]*font-family:[^"]*"/gi, "")
-    .replace(/\s*style="[^"]*font-size:[^"]*"/gi, "")
-    // Pictures that point at a file on someone's computer or a web address
-    // cannot be stored — only embedded pictures survive a paste.
-    .replace(/<img\b(?![^>]*\ssrc="data:image\/)[^>]*>/gi, "")
-    .replace(/<p[^>]*>(\s|&nbsp;)*<\/p>/gi, "")
-    .replace(/\s*lang="[^"]*"/gi, "");
+  const { html: cleaned, droppedImages } = cleanPastedHtml(html);
+  droppedPastedImages += droppedImages;
+  return cleaned;
 }
+
+function reportDroppedImages() {
+  if (droppedPastedImages > 0) {
+    toast.info(
+      `${droppedPastedImages} picture${droppedPastedImages > 1 ? "s" : ""} could not be pasted with the text. ` +
+      "Copy each picture on its own and paste it, or use Insert picture.",
+    );
+  }
+  droppedPastedImages = 0;
+}
+
+// ── Formatting kept from pasted documents ──────────────────────────────────
+
+/** A node attribute kept as one CSS property: read from el.style, written
+ * back as the same inline style. */
+function cssAttr(name: string, css: string) {
+  return {
+    default: null,
+    parseHTML: (el: HTMLElement) => el.style.getPropertyValue(css) || null,
+    renderHTML: (attrs: Record<string, unknown>) => (attrs[name] ? { style: `${css}: ${attrs[name]}` } : {}),
+  };
+}
+
+// Paragraph indents, first-line indent, spacing before/after and line
+// spacing — what Word's Paragraph dialog sets.
+const ParagraphFormat = Extension.create({
+  name: "paragraphFormat",
+  addGlobalAttributes() {
+    const attr = cssAttr;
+    return [{
+      types: ["paragraph", "heading"],
+      attributes: {
+        marginLeft: attr("marginLeft", "margin-left"),
+        marginRight: attr("marginRight", "margin-right"),
+        textIndent: attr("textIndent", "text-indent"),
+        marginTop: attr("marginTop", "margin-top"),
+        marginBottom: attr("marginBottom", "margin-bottom"),
+        lineHeight: attr("lineHeight", "line-height"),
+      },
+    }];
+  },
+});
+
+// Word's "a. b. c." / "i. ii. iii." numbering: kept as the list's
+// list-style-type, so the editor, the history views and the PDF all draw it.
+const OL_TYPE_STYLE: Record<string, string> = { a: "lower-alpha", A: "upper-alpha", i: "lower-roman", I: "upper-roman" };
+const OrderedListStyle = Extension.create({
+  name: "orderedListStyle",
+  addGlobalAttributes() {
+    return [{
+      types: ["orderedList"],
+      attributes: {
+        listStyleType: {
+          default: null,
+          parseHTML: (el: HTMLElement) => el.style.listStyleType || OL_TYPE_STYLE[el.getAttribute("type") ?? ""] || null,
+          renderHTML: (attrs: Record<string, unknown>) =>
+            attrs.listStyleType ? { style: `list-style-type: ${attrs.listStyleType}` } : {},
+        },
+      },
+    }];
+  },
+});
+
+const Superscript = Mark.create({
+  name: "superscript",
+  excludes: "subscript",
+  parseHTML: () => [{ tag: "sup" }, { style: "vertical-align", getAttrs: (v) => (v === "super" ? null : false) }],
+  renderHTML: () => ["sup", 0],
+});
+const Subscript = Mark.create({
+  name: "subscript",
+  excludes: "superscript",
+  parseHTML: () => [{ tag: "sub" }, { style: "vertical-align", getAttrs: (v) => (v === "sub" ? null : false) }],
+  renderHTML: () => ["sub", 0],
+});
 
 // ── Tables ──────────────────────────────────────────────────────────────────
 
@@ -265,11 +332,29 @@ const TableRowSized = TableRow.extend({
     };
   },
 });
+// Cell borders as Word draws them (a borderless layout table, a line only
+// under a heading row, …) and the cell's vertical alignment.
+const SIDES = ["top", "right", "bottom", "left"] as const;
+const cellFormat = {
+  ...shading,
+  borders: {
+    default: null,
+    parseHTML: (el: HTMLElement) => {
+      const parts = SIDES
+        .map((side) => [side, el.style.getPropertyValue(`border-${side}`)] as const)
+        .filter(([, v]) => v)
+        .map(([side, v]) => `border-${side}: ${v}`);
+      return parts.length ? parts.join("; ") : null;
+    },
+    renderHTML: (attrs: Record<string, unknown>) => (attrs.borders ? { style: String(attrs.borders) } : {}),
+  },
+  verticalAlign: cssAttr("verticalAlign", "vertical-align"),
+};
 const TableCellShaded = TableCell.extend({
-  addAttributes() { return { ...this.parent?.(), ...shading }; },
+  addAttributes() { return { ...this.parent?.(), ...cellFormat }; },
 });
 const TableHeaderShaded = TableHeader.extend({
-  addAttributes() { return { ...this.parent?.(), ...shading }; },
+  addAttributes() { return { ...this.parent?.(), ...cellFormat }; },
 });
 
 const MIN_COLUMN_PX = 30;
@@ -598,6 +683,13 @@ export function useRichTextEditor({ content, onChange, editable = true }: {
     extensions: [
       StarterKit,
       Highlight.configure({ multicolor: true }),
+      // Font, size, colour, text background and line spacing of pasted
+      // Word / Google Docs text.
+      TextStyleKit,
+      ParagraphFormat,
+      OrderedListStyle,
+      Superscript,
+      Subscript,
       TextAlign.configure({ types: ["heading", "paragraph"] }),
       // Inline, like a Word "in line with text" picture: it sits in a
       // paragraph, so the align buttons centre / right-align it.
@@ -612,6 +704,16 @@ export function useRichTextEditor({ content, onChange, editable = true }: {
     editorProps: {
       attributes: { class: NOTESHEET_EDITOR_CONTENT_CLASS },
       transformPastedHTML,
+      // Pasting onto an empty line: let the first pasted paragraph keep its
+      // own alignment / spacing instead of taking over the empty line's.
+      transformPasted(slice, view) {
+        const { $from, empty } = view.state.selection;
+        if (slice.openStart > 0 && empty && $from.parent.isTextblock && $from.parent.content.size === 0
+          && slice.content.firstChild?.isTextblock) {
+          return new Slice(slice.content, 0, slice.openEnd);
+        }
+        return slice;
+      },
       // A screenshot (or a picture copied from anywhere) arrives as an image
       // file on the clipboard. When text comes with it (Word, a web page) the
       // normal paste keeps the formatting instead.
@@ -619,10 +721,25 @@ export function useRichTextEditor({ content, onChange, editable = true }: {
         const cd = event.clipboardData;
         if (!cd) return false;
         const files = pictureFiles(cd.files);
-        if (files.length === 0 || cd.getData("text/plain").trim()) return false;
+        const text = cd.getData("text/plain");
+        if (files.length > 0 && !text.trim()) {
+          event.preventDefault();
+          void insertImageFiles(view, files);
+          return true;
+        }
+        // Formatted text (Word, Google Docs, web pages) goes through
+        // transformPastedHTML; afterwards say if any of its pictures were lost.
+        if (cd.getData("text/html")) {
+          setTimeout(reportDroppedImages, 0);
+          return false;
+        }
+        // Plain text only — typically a PDF viewer. Rebuild its paragraphs
+        // (inside a code block the text stays exactly as it is).
+        if (!text || view.state.selection.$from.parent.type.spec.code) return false;
         event.preventDefault();
-        void insertImageFiles(view, files);
-        return true;
+        // No event passed on: ProseMirror would hand it straight back to
+        // this handler.
+        return view.pasteHTML(plainTextToHtml(text));
       },
       handleDrop(view, event, _slice, moved) {
         if (moved) return false;
@@ -679,6 +796,7 @@ export function RichTextToolbar({ editor }: { editor: ReturnType<typeof useRichT
         <button type="button" title="Align left" className={BTN} onMouseDown={mark(() => editor.chain().focus().setTextAlign("left").run())}><AlignLeft size={15} /></button>
         <button type="button" title="Centre" className={BTN} onMouseDown={mark(() => editor.chain().focus().setTextAlign("center").run())}><AlignCenter size={15} /></button>
         <button type="button" title="Align right" className={BTN} onMouseDown={mark(() => editor.chain().focus().setTextAlign("right").run())}><AlignRight size={15} /></button>
+        <button type="button" title="Justify" className={BTN} onMouseDown={mark(() => editor.chain().focus().setTextAlign("justify").run())}><AlignJustify size={15} /></button>
         {SEP}
         <button type="button" title="Bulleted list" className={state.bullet ? BTN_ACTIVE : BTN}
           onMouseDown={mark(() => editor.chain().focus().toggleBulletList().run())}><List size={15} /></button>
@@ -692,6 +810,11 @@ export function RichTextToolbar({ editor }: { editor: ReturnType<typeof useRichT
             H{l}
           </button>
         ))}
+        <button type="button" title="Clear formatting of the selected text (font, size, colour, bold…)"
+          className={BTN}
+          onMouseDown={mark(() => editor.chain().focus().unsetAllMarks().resetAttributes("paragraph", ["marginLeft", "marginRight", "textIndent", "marginTop", "marginBottom", "lineHeight"]).run())}>
+          <RemoveFormatting size={15} />
+        </button>
         {SEP}
         <InsertTableMenu editor={editor} />
         <button type="button" title="Insert picture (you can also paste a screenshot or drop a file)"

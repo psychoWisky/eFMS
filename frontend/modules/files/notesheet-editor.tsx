@@ -31,7 +31,8 @@ import { AttachmentPreviewModal } from "@/components/shared/attachment-preview-m
 import { toSafeNotesheetHtml, NOTESHEET_PROSE_CLASS } from "@/lib/notesheet-html";
 
 const DRAFT_EDIT_WINDOW_MS = 24 * 60 * 60 * 1000;
-const ATTACHMENT_DELETE_WINDOW_MS = 5 * 60 * 1000;
+// Mirrors the backend ATTACHMENT_DELETE_WINDOW (24 hours).
+const ATTACHMENT_DELETE_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 interface RouteEntry { id: string; from_user_id: string | null; to_user_id: string | null; action: string; remarks: string | null; is_current: boolean; created_at: string; from_user_info?: PersonInfo | null; to_user_info?: PersonInfo | null; }
 interface TrackEntry { id: string; type?: "route" | "sign"; from_user_id: string | null; to_user_id: string | null; from_user_name: string | null; to_user_name: string | null; from_user_info?: PersonInfo | null; to_user_info?: PersonInfo | null; action: string; remarks: string | null; is_current: boolean; created_at: string; }
@@ -91,6 +92,9 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
   // RouteEntry created on Forward.
   const [toUserId, setToUserId] = useState("");
   const forwardAttachments = useAttachmentQueue();
+  // Documents queued in Edit Draft — uploaded by its Save Changes.
+  const draftAttachments = useAttachmentQueue();
+  const [savingDraft, setSavingDraft] = useState(false);
   // True while saveForwardAttachments() is in flight — same manual
   // loading flag New File creation doesn't need (its upload only ever
   // happens once, at final submit) but this panel's Upload button does,
@@ -230,6 +234,9 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
   // otherwise it gets permanently stuck. Backend (_delete_draft_file) is the
   // real enforcement; this only hides/shows the button to match it.
   const canDeleteDraft = isDraft && isCreator && (file?.route_entries.length ?? 0) === 0;
+  // Same condition the backend uses to let the creator remove ANY attachment
+  // of their own never-forwarded draft, with no time limit.
+  const isOwnUntouchedDraft = canDeleteDraft && file?.current_holder_id === user?.id;
   // Released overrides the underlying workflow status for display purposes.
   const displayStatus = isReleased ? "released" : (file?.status ?? "draft");
   // Quick one-click forward: window still open, recipient already on record —
@@ -544,6 +551,7 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
   // failure (metadata saved but notesheet failed) as success or navigate/
   // close on it.
   async function handleSaveDraft(): Promise<boolean> {
+    setSavingDraft(true);
     try {
       await updateFileMutation.mutateAsync({
         subject: draftSubject,
@@ -558,7 +566,28 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
         recipient_user_role_id: splitRecipientValue(draftRecipientId).userRoleId ?? null,
       });
       await updateNotesheetMutation.mutateAsync(draftNotesheet);
-      showSuccess("Draft updated.");
+      if (draftAttachments.items.length > 0) {
+        if (draftAttachments.hasInvalidCustomTags()) {
+          toast.error("Please enter a valid custom tag for every attachment marked \"Other\".");
+          qc.invalidateQueries({ queryKey: ["efms-file", fileId] });
+          return false;
+        }
+        const total = draftAttachments.items.length;
+        const { succeeded, failed } = await draftAttachments.uploadAllReporting(fileId);
+        qc.invalidateQueries({ queryKey: ["efms-file", fileId] });
+        if (failed.length > 0) {
+          // Details and notesheet are saved; only the failed uploads stay queued.
+          setDraftBaseline({
+            subject: draftSubject, description: draftDescription, departmentId: draftDepartmentId,
+            category: draftCategory, priority: draftPriority, recipientId: draftRecipientId, notesheet: draftNotesheet,
+          });
+          toast.error(`${failed.length} of ${total} document${total > 1 ? "s" : ""} could not be uploaded: ${failed.map((f) => `${f.name} (${f.error})`).join(", ")}. The rest of the draft was saved — try Save Changes again.`);
+          return false;
+        }
+        if (succeeded > 0) showSuccess(`Draft updated and ${succeeded} document${succeeded > 1 ? "s" : ""} uploaded.`);
+      } else {
+        showSuccess("Draft updated.");
+      }
       setEditingDraft(false);
       qc.invalidateQueries({ queryKey: ["efms-file", fileId] });
       return true;
@@ -566,6 +595,8 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
       const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
       toast.error(msg ?? "Could not save draft changes.");
       return false;
+    } finally {
+      setSavingDraft(false);
     }
   }
 
@@ -609,6 +640,7 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
       setDraftRecipientId(draftBaseline.recipientId);
       setDraftNotesheet(draftBaseline.notesheet);
     }
+    draftAttachments.clear();
     setEditingDraft(false);
   }
 
@@ -771,6 +803,7 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
   // Notesheet and every other holder's Notesheet/history are never part of
   // this — they're immutable and read-only, with no editable state to track.
   const editDraftDirty = editingDraft && !!draftBaseline && (
+    draftAttachments.items.length > 0 ||
     draftSubject !== draftBaseline.subject ||
     draftDescription !== draftBaseline.description ||
     draftDepartmentId !== draftBaseline.departmentId ||
@@ -837,9 +870,9 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
     // Backend is the real enforcement (uploader-only + 5 minutes + still-
     // current-holder); this mirrors it client-side purely to hide/disable
     // the button.
-    const canDelete = att.uploaded_by === user?.id
+    const canDelete = isOwnUntouchedDraft || (att.uploaded_by === user?.id
       && isHolder
-      && Date.now() - new Date(att.created_at).getTime() < ATTACHMENT_DELETE_WINDOW_MS;
+      && Date.now() - new Date(att.created_at).getTime() < ATTACHMENT_DELETE_WINDOW_MS);
     return (
       <div key={att.id}
         role="button"
@@ -1288,13 +1321,101 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                 <EditorContent editor={draftEditor} className="min-h-[420px] text-base" />
               </div>
 
+              <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
+                <div className="px-6 py-3.5 border-b border-gray-200 flex items-center justify-between">
+                  <h3 className="text-base font-bold text-gray-900">Documents</h3>
+                  <span className="text-xs text-gray-400">{file.attachments.length} attached</span>
+                </div>
+                <div className="p-6 space-y-4">
+                  {file.attachments.length > 0 ? (
+                    <div className="space-y-2">
+                      {file.attachments.map((att) => (
+                        <div key={att.id} className="flex items-center gap-3 p-3 rounded-xl border border-gray-100 bg-gray-50">
+                          <FileText size={17} className="text-[#0D6E6E] shrink-0" />
+                          <div className="flex-1 min-w-0">
+                            <p className="text-sm font-semibold text-gray-900 truncate">{att.original_name}</p>
+                            <p className="text-xs text-gray-500">{att.file_size ? `${(att.file_size / 1024).toFixed(0)} KB · ` : ""}{formatDate(att.created_at, "relative")}</p>
+                          </div>
+                          {getAttachmentPreviewKind(att) !== "none" && (
+                            <button type="button" onClick={() => selectAttachment(att)}
+                              className="text-xs text-[#0D6E6E] font-semibold hover:underline">View</button>
+                          )}
+                          {isOwnUntouchedDraft && (
+                            <button type="button"
+                              onClick={async () => {
+                                const confirmed = await confirmAction({
+                                  title: "Remove this document?",
+                                  text: `"${att.original_name}" will be permanently removed from this draft.`,
+                                  confirmText: "Remove",
+                                  danger: true,
+                                });
+                                if (confirmed) deleteAttachmentMutation.mutate(att.id);
+                              }}
+                              disabled={deleteAttachmentMutation.isPending}
+                              className="text-xs text-red-500 hover:text-red-700 font-semibold flex items-center gap-1 disabled:opacity-50">
+                              <Trash2 size={12} /> Remove
+                            </button>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-sm text-gray-400">No documents attached yet.</p>
+                  )}
+
+                  <label className="flex items-center gap-2 cursor-pointer w-full border-2 border-dashed border-gray-200 hover:border-[#0D6E6E] rounded-xl px-4 py-3 text-sm text-gray-500 hover:text-[#0D6E6E] transition-colors">
+                    <Upload size={15} />
+                    <span>Upload document…</span>
+                    <input type="file" multiple accept={ALLOWED_ATTACHMENT_ACCEPT} className="sr-only" onChange={(e) => {
+                      draftAttachments.addFiles(e.target.files, file.attachments.length);
+                      e.target.value = "";
+                    }} />
+                  </label>
+                  {draftAttachments.items.length > 0 && (
+                    <div className="space-y-2">
+                      <p className="text-xs font-semibold text-amber-700">Not uploaded yet — they will be uploaded when you click Save Changes.</p>
+                      {draftAttachments.items.map((ann, i) => (
+                        <div key={i} className="flex items-center gap-2 p-2.5 bg-amber-50/60 rounded-xl border border-amber-100">
+                          <FileText size={15} className="text-[#0D6E6E] shrink-0" />
+                          <div className="flex-1 grid grid-cols-2 gap-2">
+                            <div>
+                              <label className="block text-[11px] font-medium text-gray-500 mb-0.5">File Name</label>
+                              <input value={ann.name} onChange={(e) => draftAttachments.renameItem(i, e.target.value)}
+                                className="w-full border border-gray-200 rounded-lg px-2 py-1 text-xs bg-white focus:outline-none focus:ring-1 focus:ring-[#0D6E6E]" />
+                            </div>
+                            <div>
+                              <label className="block text-[11px] font-medium text-gray-500 mb-0.5">Tag</label>
+                              <select value={ann.tag} onChange={(e) => draftAttachments.setTag(i, e.target.value)}
+                                className="w-full border border-gray-200 rounded-lg px-2 py-1 text-xs bg-white focus:outline-none focus:ring-1 focus:ring-[#0D6E6E]">
+                                {ATTACHMENT_TAGS.map((opt) => <option key={opt} value={opt}>{opt}</option>)}
+                              </select>
+                              {ann.tag === CUSTOM_TAG_VALUE && (
+                                <input
+                                  value={ann.customTag ?? ""}
+                                  onChange={(e) => draftAttachments.setCustomTag(i, e.target.value)}
+                                  placeholder="Enter custom tag…"
+                                  maxLength={60}
+                                  className="mt-1 w-full border border-gray-200 rounded-lg px-2 py-1 text-xs bg-white focus:outline-none focus:ring-1 focus:ring-[#0D6E6E]"
+                                />
+                              )}
+                            </div>
+                          </div>
+                          <button type="button" title="Remove from the upload list" onClick={() => draftAttachments.removeItem(i)}
+                            className="text-red-400 hover:text-red-600 shrink-0"><X size={14} /></button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+
               <div className="flex gap-2 justify-end">
                 <button onClick={() => guardNavigation(() => setEditingDraft(false))}
                   className="px-5 py-2.5 text-sm border border-gray-200 rounded-xl hover:bg-gray-50 font-medium">Cancel</button>
-                <button onClick={handleSaveDraft} disabled={updateFileMutation.isPending || updateNotesheetMutation.isPending || !editDraftDirty}
+                <button onClick={handleSaveDraft} disabled={savingDraft || !editDraftDirty}
                   className="px-6 py-2.5 text-sm rounded-xl font-bold flex items-center justify-center gap-2 bg-[#0D6E6E] text-white hover:bg-[#178F8F] disabled:opacity-50">
-                  {(updateFileMutation.isPending || updateNotesheetMutation.isPending) ? <Loader2 size={15} className="animate-spin" /> : <Save size={15} />}
-                  {(updateFileMutation.isPending || updateNotesheetMutation.isPending) ? "Saving…" : "Save Changes"}
+                  {savingDraft ? <Loader2 size={15} className="animate-spin" /> : <Save size={15} />}
+                  {savingDraft ? "Saving…" : "Save Changes"}
                 </button>
               </div>
             </div>

@@ -55,7 +55,7 @@ export function toSafeNotesheetHtml(raw: string): string {
 
 // Compact prose styling for rendering stored notesheet/remark HTML inside a
 // timeline/history entry (smaller than a page's primary notesheet document).
-export const NOTESHEET_PROSE_CLASS = "prose prose-sm max-w-none leading-relaxed " +
+export const NOTESHEET_PROSE_CLASS = "ns-rich prose prose-sm max-w-none leading-relaxed " +
   "[&_h1]:text-lg [&_h1]:font-bold [&_h1]:mt-2 [&_h1]:mb-1 " +
   "[&_h2]:text-base [&_h2]:font-bold [&_h2]:mt-2 [&_h2]:mb-1 " +
   "[&_h3]:text-sm [&_h3]:font-semibold [&_h3]:mt-1.5 [&_h3]:mb-1 " +

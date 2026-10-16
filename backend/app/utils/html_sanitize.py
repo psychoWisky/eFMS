@@ -50,14 +50,21 @@ _DATA_IMAGE = re.compile(r"^data:image/(?:png|jpe?g|gif|webp);base64,[A-Za-z0-9+
 _IMG_WITHOUT_SRC = re.compile(r"<img(?![^>]*\ssrc=)[^>]*>", re.I)
 _SAFE_HREF = re.compile(r"^(?:https?://|mailto:)", re.I)
 
-# CSS properties the editor needs, and nothing else.
+# CSS properties the editor needs, and nothing else. The font / spacing /
+# border ones keep text pasted from Word and Google Docs looking as it did.
 _ALLOWED_CSS = {
     "text-align", "background-color", "color", "width", "min-width",
     "max-width", "height", "min-height", "vertical-align", "font-weight",
     "font-style", "text-decoration", "display", "margin-left", "margin-right",
-    "float",
+    "float", "font-family", "font-size", "line-height", "text-indent",
+    "margin-top", "margin-bottom", "margin",
+    "border-top", "border-right", "border-bottom", "border-left",
+    "border", "border-width", "border-style", "border-color",
+    "list-style-type",
 }
-_CSS_VALUE = re.compile(r"^[#\w\s.,%()+-]{1,80}$")
+# Quotes are for font names ("Times New Roman"); nh3 escapes them inside
+# the attribute, so they cannot end it.
+_CSS_VALUE = re.compile(r"^[#\w\s.,%()+'\"-]{1,160}$")
 _CSS_BAD = re.compile(r"url\s*\(|expression|javascript|@import|\\|/\*", re.I)
 
 

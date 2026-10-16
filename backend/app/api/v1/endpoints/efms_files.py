@@ -2360,6 +2360,10 @@ async def upload_attachment(
     f = await db.get(EfmsFile, file_id)
     if not f:
         raise HTTPException(status_code=404, detail="File not found.")
+    # Only whoever holds the file may add to it (the creator while it is a
+    # Draft, then each holder in turn) — never any signed-in user.
+    if f.current_holder_id != user.id:
+        raise HTTPException(status_code=403, detail="You can only add attachments while you are the current holder of this file.")
 
     ext = _get_ext(upload.filename or "").lstrip(".").lower()
     if ext not in settings.allowed_extensions_list:
@@ -2410,13 +2414,20 @@ async def delete_attachment(
     att = await db.get(FileAttachment, att_id)
     if not att or att.file_id != file_id:
         raise HTTPException(status_code=404, detail="Attachment not found.")
-    if att.uploaded_by != user.id:
-        raise HTTPException(status_code=403, detail="Only the uploader can delete this attachment.")
-    f = await db.get(EfmsFile, file_id)
-    if not f or f.current_holder_id != user.id:
-        raise HTTPException(status_code=403, detail="You can only delete attachments while you are the current holder of this file.")
-    if _attachment_delete_expired(att):
-        raise HTTPException(status_code=400, detail="Attachment deletion window (24 hours) has expired.")
+    f = await _load_file(file_id, db)
+    # A Draft that has never been forwarded has not been seen by anyone else,
+    # so its creator may remove any of its attachments at any time.
+    own_untouched_draft = (
+        f.status == FileStatus.draft and f.created_by == user.id
+        and f.current_holder_id == user.id and not f.route_entries
+    )
+    if not own_untouched_draft:
+        if att.uploaded_by != user.id:
+            raise HTTPException(status_code=403, detail="Only the uploader can delete this attachment.")
+        if f.current_holder_id != user.id:
+            raise HTTPException(status_code=403, detail="You can only delete attachments while you are the current holder of this file.")
+        if _attachment_delete_expired(att):
+            raise HTTPException(status_code=400, detail="Attachment deletion window (24 hours) has expired.")
     # Remove file from disk
     dest = os.path.join(os.path.abspath(settings.UPLOAD_DIR), att.stored_name)
     if os.path.exists(dest):

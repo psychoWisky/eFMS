@@ -299,3 +299,10 @@ select.form-input { cursor: pointer; }
   body { background: white; }
   .card { box-shadow: none; border: 1px solid #ccc; }
 }
+
+/* Notesheet content (editor, history, tracking): nested bullets change
+   shape as in Word; a paragraph inside a list item adds no extra gap.
+   Unlayered, so it wins over the Tailwind list utilities. */
+.ns-rich ul ul { list-style-type: circle; }
+.ns-rich ul ul ul { list-style-type: square; }
+.ns-rich li > p { margin-bottom: 0; }
