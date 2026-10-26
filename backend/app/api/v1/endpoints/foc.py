@@ -53,10 +53,10 @@ from app.db.base import get_db
 from app.models.admin import Notification
 from app.models.foc import (
     FIXED_ROLES, FOC_CHAIN, ROLE_TITLES, FocLine, FocMovement, FocOfficer,
-    FocOfficerRole, FocProject, FocSheet, FocStatus,
+    FocOfficerRole, FocProject, FocRoleLink, FocSheet, FocStatus,
 )
 from app.models.organization import Department, Establishment
-from app.models.user import SystemRole, User
+from app.models.user import Role, SystemRole, User, UserRole
 from app.utils.letterhead import LETTERHEAD_CSS, letterhead_html, letterhead_logo_html
 
 router = APIRouter(prefix="/foc", tags=["FOC — Fixation of Ceiling"])
@@ -164,16 +164,89 @@ def rupees_in_words(amount: Decimal) -> str:
     return out + " Only"
 
 
+# ── Officers ─────────────────────────────────────────────────────────────────
+# DDOs are chosen by the Super Admin (foc_officers). The Assistant
+# Comptroller, Finance Officer and Vice Chancellor are whoever holds the
+# linked eFMS role right now — so a hand-over in eFMS carries over to FOC,
+# including FOCs already waiting at that stage.
+
+# eFMS role names recognised without an explicit link (spaces, "_" and case ignored).
+_ROLE_NAME_GUESSES = {
+    FocOfficerRole.ASSISTANT_COMPTROLLER: {"assistantcomptroller", "asstcomptroller"},
+    FocOfficerRole.FINANCE_OFFICER: {"financeofficer"},
+    FocOfficerRole.VICE_CHANCELLOR: {"vicechancellor"},
+}
+
+
+def _squash(name: str) -> str:
+    return re.sub(r"[^a-z]", "", (name or "").lower())
+
+
+async def _linked_efms_role(db: AsyncSession, role: FocOfficerRole) -> tuple[Optional[Role], bool]:
+    """(eFMS role, chosen explicitly by the Super Admin?)"""
+    link = await db.get(FocRoleLink, role.value)
+    if link:
+        return (await db.get(Role, link.efms_role_id) if link.efms_role_id else None), True
+    for r in (await db.execute(select(Role))).scalars().all():
+        if _squash(r.name) in _ROLE_NAME_GUESSES[role]:
+            return r, False
+    return None, False
+
+
+async def _role_holders(db: AsyncSession, role_name: str) -> list[User]:
+    rows = (await db.execute(
+        select(User).join(UserRole, UserRole.user_id == User.id)
+        .where(UserRole.role == role_name, User.is_active == True, User.origin_user_id.is_(None))  # noqa: E712
+    )).scalars().unique().all()
+    return [u for u in rows if not u.is_retired]
+
+
+class _Fixed:
+    def __init__(self, role: FocOfficerRole, efms_role: Optional[Role], explicit: bool, holders: list[User]):
+        self.role, self.efms_role, self.explicit, self.holders = role, efms_role, explicit, holders
+
+    @property
+    def holder(self) -> Optional[User]:
+        return self.holders[0] if len(self.holders) == 1 else None
+
+    @property
+    def problem(self) -> Optional[str]:
+        title = ROLE_TITLES[self.role]
+        if not self.efms_role:
+            return f"No eFMS role is linked to the {title}. Choose one in FOC Setup → Officers."
+        if not self.holders:
+            return f"Nobody holds the eFMS role “{self.efms_role.name}” ({title}) yet. Assign it in eFMS User Management."
+        if len(self.holders) > 1:
+            names = ", ".join(u.full_name for u in self.holders)
+            return f"More than one person holds the eFMS role “{self.efms_role.name}” ({names}). FOC needs exactly one {title}."
+        return None
+
+
+async def _fixed(db: AsyncSession, role: FocOfficerRole) -> _Fixed:
+    efms_role, explicit = await _linked_efms_role(db, role)
+    holders = await _role_holders(db, efms_role.name) if efms_role else []
+    return _Fixed(role, efms_role, explicit, holders)
+
+
 async def _officer_roles(db: AsyncSession, user_id: UUID) -> set[str]:
-    rows = await db.execute(select(FocOfficer.role).where(FocOfficer.user_id == user_id))
-    return set(rows.scalars().all())
+    roles = set((await db.execute(select(FocOfficer.role).where(FocOfficer.user_id == user_id))).scalars().all())
+    for r in FIXED_ROLES:
+        f = await _fixed(db, r)
+        if f.holder and f.holder.id == user_id:
+            roles.add(r.value)
+    return roles
 
 
-async def _fixed_officer(db: AsyncSession, role: FocOfficerRole) -> Optional[User]:
-    row = (await db.execute(
-        select(FocOfficer).options(selectinload(FocOfficer.user)).where(FocOfficer.role == role.value)
-    )).scalar_one_or_none()
-    return row.user if row else None
+async def _handles(db: AsyncSession, sheet: FocSheet, user: User) -> bool:
+    """Is this pending FOC waiting for this person right now?"""
+    if sheet.status != FocStatus.PENDING.value or not sheet.stage:
+        return False
+    if sheet.stage == FocOfficerRole.DDO.value:
+        is_ddo = (await db.execute(select(FocOfficer.id).where(
+            FocOfficer.role == FocOfficerRole.DDO.value, FocOfficer.user_id == user.id))).first()
+        return sheet.holder_id == user.id and bool(is_ddo)
+    f = await _fixed(db, FocOfficerRole(sheet.stage))
+    return bool(f.holder and f.holder.id == user.id)
 
 
 def _notify(db: AsyncSession, user_id: Optional[UUID], title: str, message: str) -> None:
@@ -195,6 +268,7 @@ async def _load_sheet(db: AsyncSession, sheet_id: UUID, lock: bool = False) -> F
         .options(
             selectinload(FocSheet.project).selectinload(FocProject.establishment),
             selectinload(FocSheet.project).selectinload(FocProject.department),
+            selectinload(FocSheet.project).selectinload(FocProject.incharge),
             selectinload(FocSheet.incharge),
             selectinload(FocSheet.holder),
             selectinload(FocSheet.lines),
@@ -212,10 +286,12 @@ async def _load_sheet(db: AsyncSession, sheet_id: UUID, lock: bool = False) -> F
     return sheet
 
 
-def _can_view(sheet: FocSheet, user: User) -> bool:
+async def _can_view(db: AsyncSession, sheet: FocSheet, user: User) -> bool:
     if user.is_super_admin or sheet.incharge_id == user.id or sheet.holder_id == user.id:
         return True
-    return any(m.from_user_id == user.id or m.to_user_id == user.id for m in sheet.movements)
+    if any(m.from_user_id == user.id or m.to_user_id == user.id for m in sheet.movements):
+        return True
+    return await _handles(db, sheet, user)
 
 
 def _editable_by_incharge(sheet: FocSheet, user: User) -> bool:
@@ -246,7 +322,7 @@ def _project_out(p: FocProject) -> dict:
         "establishment_name": p.establishment.name if p.establishment else None,
         "department_id": str(p.department_id) if p.department_id else None,
         "department_name": p.department.name if p.department else None,
-        "pi_name": p.pi_name, "project_type": p.project_type,
+        "incharge": _person(p.incharge), "project_type": p.project_type,
         "bank_account_holder": p.bank_account_holder, "bank_name": p.bank_name, "bank_account_no": p.bank_account_no,
         "fund_instrument_no": p.fund_instrument_no,
         "fund_received_date": p.fund_received_date.isoformat() if p.fund_received_date else None,
@@ -270,8 +346,11 @@ def _line_out(line: FocLine, sheet_id: UUID) -> dict:
 
 async def _sheet_out(db: AsyncSession, sheet: FocSheet, user: User) -> dict:
     total = sum((ln.amount_required or Decimal("0")) for ln in sheet.lines)
-    officer_roles = await _officer_roles(db, user.id)
-    is_holder = sheet.status == FocStatus.PENDING.value and sheet.holder_id == user.id and sheet.stage in officer_roles
+    is_holder = await _handles(db, sheet, user)
+    holder = sheet.holder
+    if sheet.status == FocStatus.PENDING.value and sheet.stage and sheet.stage != FocOfficerRole.DDO.value:
+        # The fixed offices follow the eFMS role — show who holds it now.
+        holder = (await _fixed(db, FocOfficerRole(sheet.stage))).holder or holder
     stage_index = FOC_CHAIN.index(FocOfficerRole(sheet.stage)) if sheet.stage else None
     next_role = FOC_CHAIN[stage_index + 1] if stage_index is not None and stage_index + 1 < len(FOC_CHAIN) else None
     return {
@@ -279,7 +358,7 @@ async def _sheet_out(db: AsyncSession, sheet: FocSheet, user: User) -> dict:
         "status": sheet.status, "status_label": _status_label(sheet),
         "stage": sheet.stage, "stage_title": _stage_title(sheet.stage),
         "project": _project_out(sheet.project),
-        "incharge": _person(sheet.incharge), "holder": _person(sheet.holder) if sheet.status == FocStatus.PENDING.value else None,
+        "incharge": _person(sheet.incharge), "holder": _person(holder) if sheet.status == FocStatus.PENDING.value else None,
         "certified": sheet.certified,
         "created_at": sheet.created_at.isoformat() if sheet.created_at else None,
         "submitted_at": sheet.submitted_at.isoformat() if sheet.submitted_at else None,
@@ -312,13 +391,19 @@ async def _sheet_out(db: AsyncSession, sheet: FocSheet, user: User) -> dict:
 @router.get("/me")
 async def foc_me(db: AsyncSession = Depends(get_db), user: User = Depends(_user)):
     roles = await _officer_roles(db, user.id)
-    is_incharge = (await db.execute(select(FocSheet.id).where(FocSheet.incharge_id == user.id).limit(1))).first() is not None
+    is_incharge = (
+        (await db.execute(select(FocSheet.id).where(FocSheet.incharge_id == user.id).limit(1))).first() is not None
+        or (await db.execute(select(FocProject.id).where(FocProject.incharge_id == user.id).limit(1))).first() is not None
+    )
+    involved = is_incharge or bool(roles)
     return {
         "is_super_admin": user.is_super_admin,
         "is_incharge": is_incharge,
         "officer_roles": sorted(roles),
         "officer_titles": [ROLE_TITLES[FocOfficerRole(r)] for r in FOC_CHAIN if r.value in roles],
-        "has_access": user.is_super_admin or is_incharge or bool(roles),
+        # The Super Admin sets FOC up; a docket is only for those who take part.
+        "has_docket": involved,
+        "has_access": user.is_super_admin or involved,
     }
 
 
@@ -347,7 +432,7 @@ class ProjectIn(BaseModel):
     funding_agency: Optional[str] = None
     establishment_id: Optional[UUID] = None
     department_id: Optional[UUID] = None
-    pi_name: Optional[str] = None
+    incharge_id: Optional[UUID] = None
     project_type: Optional[str] = None
     bank_account_holder: Optional[str] = None
     bank_name: Optional[str] = None
@@ -359,7 +444,7 @@ class ProjectIn(BaseModel):
 
 
 _PROJECT_TEXT = {
-    "funded_by": 200, "funding_agency": 200, "pi_name": 200, "project_type": 100,
+    "funded_by": 200, "funding_agency": 200, "project_type": 100,
     "bank_account_holder": 200, "bank_name": 200, "bank_account_no": 60,
     "fund_instrument_no": 200, "fund_sanction_remittance_no": 200,
 }
@@ -393,11 +478,25 @@ async def _apply_project(db: AsyncSession, p: FocProject, body: ProjectIn, creat
             if p.establishment_id and dept.establishment_id and dept.establishment_id != p.establishment_id:
                 raise HTTPException(400, "That department belongs to a different establishment.")
         p.department_id = body.department_id
+    if "incharge_id" in sent and body.incharge_id != p.incharge_id:
+        new = _assignable(await db.get(User, body.incharge_id), "FOC in-charge") if body.incharge_id else None
+        p.incharge_id = new.id if new else None
+        if new and p.id:
+            # FOCs still with the in-charge (draft / returned) move to the new
+            # one; FOCs already sent or approved keep who sent them.
+            moved = (await db.execute(select(FocSheet).where(
+                FocSheet.project_id == p.id, FocSheet.status.in_([FocStatus.DRAFT.value, FocStatus.REJECTED.value]),
+            ))).scalars().all()
+            for sh in moved:
+                sh.incharge_id = new.id
+            _notify(db, new.id, "FOC project assigned to you",
+                    f"You are now the FOC in-charge of “{p.name}”" + (f" ({len(moved)} FOC{'s' if len(moved) != 1 else ''} to fill in)." if moved else "."))
 
 
 async def _project_with_org(db: AsyncSession, pid: UUID) -> FocProject:
     p = (await db.execute(
-        select(FocProject).options(selectinload(FocProject.establishment), selectinload(FocProject.department))
+        select(FocProject).options(selectinload(FocProject.establishment), selectinload(FocProject.department),
+                                   selectinload(FocProject.incharge))
         .where(FocProject.id == pid).execution_options(populate_existing=True)
     )).scalar_one_or_none()
     if not p:
@@ -408,7 +507,8 @@ async def _project_with_org(db: AsyncSession, pid: UUID) -> FocProject:
 @router.get("/projects")
 async def list_projects(db: AsyncSession = Depends(get_db), _: User = Depends(_super)):
     rows = (await db.execute(
-        select(FocProject).options(selectinload(FocProject.establishment), selectinload(FocProject.department))
+        select(FocProject).options(selectinload(FocProject.establishment), selectinload(FocProject.department),
+                                   selectinload(FocProject.incharge))
         .order_by(FocProject.is_active.desc(), FocProject.name)
     )).scalars().all()
     return [_project_out(p) for p in rows]
@@ -446,9 +546,12 @@ async def delete_project(pid: UUID, db: AsyncSession = Depends(get_db), _: User 
 
 # ── Super Admin: officers ────────────────────────────────────────────────────
 
-class OfficerIn(BaseModel):
-    role: FocOfficerRole
+class DdoIn(BaseModel):
     user_id: UUID
+
+
+class FixedLinkIn(BaseModel):
+    efms_role_id: Optional[UUID] = None
 
 
 async def _pending_held(db: AsyncSession, user_id: UUID, role: str) -> int:
@@ -457,52 +560,76 @@ async def _pending_held(db: AsyncSession, user_id: UUID, role: str) -> int:
     ))).all())
 
 
+async def _fixed_out(db: AsyncSession, role: FocOfficerRole) -> dict:
+    f = await _fixed(db, role)
+    return {
+        "role": role.value, "role_title": ROLE_TITLES[role],
+        "efms_role": {"id": str(f.efms_role.id), "name": f.efms_role.name} if f.efms_role else None,
+        "chosen": f.explicit,
+        "holders": [_person(u) for u in f.holders],
+        "holder": _person(f.holder),
+        "problem": f.problem,
+    }
+
+
 @router.get("/officers")
 async def list_officers(db: AsyncSession = Depends(get_db), _: User = Depends(_super)):
-    rows = (await db.execute(select(FocOfficer).options(selectinload(FocOfficer.user)))).scalars().all()
-    order = {r.value: i for i, r in enumerate(FOC_CHAIN)}
-    rows = sorted(rows, key=lambda o: (order.get(o.role, 9), (o.user.full_name if o.user else "").lower()))
-    return [
-        {"id": str(o.id), "role": o.role, "role_title": _stage_title(o.role), "user": _person(o.user)}
-        for o in rows
-    ]
+    rows = (await db.execute(select(FocOfficer).options(selectinload(FocOfficer.user))
+                             .where(FocOfficer.role == FocOfficerRole.DDO.value))).scalars().all()
+    rows = sorted(rows, key=lambda o: (o.user.full_name if o.user else "").lower())
+    return {
+        "ddos": [{"id": str(o.id), "user": _person(o.user)} for o in rows],
+        "fixed": [await _fixed_out(db, r) for r in FOC_CHAIN if r in FIXED_ROLES],
+    }
+
+
+@router.get("/efms-roles")
+async def efms_roles(db: AsyncSession = Depends(get_db), _: User = Depends(_super)):
+    rows = (await db.execute(select(Role).where(Role.name != SystemRole.SUPER_ADMIN.value).order_by(Role.name))).scalars().all()
+    return [{"id": str(r.id), "name": r.name, "description": r.description} for r in rows]
 
 
 @router.post("/officers", status_code=201)
-async def assign_officer(body: OfficerIn, db: AsyncSession = Depends(get_db), _: User = Depends(_super)):
-    u = _assignable(await db.get(User, body.user_id), ROLE_TITLES[body.role])
-    role = body.role.value
-    if body.role in FIXED_ROLES:
-        current = (await db.execute(select(FocOfficer).where(FocOfficer.role == role))).scalar_one_or_none()
-        if current and current.user_id == u.id:
-            return {"id": str(current.id), "role": role}
-        if current:
-            waiting = await _pending_held(db, current.user_id, role)
-            if waiting:
-                holder = await db.get(User, current.user_id)
-                raise HTTPException(409, f"{holder.full_name} still has {waiting} FOC{'s' if waiting != 1 else ''} waiting "
-                                         f"as {ROLE_TITLES[body.role]}. They must be dealt with before someone else takes over.")
-            await db.delete(current)
-            await db.flush()
-    else:
-        exists = (await db.execute(select(FocOfficer).where(FocOfficer.role == role, FocOfficer.user_id == u.id))).scalar_one_or_none()
-        if exists:
-            return {"id": str(exists.id), "role": role}
+async def add_ddo(body: DdoIn, db: AsyncSession = Depends(get_db), _: User = Depends(_super)):
+    u = _assignable(await db.get(User, body.user_id), "DDO")
+    role = FocOfficerRole.DDO.value
+    exists = (await db.execute(select(FocOfficer).where(FocOfficer.role == role, FocOfficer.user_id == u.id))).scalar_one_or_none()
+    if exists:
+        return {"id": str(exists.id), "role": role}
     o = FocOfficer(role=role, user_id=u.id)
     db.add(o)
     await db.commit()
     return {"id": str(o.id), "role": role}
 
 
+@router.put("/officers/fixed/{role}")
+async def link_fixed_role(role: FocOfficerRole, body: FixedLinkIn, db: AsyncSession = Depends(get_db), _: User = Depends(_super)):
+    """Choose which eFMS role is the Assistant Comptroller / Finance Officer /
+    Vice Chancellor. FOCs already waiting at that stage go to the new holder."""
+    if role not in FIXED_ROLES:
+        raise HTTPException(400, "DDOs are added person by person.")
+    if body.efms_role_id:
+        r = await db.get(Role, body.efms_role_id)
+        if not r or r.name == SystemRole.SUPER_ADMIN.value:
+            raise HTTPException(400, "Choose one of the eFMS roles.")
+    link = await db.get(FocRoleLink, role.value)
+    if link:
+        link.efms_role_id = body.efms_role_id
+    else:
+        db.add(FocRoleLink(role=role.value, efms_role_id=body.efms_role_id))
+    await db.commit()
+    return await _fixed_out(db, role)
+
+
 @router.delete("/officers/{oid}", status_code=204)
 async def remove_officer(oid: UUID, db: AsyncSession = Depends(get_db), _: User = Depends(_super)):
     o = (await db.execute(select(FocOfficer).options(selectinload(FocOfficer.user)).where(FocOfficer.id == oid))).scalar_one_or_none()
     if not o:
-        raise HTTPException(404, "Officer assignment not found.")
+        raise HTTPException(404, "DDO not found.")
     waiting = await _pending_held(db, o.user_id, o.role)
     if waiting:
         raise HTTPException(409, f"{o.user.full_name} still has {waiting} FOC{'s' if waiting != 1 else ''} waiting as "
-                                 f"{_stage_title(o.role)}. They must be dealt with first.")
+                                 f"DDO. They must be dealt with first.")
     await db.delete(o)
     await db.commit()
 
@@ -520,14 +647,12 @@ class SheetCreate(BaseModel):
     project_id: UUID
     financial_year: str
     name: str
-    incharge_id: UUID
     lines: list[LineIn] = Field(default_factory=list)
 
 
 class SheetUpdate(BaseModel):
     financial_year: Optional[str] = None
     name: Optional[str] = None
-    incharge_id: Optional[UUID] = None
     lines: Optional[list[LineIn]] = None
 
 
@@ -614,7 +739,10 @@ async def create_sheet(body: SheetCreate, db: AsyncSession = Depends(get_db), ad
     name = _clean(body.name, 200)
     if not name:
         raise HTTPException(400, "Enter the FOC name.")
-    incharge = _assignable(await db.get(User, body.incharge_id), "FOC in-charge")
+    # The FOC goes to the project's in-charge.
+    if not project.incharge_id:
+        raise HTTPException(400, "This project has no FOC in-charge yet. Set one on the project first.")
+    incharge = _assignable(await db.get(User, project.incharge_id), "FOC in-charge")
     lines = _checked_lines(body.lines)
     await _duplicate_check(db, project.id, fy, name)
     sheet = FocSheet(project_id=project.id, financial_year=fy, name=name, incharge_id=incharge.id,
@@ -643,10 +771,6 @@ async def update_sheet(sheet_id: UUID, body: SheetUpdate, db: AsyncSession = Dep
     if (fy, name) != (sheet.financial_year, sheet.name):
         await _duplicate_check(db, sheet.project_id, fy, name, exclude=sheet.id)
     sheet.financial_year, sheet.name = fy, name
-    if "incharge_id" in sent and body.incharge_id and body.incharge_id != sheet.incharge_id:
-        new_incharge = _assignable(await db.get(User, body.incharge_id), "FOC in-charge")
-        sheet.incharge_id = new_incharge.id
-        _notify(db, new_incharge.id, "FOC assigned to you", f"FOC “{name}” is now assigned to you.")
     if body.lines is not None:
         checked = _checked_lines(body.lines)
         existing = {ln.id: ln for ln in sheet.lines}
@@ -795,7 +919,7 @@ async def delete_document(sheet_id: UUID, line_id: UUID, db: AsyncSession = Depe
 async def view_document(sheet_id: UUID, line_id: UUID, download: bool = False,
                         db: AsyncSession = Depends(get_db), user: User = Depends(_user)):
     sheet = await _load_sheet(db, sheet_id)
-    if not _can_view(sheet, user):
+    if not await _can_view(db, sheet, user):
         raise HTTPException(403, "You do not have access to this FOC.")
     line = next((ln for ln in sheet.lines if ln.id == line_id), None)
     if not line or not line.document_stored_name:
@@ -846,10 +970,11 @@ async def submit_sheet(sheet_id: UUID, body: SubmitIn, db: AsyncSession = Depend
 
 async def _holding(db: AsyncSession, sheet_id: UUID, user: User) -> FocSheet:
     sheet = await _load_sheet(db, sheet_id, lock=True)
-    if sheet.status != FocStatus.PENDING.value or sheet.holder_id != user.id:
-        raise HTTPException(409, "This FOC is not waiting with you (it may already have been acted on).")
-    if sheet.stage not in await _officer_roles(db, user.id):
-        raise HTTPException(403, f"You are no longer assigned as {_stage_title(sheet.stage)}.")
+    if not await _handles(db, sheet, user):
+        raise HTTPException(409, "This FOC is not waiting with you (it may already have been acted on, "
+                                 "or the role has passed to someone else).")
+    # A fixed office handed over in eFMS: the new holder acts on it.
+    sheet.holder_id = user.id
     return sheet
 
 
@@ -898,9 +1023,12 @@ async def forward_sheet(sheet_id: UUID, body: ActionIn, db: AsyncSession = Depen
     if index + 1 >= len(FOC_CHAIN):
         raise HTTPException(400, "The Vice Chancellor is the last stage — please approve or return the FOC.")
     next_role = FOC_CHAIN[index + 1]
-    target = await _fixed_officer(db, next_role)
-    if not target or not target.is_active:
-        raise HTTPException(409, f"No {ROLE_TITLES[next_role]} has been assigned yet. Please ask the Super Admin.")
+    nxt = await _fixed(db, next_role)
+    if nxt.problem:
+        raise HTTPException(409, f"The FOC cannot be forwarded: {nxt.problem}")
+    target = nxt.holder
+    if target.id == user.id:
+        raise HTTPException(400, f"You also hold the {ROLE_TITLES[next_role]} role — approve or return the FOC instead.")
     remark = _clean(body.remark, 4000)
     db.add(FocMovement(sheet_id=sheet.id, action="forwarded", from_user_id=user.id, to_user_id=target.id,
                        from_stage=sheet.stage, to_stage=next_role.value, remark=remark))
@@ -927,16 +1055,20 @@ def _summary_options():
 async def foc_docket(db: AsyncSession = Depends(get_db), user: User = Depends(_user)):
     """Waiting with me (officer) + come back to me (in-charge: approved or
     returned). Newest first."""
+    my_fixed = [r for r in await _officer_roles(db, user.id) if r != FocOfficerRole.DDO.value]
     rows = (await db.execute(
         select(FocSheet).options(*_summary_options()).where(or_(
             (FocSheet.status == FocStatus.PENDING.value) & (FocSheet.holder_id == user.id),
+            (FocSheet.status == FocStatus.PENDING.value) & FocSheet.stage.in_(my_fixed or [""]),
             (FocSheet.incharge_id == user.id) & FocSheet.status.in_([FocStatus.APPROVED.value, FocStatus.REJECTED.value]),
         ))
     )).scalars().all()
     out = []
     for s in rows:
         if s.status == FocStatus.PENDING.value:
-            last_in = next((m for m in reversed(s.movements) if m.to_user_id == user.id), None)
+            if not await _handles(db, s, user):
+                continue  # the office has passed to someone else
+            last_in = s.movements[-1] if s.movements else None
             out.append(_summary(s, last_in.from_user if last_in else s.incharge,
                                 last_in.created_at if last_in else s.submitted_at, box="to_process"))
         else:
@@ -967,7 +1099,7 @@ async def foc_history(db: AsyncSession = Depends(get_db), user: User = Depends(_
 @router.get("/sheets/{sheet_id}")
 async def get_sheet(sheet_id: UUID, db: AsyncSession = Depends(get_db), user: User = Depends(_user)):
     sheet = await _load_sheet(db, sheet_id)
-    if not _can_view(sheet, user):
+    if not await _can_view(db, sheet, user):
         raise HTTPException(403, "You do not have access to this FOC.")
     return await _sheet_out(db, sheet, user)
 
@@ -1056,7 +1188,7 @@ def build_foc_html(sheet: FocSheet) -> str:
 <table class="info">
 {kv("Name of the Project", p.name, "Funded By", p.funded_by)}
 {kv("Funding Agency", p.funding_agency, "F.O.C. Creation Date", _ist(sheet.created_at))}
-{kv("F.O.C. Received From", _person_label(sheet.incharge), "Project P.I. Name", p.pi_name)}
+{kv("FOC In-charge", _person_label(sheet.incharge), "Establishment / Office", office)}
 {kv("Type of Project", p.project_type, "Financial Year", sheet.financial_year)}
 {kv("F.O.C. Name", sheet.name, "Fund Sanction Remittance No.", p.fund_sanction_remittance_no)}
 </table>
@@ -1071,7 +1203,7 @@ def build_foc_html(sheet: FocSheet) -> str:
 <table class="info">
 {kv("Account Holder", p.bank_account_holder, "Bank", p.bank_name)}
 {kv("Account No.", p.bank_account_no, "Fund Received Instrument No.", p.fund_instrument_no)}
-{kv("Fund Received Date", p.fund_received_date.strftime('%d %b %Y') if p.fund_received_date else None, "Establishment / Office", office)}
+{kv("Fund Received Date", p.fund_received_date.strftime('%d %b %Y') if p.fund_received_date else None, "Total Amount Required", "Rs. " + _indian_number(total))}
 </table>
 {approved_html}
 <div class="section">Movement</div>
@@ -1083,7 +1215,7 @@ def build_foc_html(sheet: FocSheet) -> str:
 @router.get("/sheets/{sheet_id}/pdf")
 async def download_pdf(sheet_id: UUID, db: AsyncSession = Depends(get_db), user: User = Depends(_user)):
     sheet = await _load_sheet(db, sheet_id)
-    if not _can_view(sheet, user):
+    if not await _can_view(db, sheet, user):
         raise HTTPException(403, "You do not have access to this FOC.")
     if sheet.status != FocStatus.APPROVED.value:
         raise HTTPException(409, "The FOC can be downloaded once it has been approved.")

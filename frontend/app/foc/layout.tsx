@@ -38,8 +38,14 @@ export default function FocLayout({ children }: { children: React.ReactNode }) {
   const ready = hydrated && isAuthenticated && !mustChangePassword && !user?.is_retired;
   const { data: me, isLoading, isError } = useFocMe(ready);
 
+  // The Super Admin sets FOC up; the docket is for in-charges and officers.
+  const home = me && !me.has_docket && me.is_super_admin ? "/foc/admin" : "/foc";
+  useEffect(() => {
+    if (me && !me.has_docket && me.is_super_admin && pathname === "/foc") router.replace("/foc/admin");
+  }, [me, pathname, router]);
+
   const nav = [
-    { href: "/foc", label: "FOC Docket", icon: Inbox, show: true },
+    { href: "/foc", label: "FOC Docket", icon: Inbox, show: !!me?.has_docket },
     { href: "/foc/mine", label: "My FOCs", icon: FileSpreadsheet, show: !!me?.is_incharge },
     { href: "/foc/history", label: "History", icon: History, show: !!me && me.officer_roles.length > 0 },
     { href: "/foc/admin", label: "FOC Setup", icon: Settings2, show: !!me?.is_super_admin },
@@ -51,7 +57,7 @@ export default function FocLayout({ children }: { children: React.ReactNode }) {
     <div className="min-h-screen bg-[#F5F7FA]">
       <header className="sticky top-0 z-30 bg-white border-b border-gray-200 shadow-sm">
         <div className="max-w-[1400px] mx-auto px-4 sm:px-6 h-16 flex items-center gap-4">
-          <Link href="/foc" className="flex items-center gap-3 shrink-0">
+          <Link href={home} className="flex items-center gap-3 shrink-0">
             <Image src="/avfu_logo.png" alt="AVFU" width={36} height={36} className="rounded-full" />
             <div className="leading-tight">
               <p className="text-base font-bold text-[#0A5757]">FOC</p>

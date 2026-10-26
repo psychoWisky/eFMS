@@ -20,6 +20,8 @@ export interface FocMe {
   is_incharge: boolean;
   officer_roles: FocRole[];
   officer_titles: string[];
+  /** In-charges and officers have a docket; the Super Admin only sets FOC up. */
+  has_docket: boolean;
   has_access: boolean;
 }
 
@@ -27,7 +29,7 @@ export interface FocProject {
   id: string; name: string; funded_by: string | null; funding_agency: string | null;
   establishment_id: string | null; establishment_name: string | null;
   department_id: string | null; department_name: string | null;
-  pi_name: string | null; project_type: string | null;
+  incharge: FocPerson | null; project_type: string | null;
   bank_account_holder: string | null; bank_name: string | null; bank_account_no: string | null;
   fund_instrument_no: string | null; fund_received_date: string | null; fund_sanction_remittance_no: string | null;
   is_active: boolean;

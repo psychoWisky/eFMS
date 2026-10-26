@@ -28,7 +28,9 @@ export function EFMSSidebar({ collapsed, canToggle, onToggle }: SidebarProps) {
   const visible = NAV_ITEMS.filter((item) =>
     // A retired person has the Dashboard (their Docket) only.
     retired ? item.href === "/dashboard"
-      : !role ? true : item.audience === "super_admin" ? role === "super_admin" : role !== "super_admin"
+      // Admin Panel only ever for the Super Admin role; with no role (or
+      // any other role) a person gets the normal eFMS items only.
+      : item.audience === "super_admin" ? role === "super_admin" : role !== "super_admin"
   );
   // FOC is its own module, shown to whoever takes part in it, in any role.
   if (!retired && foc?.has_access) {

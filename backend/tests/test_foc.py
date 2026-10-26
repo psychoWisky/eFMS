@@ -1,8 +1,9 @@
-"""FOC (Fixation of Ceiling): Super Admin set-up, the in-charge's entries
-and certificate, the DDO → Assistant Comptroller → Finance Officer → Vice
-Chancellor chain (approve is final, reject needs a remark and goes back to
-the in-charge, the VC cannot forward), dockets, sanction documents and the
-approved-sheet PDF."""
+"""FOC (Fixation of Ceiling): Super Admin set-up (the project carries the
+FOC in-charge; the Assistant Comptroller / Finance Officer / Vice Chancellor
+are whoever holds the linked eFMS role), the in-charge's entries and
+certificate, the DDO → AC → FO → VC chain (approve is final, reject needs a
+remark and goes back to the in-charge, the VC cannot forward), dockets,
+sanction documents and the approved-sheet PDF."""
 import os
 import uuid
 from decimal import Decimal
@@ -13,23 +14,20 @@ from sqlalchemy import delete, select
 
 from app.api.v1.endpoints.foc import _doc_dir, build_foc_html, rupees_in_words
 from app.core.config import settings
-from app.models.foc import FIXED_ROLES, FocOfficer, FocProject, FocSheet
-from app.models.user import SystemRole
+from app.models.foc import FocOfficer, FocProject, FocRoleLink, FocSheet
+from app.models.user import SystemRole, UserRole
 from tests.conftest import auth_headers as H
 
 
 @pytest_asyncio.fixture
-async def foc(db, users):
+async def foc(db, users, roles):
     """Cleans up every FOC row the test creates (before `users` removes the
-    people). The three fixed officers are single seats in the shared dev
-    database, so whoever holds them now is put back afterwards."""
-    saved = [(o.role, o.user_id) for o in (await db.execute(
-        select(FocOfficer).where(FocOfficer.role.in_([r.value for r in FIXED_ROLES]))
-    )).scalars().all()]
-    await db.execute(delete(FocOfficer).where(FocOfficer.role.in_([r.value for r in FIXED_ROLES])))
-    await db.commit()
+    people). Which eFMS role is the AC / FO / VC is a single setting in the
+    shared dev database — the existing links are put back afterwards."""
+    saved = [(l.role, l.efms_role_id) for l in (await db.execute(select(FocRoleLink))).scalars().all()]
     created = {"projects": [], "users": []}
     yield created
+    await db.execute(delete(FocRoleLink))
     test_users = [u.id for u in users._created]
     sheets = (await db.execute(select(FocSheet).where(FocSheet.created_by.in_(test_users)))).scalars().all()
     for s in sheets:
@@ -44,35 +42,42 @@ async def foc(db, users):
     await db.execute(delete(FocProject).where(FocProject.created_by.in_(test_users)))
     await db.execute(delete(FocOfficer).where(FocOfficer.user_id.in_(test_users)))
     await db.commit()
-    for role, uid in saved:
-        db.add(FocOfficer(role=role, user_id=uid))
+    for role, rid in saved:
+        db.add(FocRoleLink(role=role, efms_role_id=rid))
     await db.commit()
 
 
-async def _setup(client, users):
+async def _setup(client, users, roles):
     admin = await users.make(SystemRole.SUPER_ADMIN)
-    people = {k: await users.make("registrar", first_name=k.title()) for k in
-              ("incharge", "ddo1", "ddo2", "ac", "fo", "vc", "outsider")}
+    tag = uuid.uuid4().hex[:6]
+    # The fixed offices are eFMS roles; FOC follows whoever holds them.
+    efms = {k: await roles.make(f"t_{k}_{tag}") for k in ("ac", "fo", "vc")}
+    people = {k: await users.make("registrar", first_name=k.title()) for k in ("incharge", "ddo1", "ddo2", "outsider")}
+    for k in ("ac", "fo", "vc"):
+        people[k] = await users.make(efms[k].name, first_name=k.upper())
+    for foc_role, k in (("assistant_comptroller", "ac"), ("finance_officer", "fo"), ("vice_chancellor", "vc")):
+        r = await client.put(f"/foc/officers/fixed/{foc_role}", headers=H(admin), json={"efms_role_id": str(efms[k].id)})
+        assert r.status_code == 200 and r.json()["holder"]["id"] == str(people[k].id), r.text
+    for who in ("ddo1", "ddo2"):
+        r = await client.post("/foc/officers", headers=H(admin), json={"user_id": str(people[who].id)})
+        assert r.status_code == 201, r.text
     r = await client.post("/foc/projects", headers=H(admin), json={
-        "name": f"FOC Test Project {uuid.uuid4().hex[:6]}", "funded_by": "Govt. of India", "funding_agency": "DBT",
-        "pi_name": "Dr. Test", "project_type": "100%", "bank_name": "SBI", "bank_account_no": "1234",
+        "name": f"FOC Test Project {tag}", "funded_by": "Govt. of India", "funding_agency": "DBT",
+        "incharge_id": str(people["incharge"].id), "project_type": "100%", "bank_name": "SBI", "bank_account_no": "1234",
         "fund_received_date": "2025-06-01",
     })
     assert r.status_code == 201, r.text
     project = r.json()
-    for role, who in (("ddo", "ddo1"), ("ddo", "ddo2"), ("assistant_comptroller", "ac"),
-                      ("finance_officer", "fo"), ("vice_chancellor", "vc")):
-        r = await client.post("/foc/officers", headers=H(admin), json={"role": role, "user_id": str(people[who].id)})
-        assert r.status_code == 201, r.text
+    assert project["incharge"]["id"] == str(people["incharge"].id)
     r = await client.post("/foc/sheets", headers=H(admin), json={
         "project_id": project["id"], "financial_year": "2025-2026", "name": "October 2025",
-        "incharge_id": str(people["incharge"].id),
         "lines": [
             {"sub_head": "Salaries", "sanctioned_fund": "500000", "available_fund": "400000"},
             {"sub_head": "Consumables", "sanctioned_fund": "100000.50", "available_fund": "100000.50"},
         ],
     })
     assert r.status_code == 201, r.text
+    people["_efms"] = efms
     return admin, people, project, r.json()
 
 
@@ -90,7 +95,7 @@ async def _fill_and_submit(client, sheet, incharge, ddo):
 
 
 @pytest.mark.asyncio
-async def test_setup_is_super_admin_only(client, users, foc):
+async def test_setup_is_super_admin_only(client, users, roles, foc):
     someone = await users.make("registrar")
     r = await client.post("/foc/projects", headers=H(someone), json={"name": "Nope"})
     assert r.status_code == 403
@@ -101,9 +106,9 @@ async def test_setup_is_super_admin_only(client, users, foc):
 
 
 @pytest.mark.asyncio
-async def test_sheet_validation(client, users, foc):
-    admin, people, project, sheet = await _setup(client, users)
-    base = {"project_id": project["id"], "financial_year": "2025-2026", "incharge_id": str(people["incharge"].id)}
+async def test_sheet_validation(client, users, roles, foc):
+    admin, people, project, sheet = await _setup(client, users, roles)
+    base = {"project_id": project["id"], "financial_year": "2025-2026"}
     r = await client.post("/foc/sheets", headers=H(admin), json={**base, "name": "October 2025",
                                                                   "lines": [{"sub_head": "A", "sanctioned_fund": 1, "available_fund": 1}]})
     assert r.status_code == 409  # same project + FY + name
@@ -118,8 +123,8 @@ async def test_sheet_validation(client, users, foc):
 
 
 @pytest.mark.asyncio
-async def test_full_chain_reject_resubmit_and_approve(client, users, foc):
-    admin, p, project, sheet = await _setup(client, users)
+async def test_full_chain_reject_resubmit_and_approve(client, users, roles, foc):
+    admin, p, project, sheet = await _setup(client, users, roles)
     inc = p["incharge"]
     sid = sheet["id"]
 
@@ -211,37 +216,78 @@ async def test_full_chain_reject_resubmit_and_approve(client, users, foc):
 
 
 @pytest.mark.asyncio
-async def test_fixed_officer_cannot_be_replaced_while_holding(client, users, foc):
-    admin, p, project, sheet = await _setup(client, users)
+async def test_fixed_office_follows_the_efms_role(client, users, roles, foc, db):
+    """A hand-over of the eFMS role carries the waiting FOC to the new holder."""
+    admin, p, project, sheet = await _setup(client, users, roles)
+    sid = sheet["id"]
     await _fill_and_submit(client, sheet, p["incharge"], p["ddo1"])
-    await client.post(f"/foc/sheets/{sheet['id']}/forward", headers=H(p["ddo1"]), json={})
-    newcomer = await users.make("registrar")
-    r = await client.post("/foc/officers", headers=H(admin), json={"role": "assistant_comptroller", "user_id": str(newcomer.id)})
-    assert r.status_code == 409
-    officers = (await client.get("/foc/officers", headers=H(admin))).json()
-    ac_row = next(o for o in officers if o["role"] == "assistant_comptroller")
-    assert (await client.delete(f"/foc/officers/{ac_row['id']}", headers=H(admin))).status_code == 409
-    # Once it moves on, the seat can change hands.
-    await client.post(f"/foc/sheets/{sheet['id']}/forward", headers=H(p["ac"]), json={})
-    r = await client.post("/foc/officers", headers=H(admin), json={"role": "assistant_comptroller", "user_id": str(newcomer.id)})
-    assert r.status_code == 201
-    ac = [o for o in (await client.get("/foc/officers", headers=H(admin))).json() if o["role"] == "assistant_comptroller"]
-    assert [o["user"]["id"] for o in ac] == [str(newcomer.id)]
+    await client.post(f"/foc/sheets/{sid}/forward", headers=H(p["ddo1"]), json={})
+    assert sid in {r["id"] for r in (await client.get("/foc/docket", headers=H(p["ac"]))).json()}
+    assert (await client.get("/foc/me", headers=H(p["ac"]))).json()["officer_titles"] == ["Assistant Comptroller"]
 
-
-@pytest.mark.asyncio
-async def test_forward_without_next_officer(client, users, foc, db):
-    admin, p, project, sheet = await _setup(client, users)
-    await _fill_and_submit(client, sheet, p["incharge"], p["ddo1"])
-    await db.execute(delete(FocOfficer).where(FocOfficer.role == "assistant_comptroller"))
+    # eFMS: the AC role moves to someone else.
+    newcomer = await users.make("registrar", first_name="Newac")
+    ac_role = p["_efms"]["ac"].name
+    await db.execute(delete(UserRole).where(UserRole.user_id == p["ac"].id, UserRole.role == ac_role))
+    db.add(UserRole(user_id=newcomer.id, role=ac_role))
     await db.commit()
-    r = await client.post(f"/foc/sheets/{sheet['id']}/forward", headers=H(p["ddo1"]), json={})
-    assert r.status_code == 409 and "Assistant Comptroller" in r.json()["detail"]
+
+    assert sid not in {r["id"] for r in (await client.get("/foc/docket", headers=H(p["ac"]))).json()}
+    assert (await client.post(f"/foc/sheets/{sid}/forward", headers=H(p["ac"]), json={})).status_code == 409
+    assert sid in {r["id"] for r in (await client.get("/foc/docket", headers=H(newcomer))).json()}
+    view = (await client.get(f"/foc/sheets/{sid}", headers=H(newcomer))).json()
+    assert view["can_act"] and view["holder"]["id"] == str(newcomer.id)
+    r = await client.post(f"/foc/sheets/{sid}/forward", headers=H(newcomer), json={})
+    assert r.status_code == 200 and r.json()["stage"] == "finance_officer"
 
 
 @pytest.mark.asyncio
-async def test_sanction_documents_are_private(client, users, foc):
-    admin, p, project, sheet = await _setup(client, users)
+async def test_forward_needs_exactly_one_holder(client, users, roles, foc, db):
+    admin, p, project, sheet = await _setup(client, users, roles)
+    sid = sheet["id"]
+    await _fill_and_submit(client, sheet, p["incharge"], p["ddo1"])
+    # Two people hold the AC role.
+    second = await users.make(p["_efms"]["ac"].name)
+    r = await client.post(f"/foc/sheets/{sid}/forward", headers=H(p["ddo1"]), json={})
+    assert r.status_code == 409 and "More than one person" in r.json()["detail"]
+    officers = (await client.get("/foc/officers", headers=H(admin))).json()
+    ac = next(f for f in officers["fixed"] if f["role"] == "assistant_comptroller")
+    assert ac["holder"] is None and len(ac["holders"]) == 2 and ac["problem"]
+    await db.execute(delete(UserRole).where(UserRole.user_id == second.id))
+    await db.commit()
+    # No eFMS role linked at all.
+    await client.put("/foc/officers/fixed/assistant_comptroller", headers=H(admin), json={"efms_role_id": None})
+    r = await client.post(f"/foc/sheets/{sid}/forward", headers=H(p["ddo1"]), json={})
+    assert r.status_code == 409 and "No eFMS role is linked" in r.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_project_incharge_change_moves_open_focs(client, users, roles, foc):
+    admin, p, project, sheet = await _setup(client, users, roles)
+    other = await users.make("registrar", first_name="Other")
+    r = await client.patch(f"/foc/projects/{project['id']}", headers=H(admin), json={"incharge_id": str(other.id)})
+    assert r.status_code == 200 and r.json()["incharge"]["id"] == str(other.id)
+    assert [s["id"] for s in (await client.get("/foc/sheets/mine", headers=H(other))).json()] == [sheet["id"]]
+    assert (await client.get("/foc/sheets/mine", headers=H(p["incharge"]))).json() == []
+    # A project without an in-charge cannot get FOCs.
+    r = await client.post("/foc/projects", headers=H(admin), json={"name": f"No incharge {uuid.uuid4().hex[:6]}"})
+    r = await client.post("/foc/sheets", headers=H(admin), json={"project_id": r.json()["id"], "financial_year": "2025-2026",
+                                                                 "name": "X", "lines": [{"sub_head": "A", "sanctioned_fund": 1, "available_fund": 1}]})
+    assert r.status_code == 400 and "in-charge" in r.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_super_admin_has_no_docket(client, users, roles, foc):
+    admin, p, project, sheet = await _setup(client, users, roles)
+    me = (await client.get("/foc/me", headers=H(admin))).json()
+    assert me["has_access"] and me["has_docket"] is False
+    assert (await client.get("/foc/me", headers=H(p["ddo1"]))).json()["has_docket"] is True
+    assert (await client.get("/foc/me", headers=H(p["incharge"]))).json()["has_docket"] is True
+
+
+@pytest.mark.asyncio
+async def test_sanction_documents_are_private(client, users, roles, foc):
+    admin, p, project, sheet = await _setup(client, users, roles)
     inc = p["incharge"]
     line = sheet["lines"][0]["id"]
     url = f"/foc/sheets/{sheet['id']}/lines/{line}/document"
@@ -263,8 +309,8 @@ async def test_sanction_documents_are_private(client, users, foc):
 
 
 @pytest.mark.asyncio
-async def test_draft_can_be_deleted_and_lines_edited(client, users, foc):
-    admin, p, project, sheet = await _setup(client, users)
+async def test_draft_can_be_deleted_and_lines_edited(client, users, roles, foc):
+    admin, p, project, sheet = await _setup(client, users, roles)
     lines = sheet["lines"]
     r = await client.patch(f"/foc/sheets/{sheet['id']}", headers=H(admin), json={"lines": [
         {"id": lines[0]["id"], "sub_head": "Salaries (revised)", "sanctioned_fund": "500000", "available_fund": "300000"},
@@ -283,8 +329,8 @@ def test_rupees_in_words():
 
 
 @pytest.mark.asyncio
-async def test_pdf_html_uses_letterhead(client, users, foc, db):
-    admin, p, project, sheet = await _setup(client, users)
+async def test_pdf_html_uses_letterhead(client, users, roles, foc, db):
+    admin, p, project, sheet = await _setup(client, users, roles)
     await _fill_and_submit(client, sheet, p["incharge"], p["ddo1"])
     await client.post(f"/foc/sheets/{sheet['id']}/approve", headers=H(p["ddo1"]), json={"remark": "OK"})
     from app.api.v1.endpoints.foc import _load_sheet

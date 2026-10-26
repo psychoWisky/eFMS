@@ -15,7 +15,10 @@ frontend/package-lock.json
 
 # local-only backend data
 backend/seed.py
+# FOC demo data (people, projects, FOCs) — local testing only, never pushed
+backend/scripts/seed_foc_demo.py
 backend/uploads/
+backend/foc_documents/
 uploads/
 backend/db_backups/
 *.dump

@@ -17,7 +17,7 @@ import { cn } from "@/lib/utils";
 import { confirmAction, showSuccess } from "@/lib/alert";
 import { SearchableSelect } from "@/components/shared/searchable-select";
 import {
-  STATUS_BADGE, apiDetail, formatFocDate, formatINR, openFocBlob, personLabel,
+  STATUS_BADGE, apiDetail, useFocMe, formatFocDate, formatINR, openFocBlob, personLabel,
   type FocLine, type FocPerson, type FocSheet,
 } from "@/lib/foc";
 
@@ -98,6 +98,9 @@ const ACTION_TEXT: Record<string, string> = { submitted: "Sent", forwarded: "For
 
 export function FocSheetView({ sheetId }: { sheetId: string }) {
   const qc = useQueryClient();
+  const { data: me } = useFocMe();
+  // The Super Admin (without a docket) came here from FOC Setup.
+  const back = me && !me.has_docket ? { href: "/foc/admin", label: "FOC Setup" } : { href: "/foc", label: "FOC Docket" };
   const { data: sheet, isLoading, isError, error } = useQuery<FocSheet>({
     queryKey: ["foc-sheet", sheetId],
     queryFn: () => api.get(`/foc/sheets/${sheetId}`).then((r) => r.data),
@@ -297,7 +300,7 @@ export function FocSheetView({ sheetId }: { sheetId: string }) {
       <div className="flex flex-col items-center py-24 text-gray-500">
         <XCircle size={40} className="mb-3 text-red-300" />
         <p className="text-lg font-semibold">{apiDetail(error, "FOC not found.")}</p>
-        <Link href="/foc" className="mt-4 text-[#0D6E6E] hover:underline text-sm">← FOC Docket</Link>
+        <Link href={back.href} className="mt-4 text-[#0D6E6E] hover:underline text-sm">← {back.label}</Link>
       </div>
     );
   }
@@ -311,7 +314,7 @@ export function FocSheetView({ sheetId }: { sheetId: string }) {
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <Link href="/foc" className="flex items-center gap-1.5 text-sm text-[#0D6E6E] hover:underline"><ArrowLeft size={15} /> FOC Docket</Link>
+        <Link href={back.href} className="flex items-center gap-1.5 text-sm text-[#0D6E6E] hover:underline"><ArrowLeft size={15} /> {back.label}</Link>
         <div className="flex items-center gap-2">
           <span className={cn("px-3 py-1 rounded-full text-xs font-bold border", STATUS_BADGE[sheet.status])}>{sheet.status_label}</span>
           {sheet.can_download && (
@@ -353,7 +356,7 @@ export function FocSheetView({ sheetId }: { sheetId: string }) {
         <InfoGrid rows={[
           ["Name of the Project", p.name, "Funded By", p.funded_by],
           ["Funding Agency", p.funding_agency, "F.O.C. Creation Date", formatFocDate(sheet.created_at, false)],
-          ["F.O.C. Received From", personLabel(sheet.incharge), "Project P.I. Name", p.pi_name],
+          ["FOC In-charge", personLabel(sheet.incharge), "Establishment / Office", office],
           ["Type of Project", p.project_type, "Financial Year", sheet.financial_year],
           ["F.O.C. Name", sheet.name, "Fund Sanction Remittance No.", p.fund_sanction_remittance_no],
         ]} />
@@ -440,7 +443,7 @@ export function FocSheetView({ sheetId }: { sheetId: string }) {
         <InfoGrid rows={[
           ["Account Holder", p.bank_account_holder, "Bank", p.bank_name],
           ["Account No.", p.bank_account_no, "Fund Received Instrument No.", p.fund_instrument_no],
-          ["Fund Received Date", formatFocDate(p.fund_received_date, false), "Establishment / Office", office],
+          ["Fund Received Date", formatFocDate(p.fund_received_date, false), "Total Amount Required", `₹ ${formatINR(total)}`],
         ]} />
 
         {sheet.movements.length > 0 && (

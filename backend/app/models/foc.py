@@ -3,10 +3,10 @@
 A separate module inside eFMS (own screens under /foc, own docket) that uses
 the same database and the same user accounts.
 
-  Super Admin  sets up FOC projects, creates each FOC sheet (project,
-               financial year, name, in-charge) with its budget lines
-               (sub head, sanctioned fund, available fund), and assigns the
-               approving officers.
+  Super Admin  sets up FOC projects (each with its FOC in-charge), creates
+               each FOC sheet (project, financial year, name) with its
+               budget lines (sub head, sanctioned fund, available fund), and
+               chooses the DDOs.
   In-charge    fills in each line (amount required, sanction order no,
                sanction document, purpose, remark), certifies, and sends the
                sheet to a DDO of their choice.
@@ -15,7 +15,9 @@ the same database and the same user accounts.
                (remark required; goes back to the in-charge) or forward it to
                the next officer (the Vice Chancellor cannot forward).
 
-There can be several DDOs; the other three are single, fixed people.
+There can be several DDOs, chosen by the Super Admin. The other three are
+the university's fixed offices: FOC uses whoever holds the matching eFMS
+role (see FocRoleLink), so a hand-over in eFMS carries over to FOC.
 """
 import enum
 
@@ -62,20 +64,29 @@ class FocStatus(str, enum.Enum):
 
 
 class FocOfficer(Base, UUIDMixin, TimestampMixin):
-    """Who acts as DDO (any number) / Assistant Comptroller / Finance
-    Officer / Vice Chancellor (one each) — assigned by the Super Admin."""
+    """A DDO (there can be any number) — chosen by the Super Admin. The
+    in-charge picks one of them when sending an FOC."""
     __tablename__ = "foc_officers"
 
-    role = Column(String(30), nullable=False)
+    role = Column(String(30), nullable=False)   # always "ddo"
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
 
     user = relationship("User")
 
     __table_args__ = (
         UniqueConstraint("role", "user_id", name="uq_foc_officer_role_user"),
-        # The three fixed officers are single people.
-        Index("uq_foc_officer_fixed_role", "role", unique=True, postgresql_where=text("role <> 'ddo'")),
     )
+
+
+class FocRoleLink(Base):
+    """Which eFMS role is the Assistant Comptroller / Finance Officer / Vice
+    Chancellor. Whoever holds that eFMS role is the FOC officer. With no row,
+    the eFMS role with the matching name is used."""
+    __tablename__ = "foc_role_links"
+
+    role = Column(String(30), primary_key=True)
+    efms_role_id = Column(UUID(as_uuid=True), ForeignKey("roles.id", ondelete="SET NULL"), nullable=True)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
 
 class FocProject(Base, UUIDMixin, TimestampMixin):
@@ -88,7 +99,8 @@ class FocProject(Base, UUIDMixin, TimestampMixin):
     funding_agency = Column(String(200), nullable=True)       # e.g. DBT
     establishment_id = Column(UUID(as_uuid=True), ForeignKey("establishments.id"), nullable=True)
     department_id = Column(UUID(as_uuid=True), ForeignKey("departments.id"), nullable=True)
-    pi_name = Column(String(200), nullable=True)              # Project P.I. (text — not an account)
+    # The person who fills in and sends this project's FOCs.
+    incharge_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
     project_type = Column(String(100), nullable=True)         # e.g. 100%
     bank_account_holder = Column(String(200), nullable=True)
     bank_name = Column(String(200), nullable=True)
@@ -101,6 +113,7 @@ class FocProject(Base, UUIDMixin, TimestampMixin):
 
     establishment = relationship("Establishment")
     department = relationship("Department")
+    incharge = relationship("User", foreign_keys=[incharge_id])
 
 
 class FocSheet(Base, UUIDMixin, TimestampMixin):
@@ -112,6 +125,7 @@ class FocSheet(Base, UUIDMixin, TimestampMixin):
     project_id = Column(UUID(as_uuid=True), ForeignKey("foc_projects.id"), nullable=False)
     financial_year = Column(String(9), nullable=False)       # "2025-2026"
     name = Column(String(200), nullable=False)               # e.g. "October 2025"
+    # Copied from the project; follows it while the FOC is a draft or returned.
     incharge_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
 
     status = Column(String(20), nullable=False, default=FocStatus.DRAFT.value, server_default=FocStatus.DRAFT.value)

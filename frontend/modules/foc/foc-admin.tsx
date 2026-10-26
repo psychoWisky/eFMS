@@ -1,27 +1,33 @@
 "use client";
-// FOC set-up for the Super Admin: projects (the project / bank / fund
-// details printed on every FOC), FOC sheets with their budget lines, and the
-// approving officers (several DDOs; one Assistant Comptroller, Finance
-// Officer and Vice Chancellor).
+// FOC set-up for the Super Admin: projects (with their FOC in-charge and the
+// project / bank / fund details printed on every FOC), FOC sheets with their
+// budget lines, and the approving officers — the DDOs chosen here, the
+// Assistant Comptroller / Finance Officer / Vice Chancellor taken from eFMS.
 import Link from "next/link";
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { Eye, Loader2, Pencil, Plus, Trash2, X, UserPlus } from "lucide-react";
+import { CheckCircle2, Eye, Loader2, Pencil, Plus, Trash2, X, UserPlus } from "lucide-react";
 import { api } from "@/services/api";
 import { cn } from "@/lib/utils";
 import { confirmAction, showSuccess } from "@/lib/alert";
 import { SearchableSelect } from "@/components/shared/searchable-select";
 import { makeDepartmentLabel } from "@/lib/department-label";
 import {
-  FOC_ROLE_TITLES, STATUS_BADGE, apiDetail, formatFocDate, formatINR, personLabel,
+  STATUS_BADGE, apiDetail, formatINR, personLabel,
   type FocPerson, type FocProject, type FocRole, type FocSheet, type FocSummary,
 } from "@/lib/foc";
 
 interface Estb { id: string; name: string; is_active?: boolean }
 interface Dept { id: string; name: string; establishment_id?: string | null; is_active?: boolean }
 interface AdminUser { id: string; full_name: string; email: string; designation: string | null; is_active: boolean; is_retired?: boolean; department_name?: string | null; establishment_name?: string | null }
-interface Officer { id: string; role: FocRole; role_title: string; user: FocPerson | null }
+interface FixedOffice {
+  role: FocRole; role_title: string;
+  efms_role: { id: string; name: string } | null; chosen: boolean;
+  holders: FocPerson[]; holder: FocPerson | null; problem: string | null;
+}
+interface Officers { ddos: { id: string; user: FocPerson | null }[]; fixed: FixedOffice[] }
+interface EfmsRole { id: string; name: string; description: string | null }
 
 const INPUT = "w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]";
 const LABEL = "block text-xs font-semibold text-gray-600 mb-1";
@@ -57,20 +63,27 @@ function personOption(u: AdminUser) {
 
 // ── Projects ────────────────────────────────────────────────────────────────
 
-type ProjectForm = Omit<FocProject, "id" | "establishment_name" | "department_name">;
+type ProjectForm = Omit<FocProject, "id" | "establishment_name" | "department_name" | "incharge"> & { incharge_id: string };
 const EMPTY_PROJECT: ProjectForm = {
-  name: "", funded_by: "", funding_agency: "", establishment_id: "", department_id: "", pi_name: "", project_type: "",
+  name: "", funded_by: "", funding_agency: "", establishment_id: "", department_id: "", incharge_id: "", project_type: "",
   bank_account_holder: "", bank_name: "", bank_account_no: "", fund_instrument_no: "", fund_received_date: "",
   fund_sanction_remittance_no: "", is_active: true,
 };
 
 function ProjectModal({ project, onClose }: { project: FocProject | null; onClose: () => void }) {
   const qc = useQueryClient();
-  const [form, setForm] = useState<ProjectForm>(() => project ? {
-    ...EMPTY_PROJECT,
-    ...Object.fromEntries(Object.entries(project).map(([k, v]) => [k, v ?? ""])),
-    is_active: project.is_active,
-  } as ProjectForm : EMPTY_PROJECT);
+  const [form, setForm] = useState<ProjectForm>(() => {
+    if (!project) return EMPTY_PROJECT;
+    const { incharge, establishment_name: _e, department_name: _d, id: _id, ...rest } = project;
+    void _e; void _d; void _id;
+    return {
+      ...EMPTY_PROJECT,
+      ...(Object.fromEntries(Object.entries(rest).map(([k, v]) => [k, v ?? ""])) as Partial<ProjectForm>),
+      incharge_id: incharge?.id ?? "",
+      is_active: project.is_active,
+    };
+  });
+  const { data: people = [] } = usePeople();
   const { data: estbs = [] } = useQuery<Estb[]>({ queryKey: ["admin-estb-all"], queryFn: () => api.get("/admin/establishments/all").then((r) => r.data) });
   const { data: depts = [] } = useQuery<Dept[]>({ queryKey: ["admin-dept-all"], queryFn: () => api.get("/admin/departments/all").then((r) => r.data) });
   const deptLabel = useMemo(() => makeDepartmentLabel(depts, estbs), [depts, estbs]);
@@ -115,7 +128,13 @@ function ProjectModal({ project, onClose }: { project: FocProject | null; onClos
               <SearchableSelect options={deptOptions.map((d) => ({ value: d.id, label: deptLabel(d) }))} value={form.department_id ?? ""}
                 onChange={(v) => setForm({ ...form, department_id: v })} placeholder="None" searchPlaceholder="Search departments…" />
             </div>
-            {text("pi_name", "Project P.I. name")}
+            <div>
+              <label className={LABEL}>FOC In-charge *</label>
+              <SearchableSelect options={people.map(personOption)} value={form.incharge_id}
+                onChange={(v) => setForm({ ...form, incharge_id: v })} placeholder="Choose the in-charge…"
+                searchPlaceholder="Search people…" widePanel />
+              <p className="text-[11px] text-gray-400 mt-1">Fills in and sends this project&apos;s FOCs.</p>
+            </div>
             {text("project_type", "Type of project (e.g. 100%)")}
           </div>
         </div>
@@ -143,7 +162,7 @@ function ProjectModal({ project, onClose }: { project: FocProject | null; onClos
         )}
         <div className="flex justify-end gap-2">
           <button onClick={onClose} className={BTN_GHOST}>Cancel</button>
-          <button onClick={() => save.mutate()} disabled={save.isPending || !form.name.trim()} className={BTN_PRIMARY}>
+          <button onClick={() => save.mutate()} disabled={save.isPending || !form.name.trim() || !form.incharge_id} className={BTN_PRIMARY}>
             {save.isPending && <Loader2 size={15} className="animate-spin" />} Save
           </button>
         </div>
@@ -174,15 +193,15 @@ function ProjectsTab() {
       <div className="bg-white rounded-2xl border border-gray-200 overflow-x-auto">
         <table className="w-full text-sm">
           <thead><tr className="bg-gray-50 text-left text-xs uppercase tracking-wide text-gray-500">
-            {["Project", "Funded by / Agency", "Establishment / Department", "P.I.", "Bank", "Status", ""].map((h) => <th key={h} className="px-4 py-3 font-semibold">{h}</th>)}
+            {["Project", "FOC In-charge", "Funded by / Agency", "Establishment / Department", "Bank", "Status", ""].map((h) => <th key={h} className="px-4 py-3 font-semibold">{h}</th>)}
           </tr></thead>
           <tbody className="divide-y divide-gray-100">
             {data.map((p) => (
               <tr key={p.id}>
                 <td className="px-4 py-3 font-semibold text-gray-900">{p.name}</td>
+                <td className="px-4 py-3 text-gray-700">{p.incharge ? personLabel(p.incharge) : <span className="text-amber-600">Not set</span>}</td>
                 <td className="px-4 py-3 text-gray-700">{[p.funded_by, p.funding_agency].filter(Boolean).join(" / ") || "—"}</td>
                 <td className="px-4 py-3 text-gray-700">{[p.establishment_name, p.department_name].filter(Boolean).join(" / ") || "—"}</td>
-                <td className="px-4 py-3 text-gray-700">{p.pi_name || "—"}</td>
                 <td className="px-4 py-3 text-gray-700">{[p.bank_name, p.bank_account_no].filter(Boolean).join(" · ") || "—"}</td>
                 <td className="px-4 py-3">
                   <span className={cn("px-2 py-0.5 rounded-full text-xs font-semibold border", p.is_active ? "bg-emerald-50 text-emerald-700 border-emerald-200" : "bg-gray-100 text-gray-600 border-gray-200")}>
@@ -213,18 +232,17 @@ function SheetModal({ sheetId, onClose }: { sheetId: string | null; onClose: () 
   const qc = useQueryClient();
   const { data: projects = [] } = useQuery<FocProject[]>({ queryKey: ["foc-projects"], queryFn: () => api.get("/foc/projects").then((r) => r.data) });
   const { data: fys } = useQuery<{ current: string; years: string[] }>({ queryKey: ["foc-fys"], queryFn: () => api.get("/foc/financial-years").then((r) => r.data) });
-  const { data: people = [] } = usePeople();
   const { data: existing, isLoading } = useQuery<FocSheet>({
     queryKey: ["foc-sheet", sheetId], queryFn: () => api.get(`/foc/sheets/${sheetId}`).then((r) => r.data), enabled: !!sheetId,
   });
 
-  const [form, setForm] = useState<{ project_id: string; financial_year: string; name: string; incharge_id: string; lines: LineForm[] } | null>(null);
+  const [form, setForm] = useState<{ project_id: string; financial_year: string; name: string; lines: LineForm[] } | null>(null);
   const current = form ?? (sheetId
     ? existing && {
-      project_id: existing.project.id, financial_year: existing.financial_year, name: existing.name, incharge_id: existing.incharge?.id ?? "",
+      project_id: existing.project.id, financial_year: existing.financial_year, name: existing.name,
       lines: existing.lines.map((l) => ({ id: l.id, sub_head: l.sub_head, sanctioned_fund: l.sanctioned_fund, available_fund: l.available_fund })),
     }
-    : { project_id: "", financial_year: fys?.current ?? "", name: "", incharge_id: "", lines: [{ sub_head: "", sanctioned_fund: "", available_fund: "" }] });
+    : { project_id: "", financial_year: fys?.current ?? "", name: "", lines: [{ sub_head: "", sanctioned_fund: "", available_fund: "" }] });
   const update = (patch: Partial<NonNullable<typeof current>>) => current && setForm({ ...current, ...patch });
   const setLine = (i: number, patch: Partial<LineForm>) => current && update({ lines: current.lines.map((l, j) => (j === i ? { ...l, ...patch } : l)) });
 
@@ -274,9 +292,15 @@ function SheetModal({ sheetId, onClose }: { sheetId: string | null; onClose: () 
               <input value={current.name} onChange={(e) => update({ name: e.target.value })} className={INPUT} maxLength={200} disabled={locked} />
             </div>
             <div className="sm:col-span-2">
-              <label className={LABEL}>FOC in-charge *</label>
-              <SearchableSelect options={people.map(personOption)} value={current.incharge_id} onChange={(v) => update({ incharge_id: v })}
-                placeholder="Choose the in-charge…" searchPlaceholder="Search people…" clearable={false} widePanel disabled={locked} />
+              <label className={LABEL}>FOC In-charge</label>
+              {(() => {
+                const proj = projects.find((p) => p.id === current.project_id);
+                const who = sheetId ? existing?.incharge : proj?.incharge;
+                if (!current.project_id) return <p className="text-sm text-gray-400">Comes from the project.</p>;
+                return who
+                  ? <p className="text-sm font-semibold text-gray-800">{personLabel(who)} <span className="font-normal text-gray-400">— from the project</span></p>
+                  : <p className="text-sm text-amber-700">This project has no FOC in-charge yet. Set one under Projects first.</p>;
+              })()}
             </div>
           </div>
 
@@ -329,7 +353,8 @@ function SheetModal({ sheetId, onClose }: { sheetId: string | null; onClose: () 
             <button onClick={onClose} className={BTN_GHOST}>Cancel</button>
             {!locked && (
               <button onClick={() => save.mutate()}
-                disabled={save.isPending || !current.project_id || !current.name.trim() || !current.incharge_id || !current.lines.length}
+                disabled={save.isPending || !current.project_id || !current.name.trim() || !current.lines.length
+                  || (!sheetId && !projects.find((p) => p.id === current.project_id)?.incharge)}
                 className={BTN_PRIMARY}>
                 {save.isPending && <Loader2 size={15} className="animate-spin" />} {sheetId ? "Save changes" : "Create FOC"}
               </button>
@@ -374,7 +399,7 @@ function SheetsTab() {
       <div className="bg-white rounded-2xl border border-gray-200 overflow-x-auto">
         <table className="w-full text-sm">
           <thead><tr className="bg-gray-50 text-left text-xs uppercase tracking-wide text-gray-500">
-            {["ID", "FOC", "Project", "FY", "In-charge", "Amount required (₹)", "Status", "Updated", ""].map((h) => <th key={h} className="px-4 py-3 font-semibold whitespace-nowrap">{h}</th>)}
+            {["ID", "FOC", "Project", "FY", "In-charge", "Amount required (₹)", "Status", ""].map((h) => <th key={h} className="px-4 py-3 font-semibold whitespace-nowrap">{h}</th>)}
           </tr></thead>
           <tbody className="divide-y divide-gray-100">
             {data.map((s) => {
@@ -382,13 +407,12 @@ function SheetsTab() {
               return (
                 <tr key={s.id}>
                   <td className="px-4 py-3 font-mono font-semibold text-[#0A5757]">{s.number}</td>
-                  <td className="px-4 py-3 font-semibold text-gray-900">{s.name}</td>
-                  <td className="px-4 py-3 text-gray-700">{s.project_name}</td>
-                  <td className="px-4 py-3 text-gray-700">{s.financial_year}</td>
-                  <td className="px-4 py-3 text-gray-700">{personLabel(s.incharge)}</td>
+                  <td className="px-4 py-3 font-semibold text-gray-900 whitespace-nowrap">{s.name}</td>
+                  <td className="px-4 py-3 text-gray-700 min-w-[220px] max-w-[300px]"><span className="line-clamp-2" title={s.project_name ?? ""}>{s.project_name}</span></td>
+                  <td className="px-4 py-3 text-gray-700 whitespace-nowrap">{s.financial_year}</td>
+                  <td className="px-4 py-3 text-gray-700 whitespace-nowrap">{s.incharge?.full_name ?? "—"}</td>
                   <td className="px-4 py-3 text-right font-mono">{formatINR(s.total_required)}</td>
                   <td className="px-4 py-3"><span className={cn("px-2 py-0.5 rounded-full text-xs font-semibold border whitespace-nowrap", STATUS_BADGE[s.status])}>{s.status_label}</span></td>
-                  <td className="px-4 py-3 text-gray-500 whitespace-nowrap">{formatFocDate(s.updated_at)}</td>
                   <td className="px-4 py-3 whitespace-nowrap text-right">
                     <Link href={`/foc/sheets/${s.id}`} className="text-gray-600 hover:underline text-xs font-semibold mr-3"><Eye size={12} className="inline -mt-0.5" /> View</Link>
                     {editable && <button onClick={() => setEditing(s.id)} className="text-[#0D6E6E] hover:underline text-xs font-semibold mr-3"><Pencil size={12} className="inline -mt-0.5" /> Edit</button>}
@@ -411,86 +435,104 @@ function SheetsTab() {
 
 function OfficersTab() {
   const qc = useQueryClient();
-  const { data: officers = [], isLoading } = useQuery<Officer[]>({ queryKey: ["foc-officers"], queryFn: () => api.get("/foc/officers").then((r) => r.data) });
+  const { data, isLoading } = useQuery<Officers>({ queryKey: ["foc-officers"], queryFn: () => api.get("/foc/officers").then((r) => r.data) });
+  const { data: efmsRoles = [] } = useQuery<EfmsRole[]>({ queryKey: ["foc-efms-roles"], queryFn: () => api.get("/foc/efms-roles").then((r) => r.data) });
   const { data: people = [] } = usePeople();
-  const [picks, setPicks] = useState<Record<string, string>>({});
+  const [pick, setPick] = useState("");
 
-  const assign = useMutation({
-    mutationFn: ({ role, user_id }: { role: FocRole; user_id: string }) => api.post("/foc/officers", { role, user_id }),
-    onSuccess: (_d, v) => {
-      qc.invalidateQueries({ queryKey: ["foc-officers"] });
-      setPicks((p) => ({ ...p, [v.role]: "" }));
-      showSuccess(`${FOC_ROLE_TITLES[v.role]} assigned.`);
-    },
-    onError: (err) => toast.error(apiDetail(err, "Could not assign the officer.")),
+  const addDdo = useMutation({
+    mutationFn: (user_id: string) => api.post("/foc/officers", { user_id }),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ["foc-officers"] }); setPick(""); showSuccess("DDO added."); },
+    onError: (err) => toast.error(apiDetail(err, "Could not add the DDO.")),
+  });
+  const link = useMutation({
+    mutationFn: ({ role, efms_role_id }: { role: FocRole; efms_role_id: string | null }) =>
+      api.put(`/foc/officers/fixed/${role}`, { efms_role_id }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["foc-officers"] }),
+    onError: (err) => toast.error(apiDetail(err, "Could not link the role.")),
   });
 
-  async function remove(o: Officer) {
-    if (!(await confirmAction({ title: `Remove ${o.user?.full_name}?`, text: `They will no longer act as ${o.role_title} in FOC.`, confirmText: "Remove", danger: true }))) return;
+  async function removeDdo(o: { id: string; user: FocPerson | null }) {
+    if (!(await confirmAction({ title: `Remove ${o.user?.full_name}?`, text: "They will no longer be a DDO in FOC.", confirmText: "Remove", danger: true }))) return;
     try {
       await api.delete(`/foc/officers/${o.id}`);
       qc.invalidateQueries({ queryKey: ["foc-officers"] });
-    } catch (err) { toast.error(apiDetail(err, "Could not remove the officer.")); }
+    } catch (err) { toast.error(apiDetail(err, "Could not remove the DDO.")); }
   }
 
-  const ddos = officers.filter((o) => o.role === "ddo");
-  const fixed: FocRole[] = ["assistant_comptroller", "finance_officer", "vice_chancellor"];
-  const picker = (role: FocRole, label: string, exclude: string[] = []) => (
-    <div className="flex gap-2 items-end">
-      <div className="flex-1">
-        <SearchableSelect options={people.filter((u) => !exclude.includes(u.id)).map(personOption)} value={picks[role] ?? ""}
-          onChange={(v) => setPicks((p) => ({ ...p, [role]: v }))} placeholder={label} searchPlaceholder="Search people…" widePanel />
-      </div>
-      <button onClick={() => picks[role] && assign.mutate({ role, user_id: picks[role] })} disabled={!picks[role] || assign.isPending} className={BTN_PRIMARY}>
-        <UserPlus size={15} /> Assign
-      </button>
-    </div>
-  );
-
-  if (isLoading) return <p className="text-center text-gray-400 py-8"><Loader2 className="inline animate-spin" /></p>;
+  if (isLoading || !data) return <p className="text-center text-gray-400 py-8"><Loader2 className="inline animate-spin" /></p>;
+  const ddoIds = data.ddos.map((o) => o.user?.id);
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-      <div className="bg-white rounded-2xl border border-gray-200 p-5 lg:row-span-3">
+    <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 items-start">
+      <div className="bg-white rounded-2xl border border-gray-200 p-5">
         <h3 className="text-base font-bold text-gray-900">DDOs</h3>
         <p className="text-xs text-gray-500 mb-3">There can be several. The in-charge chooses one of them when sending an FOC.</p>
         <div className="space-y-2 mb-4">
-          {ddos.map((o) => (
+          {data.ddos.map((o) => (
             <div key={o.id} className="flex items-center justify-between p-3 rounded-xl bg-gray-50 border border-gray-100">
               <div><p className="text-sm font-semibold text-gray-900">{o.user?.full_name}</p><p className="text-xs text-gray-500">{o.user?.designation ?? o.user?.email}</p></div>
-              <button onClick={() => remove(o)} className="text-red-500 hover:text-red-700 text-xs font-semibold flex items-center gap-1"><Trash2 size={12} /> Remove</button>
+              <button onClick={() => removeDdo(o)} className="text-red-500 hover:text-red-700 text-xs font-semibold flex items-center gap-1"><Trash2 size={12} /> Remove</button>
             </div>
           ))}
-          {!ddos.length && <p className="text-sm text-gray-400">No DDO yet.</p>}
+          {!data.ddos.length && <p className="text-sm text-gray-400">No DDO yet.</p>}
         </div>
-        {picker("ddo", "Add a DDO…", ddos.map((o) => o.user?.id ?? ""))}
-      </div>
-      {fixed.map((role) => {
-        const o = officers.find((x) => x.role === role);
-        return (
-          <div key={role} className="bg-white rounded-2xl border border-gray-200 p-5">
-            <h3 className="text-base font-bold text-gray-900">{FOC_ROLE_TITLES[role]}</h3>
-            <p className="text-xs text-gray-500 mb-3">One person. FOCs are forwarded to them automatically.</p>
-            {o ? (
-              <div className="flex items-center justify-between p-3 rounded-xl bg-[#F4FAF9] border border-[#BFDEDB] mb-3">
-                <div><p className="text-sm font-semibold text-gray-900">{o.user?.full_name}</p><p className="text-xs text-gray-500">{o.user?.designation ?? o.user?.email}</p></div>
-                <button onClick={() => remove(o)} className="text-red-500 hover:text-red-700 text-xs font-semibold flex items-center gap-1"><Trash2 size={12} /> Remove</button>
-              </div>
-            ) : <p className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2 mb-3">Not assigned — FOCs cannot be forwarded to this stage yet.</p>}
-            {picker(role, o ? "Replace with…" : "Choose…", o?.user ? [o.user.id] : [])}
+        <div className="flex gap-2 items-end">
+          <div className="flex-1">
+            <SearchableSelect options={people.filter((u) => !ddoIds.includes(u.id)).map(personOption)} value={pick}
+              onChange={setPick} placeholder="Add a DDO…" searchPlaceholder="Search people…" widePanel />
           </div>
-        );
-      })}
+          <button onClick={() => pick && addDdo.mutate(pick)} disabled={!pick || addDdo.isPending} className={BTN_PRIMARY}><UserPlus size={15} /> Add</button>
+        </div>
+      </div>
+
+      <div className="bg-white rounded-2xl border border-gray-200 p-5 space-y-4">
+        <div>
+          <h3 className="text-base font-bold text-gray-900">Assistant Comptroller, Finance Officer, Vice Chancellor</h3>
+          <p className="text-xs text-gray-500">Fixed offices of the university — taken automatically from eFMS. Whoever holds the linked eFMS role is the officer; when the role is handed over in eFMS, FOC follows.</p>
+        </div>
+        {data.fixed.map((f) => (
+          <div key={f.role} className="border border-gray-200 rounded-xl p-4">
+            <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+              <p className="text-sm font-bold text-[#0A5757]">{f.role_title}</p>
+              <div className="w-64">
+                <SearchableSelect
+                  options={efmsRoles.map((r) => ({ value: r.id, label: r.name }))}
+                  value={f.efms_role?.id ?? ""}
+                  onChange={(v) => link.mutate({ role: f.role, efms_role_id: v || null })}
+                  placeholder="Link an eFMS role…" searchPlaceholder="Search eFMS roles…" />
+              </div>
+            </div>
+            {f.holder ? (
+              <div className="flex items-center gap-2 p-2.5 rounded-lg bg-[#F4FAF9] border border-[#BFDEDB]">
+                <CheckCircle2 size={15} className="text-emerald-600 shrink-0" />
+                <p className="text-sm"><span className="font-semibold text-gray-900">{f.holder.full_name}</span>
+                  <span className="text-gray-500"> · {f.holder.designation ?? f.holder.email}</span></p>
+              </div>
+            ) : (
+              <p className="text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">{f.problem}</p>
+            )}
+            {f.efms_role && !f.chosen && <p className="text-[11px] text-gray-400 mt-1.5">Matched by name to the eFMS role “{f.efms_role.name}”.</p>}
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
 
-export function FocAdminPage() {
+export function FocAdminPage({ embedded = false }: { embedded?: boolean }) {
   const [tab, setTab] = useState<"sheets" | "projects" | "officers">("sheets");
   const tabs = [["sheets", "FOC Sheets"], ["projects", "Projects"], ["officers", "Officers"]] as const;
   return (
     <div>
-      <h1 className="text-2xl font-bold text-[#1A1A2E]">FOC Setup</h1>
-      <p className="text-sm text-gray-500 mt-0.5 mb-4">Create projects and FOCs, and choose who approves them.</p>
+      {embedded ? (
+        <p className="text-sm text-gray-500 mb-4">FOC (Fixation of Ceiling): create projects with their FOC in-charge, create FOCs with their budget lines, and choose the DDOs.
+          {" "}<a href="/foc/admin" className="text-[#0D6E6E] font-semibold hover:underline">Open FOC →</a></p>
+      ) : (
+        <>
+          <h1 className="text-2xl font-bold text-[#1A1A2E]">FOC Setup</h1>
+          <p className="text-sm text-gray-500 mt-0.5 mb-4">Create projects and FOCs, and choose who approves them.</p>
+        </>
+      )}
       <div className="flex gap-1 border-b border-gray-200 mb-5">
         {tabs.map(([k, label]) => (
           <button key={k} onClick={() => setTab(k)}
