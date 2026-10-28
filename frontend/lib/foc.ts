@@ -3,6 +3,11 @@
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/services/api";
 
+// FOC is switched off in the frontend until it is released: no menu link,
+// no Admin Panel tab, and /foc sends people to their Dashboard. Turn it on
+// with NEXT_PUBLIC_FOC_ENABLED=true (build-time) — nothing else to change.
+export const FOC_ENABLED = process.env.NEXT_PUBLIC_FOC_ENABLED === "true";
+
 export type FocStatus = "draft" | "pending" | "approved" | "rejected";
 export type FocRole = "ddo" | "assistant_comptroller" | "finance_officer" | "vice_chancellor";
 

@@ -465,7 +465,7 @@ export function NewFileForm({ onSuccess }: NewFileFormProps) {
             <div onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }} onDragLeave={() => setIsDragging(false)} onDrop={handleDrop}
               className={`border-2 border-dashed rounded-xl p-5 text-center transition-colors ${isDragging ? "border-[#0D6E6E] bg-[#E6F4F4]" : "border-gray-200 hover:border-gray-300"}`}>
               <Upload className="w-7 h-7 mx-auto mb-2 text-gray-300" />
-              <p className="text-sm text-gray-500">Drag files here or <label className="text-[#0D6E6E] cursor-pointer hover:underline font-semibold">browse<input type="file" multiple accept={ALLOWED_ATTACHMENT_ACCEPT} className="sr-only" onChange={(e) => { attachmentQueue.addFiles(e.target.files); e.target.value = ""; }} /></label></p>
+              <p className="text-sm text-gray-500">Drag files here or <label className="text-[#0D6E6E] cursor-pointer hover:underline font-semibold">browse<input type="file" multiple accept={ALLOWED_ATTACHMENT_ACCEPT} className="hidden" onChange={(e) => { attachmentQueue.addFiles(e.target.files); e.target.value = ""; }} /></label></p>
               <p className="text-xs text-gray-400 mt-1">{ALLOWED_ATTACHMENT_HELP_TEXT} · Max 10 MB each · Up to 10 files</p>
             </div>
 

@@ -7,7 +7,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { ArrowLeft, Inbox, FileSpreadsheet, History, Settings2, Loader2, ShieldAlert } from "lucide-react";
 import { useAuthStore, useIsAuthenticated, useMustChangePassword, useUser } from "@/stores/auth.store";
-import { useFocMe } from "@/lib/foc";
+import { FOC_ENABLED, useFocMe } from "@/lib/foc";
 import { cn } from "@/lib/utils";
 
 export default function FocLayout({ children }: { children: React.ReactNode }) {
@@ -30,12 +30,14 @@ export default function FocLayout({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     if (!hydrated) return;
     if (!isAuthenticated) { router.replace("/login"); return; }
+    // FOC is not released yet — nobody lands here.
+    if (!FOC_ENABLED) { router.replace("/dashboard"); return; }
     if (mustChangePassword) { router.replace("/change-password"); return; }
     // A retired person keeps their eFMS Docket only.
     if (user?.is_retired) router.replace("/dashboard");
   }, [hydrated, isAuthenticated, mustChangePassword, user?.is_retired, router]);
 
-  const ready = hydrated && isAuthenticated && !mustChangePassword && !user?.is_retired;
+  const ready = FOC_ENABLED && hydrated && isAuthenticated && !mustChangePassword && !user?.is_retired;
   const { data: me, isLoading, isError } = useFocMe(ready);
 
   // The Super Admin sets FOC up; the docket is for in-charges and officers.

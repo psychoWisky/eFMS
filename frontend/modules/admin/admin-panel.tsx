@@ -13,6 +13,7 @@ import { UserManagementSection } from "./user-management";
 import { RoleManagementSection } from "./role-management";
 import { ProjectManagementSection } from "./project-management";
 import { FocAdminPage } from "@/modules/foc/foc-admin";
+import { FOC_ENABLED } from "@/lib/foc";
 import { SearchableSelect } from "@/components/shared/searchable-select";
 
 interface Item { id: string; name: string; is_active: boolean; label?: string; designation?: string; email?: string; user_id?: string; code?: string; establishment_id?: string; }
@@ -96,7 +97,7 @@ export function AdminPanel() {
     { id: "priorities",     label: "Priorities",     icon: AlertTriangle },
     { id: "signatures",     label: "Signatures",     icon: PenLine },
     // FOC (Fixation of Ceiling): projects, FOC sheets and officers.
-    { id: "foc",            label: "FOC",            icon: Landmark },
+    ...(FOC_ENABLED ? [{ id: "foc" as const, label: "FOC", icon: Landmark }] : []),
   ];
 
   return (
@@ -121,7 +122,7 @@ export function AdminPanel() {
 
       {/* ── USER MANAGEMENT ── */}
       {tab === "users" && <UserManagementSection />}
-      {tab === "foc" && <FocAdminPage embedded />}
+      {FOC_ENABLED && tab === "foc" && <FocAdminPage embedded />}
 
       {/* ── ROLE MANAGEMENT ── */}
       {tab === "roles" && <RoleManagementSection />}

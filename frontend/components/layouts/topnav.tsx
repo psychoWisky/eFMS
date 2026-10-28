@@ -10,6 +10,7 @@ import { toast } from "sonner";
 import { cn, getInitials, formatDate } from "@/lib/utils";
 import { ManageFavoritesDialog } from "@/components/shared/manage-favorites-dialog";
 import { useMyProfiles, switchToProfile, switchToRole } from "@/hooks/use-my-profiles";
+import { FOC_ENABLED } from "@/lib/foc";
 
 interface Notification { id: string; title: string; message: string | null; type: string; file_id: string | null; is_read: boolean; }
 
@@ -76,7 +77,7 @@ export function EFMSTopNav({ sidebarWidth }: { sidebarWidth: number }) {
       try { await markOneRead(n.id); } catch { /* non-fatal — still try to open the file */ }
     }
     // FOC notifications open the FOC Docket.
-    if (n.type === "foc") { router.push("/foc"); return; }
+    if (n.type === "foc") { if (FOC_ENABLED) router.push("/foc"); return; }
     if (!n.file_id) return;
     try {
       await api.get(`/efms/files/${n.file_id}`);

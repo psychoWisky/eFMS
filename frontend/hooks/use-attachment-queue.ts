@@ -43,14 +43,14 @@ export function useAttachmentQueue(maxFiles = 10) {
    * doc-1 and colliding with an attachment already tagged that way. This is
    * only the default: setTag/setCustomTag below let the user override it
    * for any queued item before it's actually uploaded. */
-  function addFiles(fileList: FileList | null, existingCount = 0) {
+  function addFiles(fileList: FileList | null, existingCount = 0, opts: { silent?: boolean } = {}) {
     if (!fileList) return;
     const files = Array.from(fileList);
     const accepted: QueuedAttachment[] = [];
     let rejected = 0;
-    files.forEach((f, i) => {
+    files.forEach((f) => {
       if (!isAllowedAttachmentFile(f.name)) { rejected++; return; }
-      const idx = existingCount + items.length + accepted.length + i + 1;
+      const idx = existingCount + items.length + accepted.length + 1;
       accepted.push({ file: f, name: f.name, tag: `doc-${idx}` });
     });
     if (rejected > 0) {
@@ -61,7 +61,9 @@ export function useAttachmentQueue(maxFiles = 10) {
     // are dropped by the slice below).
     const room = Math.max(0, maxFiles - items.length);
     const added = Math.min(accepted.length, room);
-    if (added > 0) {
+    // silent: the screen shows the queued files itself (e.g. the Attached
+    // Files rail), so no "will upload when you save" toast.
+    if (added > 0 && !opts.silent) {
       const names = accepted.slice(0, added).map((a) => a.name).join(", ");
       toast.success(
         added === 1

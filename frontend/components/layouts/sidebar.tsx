@@ -5,7 +5,7 @@ import { LayoutDashboard, ShieldCheck, PanelLeftClose, PanelLeftOpen, Search, Hi
 import { useActiveRole, useUser } from "@/stores/auth.store";
 import { guardedNavigate } from "@/hooks/use-unsaved-changes-guard";
 import { cn } from "@/lib/utils";
-import { useFocMe } from "@/lib/foc";
+import { FOC_ENABLED, useFocMe } from "@/lib/foc";
 import Image from "next/image";
 
 interface NavItem { label: string; icon: React.ElementType; href: string; audience: "normal" | "super_admin" | "foc"; }
@@ -24,7 +24,7 @@ export function EFMSSidebar({ collapsed, canToggle, onToggle }: SidebarProps) {
   const router = useRouter();
   const role = useActiveRole();
   const retired = !!useUser()?.is_retired;
-  const { data: foc } = useFocMe(!retired);
+  const { data: foc } = useFocMe(FOC_ENABLED && !retired);
   const visible = NAV_ITEMS.filter((item) =>
     // A retired person has the Dashboard (their Docket) only.
     retired ? item.href === "/dashboard"
@@ -33,7 +33,7 @@ export function EFMSSidebar({ collapsed, canToggle, onToggle }: SidebarProps) {
       : item.audience === "super_admin" ? role === "super_admin" : role !== "super_admin"
   );
   // FOC is its own module, shown to whoever takes part in it, in any role.
-  if (!retired && foc?.has_access) {
+  if (FOC_ENABLED && !retired && foc?.has_access) {
     visible.push({ label: "FOC", icon: Landmark, href: "/foc", audience: "foc" });
   }
 

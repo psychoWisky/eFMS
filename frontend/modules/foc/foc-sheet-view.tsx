@@ -411,7 +411,7 @@ export function FocSheetView({ sheetId }: { sheetId: string }) {
                         <label className={cn("flex items-center gap-1.5 cursor-pointer text-xs text-gray-500 hover:text-[#0D6E6E] border border-dashed border-gray-300 hover:border-[#0D6E6E] rounded-md px-2 py-1.5",
                           busy === `doc-${l.id}` && "opacity-50 pointer-events-none")}>
                           {busy === `doc-${l.id}` ? <Loader2 size={13} className="animate-spin" /> : <Upload size={13} />} Upload
-                          <input type="file" accept={DOC_ACCEPT} className="sr-only" onChange={(ev) => {
+                          <input type="file" accept={DOC_ACCEPT} className="hidden" onChange={(ev) => {
                             const f = ev.target.files?.[0];
                             ev.target.value = "";
                             if (f) void uploadDoc(l, f);

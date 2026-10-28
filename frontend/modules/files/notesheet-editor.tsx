@@ -1,6 +1,6 @@
 "use client";
 // File detail view: left panel = PDF attachments, main = Notesheet (creator's + each holder's own) + forwarding + track status
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api, FILES_BASE_URL, API_URL } from "@/services/api";
@@ -92,9 +92,13 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
   // RouteEntry created on Forward.
   const [toUserId, setToUserId] = useState("");
   const forwardAttachments = useAttachmentQueue();
-  // Documents queued in Edit Draft — uploaded by its Save Changes.
-  const draftAttachments = useAttachmentQueue();
+  // Documents picked in the Attached Files rail (draft): named and tagged
+  // there, then uploaded with its own Upload button.
+  const railQueue = useAttachmentQueue();
   const [savingDraft, setSavingDraft] = useState(false);
+  // Upload straight from the Attached Files rail while the file is a draft.
+  const railFileInput = useRef<HTMLInputElement>(null);
+  const [railUploading, setRailUploading] = useState(false);
   // True while saveForwardAttachments() is in flight — same manual
   // loading flag New File creation doesn't need (its upload only ever
   // happens once, at final submit) but this panel's Upload button does,
@@ -237,6 +241,7 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
   // Same condition the backend uses to let the creator remove ANY attachment
   // of their own never-forwarded draft, with no time limit.
   const isOwnUntouchedDraft = canDeleteDraft && file?.current_holder_id === user?.id;
+  const canUploadInRail = isDraft && isHolder;
   // Released overrides the underlying workflow status for display purposes.
   const displayStatus = isReleased ? "released" : (file?.status ?? "draft");
   // Quick one-click forward: window still open, recipient already on record —
@@ -566,28 +571,7 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
         recipient_user_role_id: splitRecipientValue(draftRecipientId).userRoleId ?? null,
       });
       await updateNotesheetMutation.mutateAsync(draftNotesheet);
-      if (draftAttachments.items.length > 0) {
-        if (draftAttachments.hasInvalidCustomTags()) {
-          toast.error("Please enter a valid custom tag for every attachment marked \"Other\".");
-          qc.invalidateQueries({ queryKey: ["efms-file", fileId] });
-          return false;
-        }
-        const total = draftAttachments.items.length;
-        const { succeeded, failed } = await draftAttachments.uploadAllReporting(fileId);
-        qc.invalidateQueries({ queryKey: ["efms-file", fileId] });
-        if (failed.length > 0) {
-          // Details and notesheet are saved; only the failed uploads stay queued.
-          setDraftBaseline({
-            subject: draftSubject, description: draftDescription, departmentId: draftDepartmentId,
-            category: draftCategory, priority: draftPriority, recipientId: draftRecipientId, notesheet: draftNotesheet,
-          });
-          toast.error(`${failed.length} of ${total} document${total > 1 ? "s" : ""} could not be uploaded: ${failed.map((f) => `${f.name} (${f.error})`).join(", ")}. The rest of the draft was saved — try Save Changes again.`);
-          return false;
-        }
-        if (succeeded > 0) showSuccess(`Draft updated and ${succeeded} document${succeeded > 1 ? "s" : ""} uploaded.`);
-      } else {
-        showSuccess("Draft updated.");
-      }
+      showSuccess("Draft updated.");
       setEditingDraft(false);
       qc.invalidateQueries({ queryKey: ["efms-file", fileId] });
       return true;
@@ -640,7 +624,6 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
       setDraftRecipientId(draftBaseline.recipientId);
       setDraftNotesheet(draftBaseline.notesheet);
     }
-    draftAttachments.clear();
     setEditingDraft(false);
   }
 
@@ -704,6 +687,31 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
     }
     toast.success(`${succeeded} file${succeeded > 1 ? "s" : ""} uploaded.`);
     return true;
+  }
+
+  function pickRailFiles() {
+    setRailManual(true); // the queue is shown in the expanded rail
+    railFileInput.current?.click();
+  }
+
+  async function uploadRailQueue() {
+    if (railQueue.hasInvalidCustomTags()) {
+      toast.error("Please enter a valid custom tag for every document marked \"Other\".");
+      return;
+    }
+    const total = railQueue.items.length;
+    setRailUploading(true);
+    try {
+      const { succeeded, failed } = await railQueue.uploadAllReporting(fileId);
+      if (succeeded > 0) qc.invalidateQueries({ queryKey: ["efms-file", fileId] });
+      if (failed.length > 0) {
+        toast.error(`${failed.length} of ${total} document${total > 1 ? "s" : ""} could not be uploaded: ${failed.map((f) => `${f.name} (${f.error})`).join(", ")}. They are still in the list — try again.`);
+      } else if (succeeded > 0) {
+        toast.success(`${succeeded} document${succeeded > 1 ? "s" : ""} uploaded.`);
+      }
+    } finally {
+      setRailUploading(false);
+    }
   }
 
   function discardForwardAttachments() {
@@ -803,7 +811,6 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
   // Notesheet and every other holder's Notesheet/history are never part of
   // this — they're immutable and read-only, with no editable state to track.
   const editDraftDirty = editingDraft && !!draftBaseline && (
-    draftAttachments.items.length > 0 ||
     draftSubject !== draftBaseline.subject ||
     draftDescription !== draftBaseline.description ||
     draftDepartmentId !== draftBaseline.departmentId ||
@@ -817,7 +824,8 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
   // not-yet-uploaded ones count, matching the existing immediate-upload
   // architecture (nothing here silently changes when attachments persist).
   const forwardAttachmentsDirty = canForwardAfter && forwardAttachments.items.length > 0;
-  const pageIsDirty = editDraftDirty || myNoteDirty || forwardAttachmentsDirty;
+  const railQueueDirty = railQueue.items.length > 0;
+  const pageIsDirty = editDraftDirty || myNoteDirty || forwardAttachmentsDirty || railQueueDirty;
 
   // The navigation guard's ONLY job is "if dirty, ask Leave/Stay" — it never
   // saves. Persisting each part only ever happens via that part's own
@@ -831,6 +839,7 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
     if (editDraftDirty) discardEditDraft();
     if (myNoteDirty) discardMyNotesheet();
     if (forwardAttachmentsDirty) discardForwardAttachments();
+    if (railQueueDirty) railQueue.clear();
   }
 
   const { guardNavigation } = useUnsavedChangesGuard({
@@ -994,6 +1003,49 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                   <Download size={16} /> Download All
                 </button>
               )}
+              {canUploadInRail && (
+                <button
+                  type="button"
+                  onClick={pickRailFiles}
+                  disabled={railUploading}
+                  className="flex items-center justify-center gap-2 w-full text-sm font-semibold text-[#0D6E6E] border-2 border-dashed border-[#0D6E6E]/40 hover:bg-[#F0F7F7] rounded-lg px-3 py-2.5 disabled:opacity-60"
+                >
+                  <Upload size={16} /> {railQueue.items.length ? "Add more documents" : "Upload document"}
+                </button>
+              )}
+              {canUploadInRail && railQueue.items.length > 0 && (
+                <div className="space-y-2 pt-1">
+                  {railQueue.items.map((ann, i) => (
+                    <div key={i} className="p-2.5 rounded-xl border border-amber-200 bg-amber-50/60 space-y-1.5">
+                      <div className="flex items-center gap-1.5">
+                        <FileText size={14} className="text-[#0D6E6E] shrink-0" />
+                        <input value={ann.name} onChange={(e) => railQueue.renameItem(i, e.target.value)} title="File name"
+                          className="flex-1 min-w-0 border border-gray-200 rounded-md px-2 py-1 text-xs bg-white focus:outline-none focus:ring-1 focus:ring-[#0D6E6E]" />
+                        <button type="button" title="Remove from the list" onClick={() => railQueue.removeItem(i)}
+                          className="text-red-400 hover:text-red-600 shrink-0"><X size={14} /></button>
+                      </div>
+                      <select value={ann.tag} onChange={(e) => railQueue.setTag(i, e.target.value)} title="Tag"
+                        className="w-full border border-gray-200 rounded-md px-2 py-1 text-xs bg-white focus:outline-none focus:ring-1 focus:ring-[#0D6E6E]">
+                        {ATTACHMENT_TAGS.map((opt) => <option key={opt} value={opt}>{opt}</option>)}
+                      </select>
+                      {ann.tag === CUSTOM_TAG_VALUE && (
+                        <input value={ann.customTag ?? ""} onChange={(e) => railQueue.setCustomTag(i, e.target.value)}
+                          placeholder="Enter custom tag…" maxLength={60}
+                          className="w-full border border-gray-200 rounded-md px-2 py-1 text-xs bg-white focus:outline-none focus:ring-1 focus:ring-[#0D6E6E]" />
+                      )}
+                    </div>
+                  ))}
+                  <div className="flex gap-2">
+                    <button type="button" onClick={() => railQueue.clear()} disabled={railUploading}
+                      className="flex-1 py-2 text-xs font-semibold rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 disabled:opacity-50">Cancel</button>
+                    <button type="button" onClick={uploadRailQueue} disabled={railUploading}
+                      className="flex-[2] py-2 text-xs font-bold rounded-lg bg-[#0D6E6E] text-white hover:bg-[#178F8F] disabled:opacity-50 flex items-center justify-center gap-1.5">
+                      {railUploading ? <Loader2 size={13} className="animate-spin" /> : <Upload size={13} />}
+                      Upload {railQueue.items.length} file{railQueue.items.length > 1 ? "s" : ""}
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
 
@@ -1004,6 +1056,7 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
               <div className="text-center py-10 px-4">
                 <FileText size={28} className="mx-auto mb-2 text-gray-300" />
                 <p className="text-sm text-gray-400">No attachments yet</p>
+                {canUploadInRail && <p className="text-xs text-gray-400 mt-1">Use “Upload document” above to add one.</p>}
               </div>
             ) : (
               <div className="space-y-2">
@@ -1078,7 +1131,23 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
             <span className="text-[10px] font-semibold leading-none">Expand</span>
             <ChevronRight size={12} className="text-[#0D6E6E]/60" />
           </button>
+          {canUploadInRail && (
+            <button
+              type="button"
+              onClick={pickRailFiles}
+              disabled={railUploading}
+              title="Upload a document to this draft"
+              className="flex flex-col items-center gap-1 rounded-lg bg-[#0D6E6E] text-white hover:bg-[#178F8F] transition-colors py-2.5 px-1 w-[46px] disabled:opacity-60"
+            >
+              {railUploading ? <Loader2 size={18} className="animate-spin" /> : <Upload size={18} />}
+              <span className="text-[10px] font-semibold leading-none">Upload</span>
+            </button>
+          )}
         </div>
+      )}
+      {canUploadInRail && (
+        <input ref={railFileInput} type="file" multiple accept={ALLOWED_ATTACHMENT_ACCEPT} className="hidden"
+          onChange={(e) => { railQueue.addFiles(e.target.files, file.attachments.length, { silent: true }); e.target.value = ""; }} />
       )}
 
       {/* Main panel */}
@@ -1319,94 +1388,6 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                 </div>
                 <RichTextToolbar editor={draftEditor} />
                 <EditorContent editor={draftEditor} className="min-h-[420px] text-base" />
-              </div>
-
-              <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
-                <div className="px-6 py-3.5 border-b border-gray-200 flex items-center justify-between">
-                  <h3 className="text-base font-bold text-gray-900">Documents</h3>
-                  <span className="text-xs text-gray-400">{file.attachments.length} attached</span>
-                </div>
-                <div className="p-6 space-y-4">
-                  {file.attachments.length > 0 ? (
-                    <div className="space-y-2">
-                      {file.attachments.map((att) => (
-                        <div key={att.id} className="flex items-center gap-3 p-3 rounded-xl border border-gray-100 bg-gray-50">
-                          <FileText size={17} className="text-[#0D6E6E] shrink-0" />
-                          <div className="flex-1 min-w-0">
-                            <p className="text-sm font-semibold text-gray-900 truncate">{att.original_name}</p>
-                            <p className="text-xs text-gray-500">{att.file_size ? `${(att.file_size / 1024).toFixed(0)} KB · ` : ""}{formatDate(att.created_at, "relative")}</p>
-                          </div>
-                          {getAttachmentPreviewKind(att) !== "none" && (
-                            <button type="button" onClick={() => selectAttachment(att)}
-                              className="text-xs text-[#0D6E6E] font-semibold hover:underline">View</button>
-                          )}
-                          {isOwnUntouchedDraft && (
-                            <button type="button"
-                              onClick={async () => {
-                                const confirmed = await confirmAction({
-                                  title: "Remove this document?",
-                                  text: `"${att.original_name}" will be permanently removed from this draft.`,
-                                  confirmText: "Remove",
-                                  danger: true,
-                                });
-                                if (confirmed) deleteAttachmentMutation.mutate(att.id);
-                              }}
-                              disabled={deleteAttachmentMutation.isPending}
-                              className="text-xs text-red-500 hover:text-red-700 font-semibold flex items-center gap-1 disabled:opacity-50">
-                              <Trash2 size={12} /> Remove
-                            </button>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  ) : (
-                    <p className="text-sm text-gray-400">No documents attached yet.</p>
-                  )}
-
-                  <label className="flex items-center gap-2 cursor-pointer w-full border-2 border-dashed border-gray-200 hover:border-[#0D6E6E] rounded-xl px-4 py-3 text-sm text-gray-500 hover:text-[#0D6E6E] transition-colors">
-                    <Upload size={15} />
-                    <span>Upload document…</span>
-                    <input type="file" multiple accept={ALLOWED_ATTACHMENT_ACCEPT} className="sr-only" onChange={(e) => {
-                      draftAttachments.addFiles(e.target.files, file.attachments.length);
-                      e.target.value = "";
-                    }} />
-                  </label>
-                  {draftAttachments.items.length > 0 && (
-                    <div className="space-y-2">
-                      <p className="text-xs font-semibold text-amber-700">Not uploaded yet — they will be uploaded when you click Save Changes.</p>
-                      {draftAttachments.items.map((ann, i) => (
-                        <div key={i} className="flex items-center gap-2 p-2.5 bg-amber-50/60 rounded-xl border border-amber-100">
-                          <FileText size={15} className="text-[#0D6E6E] shrink-0" />
-                          <div className="flex-1 grid grid-cols-2 gap-2">
-                            <div>
-                              <label className="block text-[11px] font-medium text-gray-500 mb-0.5">File Name</label>
-                              <input value={ann.name} onChange={(e) => draftAttachments.renameItem(i, e.target.value)}
-                                className="w-full border border-gray-200 rounded-lg px-2 py-1 text-xs bg-white focus:outline-none focus:ring-1 focus:ring-[#0D6E6E]" />
-                            </div>
-                            <div>
-                              <label className="block text-[11px] font-medium text-gray-500 mb-0.5">Tag</label>
-                              <select value={ann.tag} onChange={(e) => draftAttachments.setTag(i, e.target.value)}
-                                className="w-full border border-gray-200 rounded-lg px-2 py-1 text-xs bg-white focus:outline-none focus:ring-1 focus:ring-[#0D6E6E]">
-                                {ATTACHMENT_TAGS.map((opt) => <option key={opt} value={opt}>{opt}</option>)}
-                              </select>
-                              {ann.tag === CUSTOM_TAG_VALUE && (
-                                <input
-                                  value={ann.customTag ?? ""}
-                                  onChange={(e) => draftAttachments.setCustomTag(i, e.target.value)}
-                                  placeholder="Enter custom tag…"
-                                  maxLength={60}
-                                  className="mt-1 w-full border border-gray-200 rounded-lg px-2 py-1 text-xs bg-white focus:outline-none focus:ring-1 focus:ring-[#0D6E6E]"
-                                />
-                              )}
-                            </div>
-                          </div>
-                          <button type="button" title="Remove from the upload list" onClick={() => draftAttachments.removeItem(i)}
-                            className="text-red-400 hover:text-red-600 shrink-0"><X size={14} /></button>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
               </div>
 
               <div className="flex gap-2 justify-end">
@@ -1700,7 +1681,7 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                       <label className="flex items-center gap-2 cursor-pointer w-full border-2 border-dashed border-gray-200 hover:border-[#0D6E6E] rounded-xl px-3 py-2.5 text-sm text-gray-500 hover:text-[#0D6E6E] transition-colors">
                         <Upload size={14} />
                         <span>Attach document (optional)…</span>
-                        <input type="file" multiple accept={ALLOWED_ATTACHMENT_ACCEPT} className="sr-only" onChange={(e) => {
+                        <input type="file" multiple accept={ALLOWED_ATTACHMENT_ACCEPT} className="hidden" onChange={(e) => {
                           forwardAttachments.addFiles(e.target.files, file.attachments.length);
                           e.target.value = "";
                         }} />
