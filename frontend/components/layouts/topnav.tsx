@@ -298,6 +298,9 @@ export function EFMSTopNav({ sidebarWidth }: { sidebarWidth: number }) {
                               <p className={cn("text-sm leading-snug break-words whitespace-normal", isCurrent ? "font-bold text-emerald-950" : "font-semibold text-gray-900")}>
                                 {rName}
                               </p>
+                              {r.designation && (
+                                <p className="text-xs text-gray-500 leading-snug break-words">{r.designation}</p>
+                              )}
                               {orgParts.length > 0 && (
                                 <p className="text-xs text-gray-600 mt-0.5 break-words whitespace-normal leading-relaxed">
                                   {orgParts.join(" · ")}

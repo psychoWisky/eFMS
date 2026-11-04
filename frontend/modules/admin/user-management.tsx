@@ -30,6 +30,7 @@ interface AdminUser {
   roles?: {
     id?: string;
     role: string;
+    designation?: string | null;
     department_id: string | null;
     department_name?: string | null;
     establishment_id: string | null;
@@ -389,7 +390,7 @@ function EditUserModal({ user, onClose, establishments, departments, roleOptions
   const primaryIndex = primaryIdx !== -1 ? primaryIdx : 0;
 
   const [extraRoles, setExtraRoles] = useState<
-    { role: string; department_id: string; establishment_id: string }[]
+    { role: string; department_id: string; establishment_id: string; designation: string }[]
   >(
     (user.roles ?? [])
       .filter((_, idx) => idx !== primaryIndex)
@@ -397,8 +398,11 @@ function EditUserModal({ user, onClose, establishments, departments, roleOptions
         role: r.role,
         department_id: r.department_id ?? "",
         establishment_id: r.establishment_id ?? "",
+        designation: r.designation ?? "",
       })),
   );
+  // The main role keeps whatever designation its row already had.
+  const primaryRoleDesignation = user.roles?.[primaryIndex]?.designation ?? null;
   const save = useMutation({
     mutationFn: () => {
       // An extra role needs an establishment and a role. The department is
@@ -415,11 +419,13 @@ function EditUserModal({ user, onClose, establishments, departments, roleOptions
 
       // Assemble all role assignments
       const allRoles = [
-        { role: form.role, department_id: form.department_id || null, establishment_id: form.establishment_id || null },
+        { role: form.role, department_id: form.department_id || null, establishment_id: form.establishment_id || null,
+          designation: primaryRoleDesignation },
         ...validExtras.map((r) => ({
           role: r.role,
           department_id: r.department_id || null,
           establishment_id: r.establishment_id || null,
+          designation: r.designation.trim() || null,
         })),
       ];
 
@@ -554,13 +560,24 @@ function EditUserModal({ user, onClose, establishments, departments, roleOptions
                         />
                       </div>
                     </div>
+                    {/* Designation for this role (optional) */}
+                    <div className="mt-2">
+                      <label className="block text-xs font-semibold text-gray-500 mb-1">Designation <span className="font-normal text-gray-400">(optional)</span></label>
+                      <input
+                        value={row.designation}
+                        onChange={(e) => setRow({ designation: e.target.value })}
+                        maxLength={100}
+                        placeholder={form.designation ? `e.g. Head of Department — blank uses “${form.designation}”` : "e.g. Head of Department"}
+                        className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]"
+                      />
+                    </div>
                   </div>
                 );
               })}
             </div>
             <button
               type="button"
-              onClick={() => setExtraRoles((s) => [...s, { role: "", department_id: "", establishment_id: "" }])}
+              onClick={() => setExtraRoles((s) => [...s, { role: "", department_id: "", establishment_id: "", designation: "" }])}
               disabled={extraRoles.some((r) => !r.establishment_id || !r.role)}
               className="mt-3 flex items-center gap-1.5 px-3 py-2 text-sm font-semibold text-[#0D6E6E] border border-dashed border-[#0D6E6E]/40 rounded-lg hover:bg-[#F0F7F7] disabled:opacity-40 disabled:cursor-not-allowed"
             >

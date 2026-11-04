@@ -231,6 +231,9 @@ class UserRole(Base, UUIDMixin, TimestampMixin):
     # — so single-role users are entirely unaffected.
     department_id = Column(UUID(as_uuid=True), ForeignKey("departments.id"), nullable=True)
     establishment_id = Column(UUID(as_uuid=True), ForeignKey("establishments.id"), nullable=True)
+    # Optional designation for this role (e.g. "Head of Department" for a
+    # Professor's extra HoD role). NULL = use the person's own designation.
+    designation = Column(String(100), nullable=True)
 
     user = relationship("User", back_populates="roles")
     department = relationship("Department", foreign_keys=[department_id])

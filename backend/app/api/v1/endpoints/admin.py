@@ -302,13 +302,16 @@ async def list_users(
                     ur.establishment.name if ur.establishment else None,
                     ur.department.name if ur.department else None,
                 ) if n) or None
-                entries.append((ur.role, ur.id, ctx))
+                entries.append((ur.role, ur.id, ctx, ur.designation))
             else:
-                entries.append((ur.role, None, None))
+                entries.append((ur.role, None, None, ur.designation))
         if not entries:
-            entries = [(u.active_role if u.active_role else None, None, None)]
-        for role, ur_id, ctx in entries:
+            entries = [(u.active_role if u.active_role else None, None, None, None)]
+        for role, ur_id, ctx, role_designation in entries:
             item = UserOut.from_user(u, role=role, user_role_id=ur_id, role_context=ctx)
+            # Each role entry shows that role's designation when it has one.
+            if role_designation:
+                item.designation = role_designation
             if u.id in favorites:
                 item.is_favorite = True
                 item.favorite_created_at = favorites[u.id]

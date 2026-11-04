@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, update, or_, delete as sa_delete
 from sqlalchemy.orm import selectinload
 from sqlalchemy.exc import IntegrityError
-from pydantic import BaseModel, EmailStr, ValidationError
+from pydantic import BaseModel, EmailStr, Field, ValidationError
 
 from app.db.base import get_db
 from app.core.security import (
@@ -144,6 +144,7 @@ def build_user_brief(user: User) -> UserBrief:
         held_roles.append(HeldRoleBrief(
             id=str(r.id),
             role=r.role,
+            designation=r.designation,
             department_id=str(r.department_id) if r.department_id else None,
             department_name=r_dept.name if r_dept else (dept.name if dept and str(user.department_id) == str(r.department_id) else None),
             establishment_id=str(r.establishment_id) if r.establishment_id else None,
@@ -734,6 +735,7 @@ class RoleContextOut(BaseModel):
     Edit User form's Role N rows."""
     id: Optional[UUID] = None
     role: str
+    designation: Optional[str] = None
     department_id: Optional[UUID] = None
     department_name: Optional[str] = None
     establishment_id: Optional[UUID] = None
@@ -794,6 +796,7 @@ class AdminUserOut(BaseModel):
                 RoleContextOut(
                     id=r.id,
                     role=r.role,
+                    designation=r.designation,
                     department_id=r.department_id,
                     department_name=r_dept.name if r_dept else (u.department.name if u.department and u.department_id == r.department_id else None),
                     establishment_id=r.establishment_id,
@@ -889,11 +892,15 @@ async def _set_role_set(db: AsyncSession, user: User, roles: list["RoleAssignmen
     want_keys = {(r.role, r.establishment_id, r.department_id) for r in want}
     existing_roles = (await db.execute(select(UserRole).where(UserRole.user_id == user.id))).scalars().all()
 
-    # Delete existing roles that are not in want_keys
+    # Delete existing roles that are not in want_keys; kept ones take the
+    # (possibly changed) designation.
+    want_designation = {(r.role, r.establishment_id, r.department_id): getattr(r, "designation", None) for r in want}
     for ur in existing_roles:
         key = (ur.role, ur.establishment_id, ur.department_id)
         if key not in want_keys:
             await db.delete(ur)
+        else:
+            ur.designation = want_designation.get(key)
     await db.flush()
 
     remaining_roles = (await db.execute(select(UserRole).where(UserRole.user_id == user.id))).scalars().all()
@@ -907,6 +914,7 @@ async def _set_role_set(db: AsyncSession, user: User, roles: list["RoleAssignmen
                 role=r.role,
                 establishment_id=r.establishment_id,
                 department_id=r.department_id,
+                designation=getattr(r, "designation", None),
             )
             db.add(ur)
             remaining_keys.add(key)
@@ -1299,6 +1307,8 @@ class RoleAssignment(BaseModel):
     role: str
     department_id: Optional[UUID] = None
     establishment_id: Optional[UUID] = None
+    # Optional designation for this role; blank = the person's own designation.
+    designation: Optional[str] = Field(None, max_length=100)
 
 
 class EditUserRequest(BaseModel):
@@ -1375,6 +1385,7 @@ async def edit_user(
             canonical = await _validate_assignable_role(db, ra.role)
             validated.append(RoleAssignment(
                 role=canonical, department_id=ra.department_id, establishment_id=ra.establishment_id,
+                designation=(ra.designation or "").strip() or None,
             ))
         names = {ra.role for ra in validated}
         losing_super = (

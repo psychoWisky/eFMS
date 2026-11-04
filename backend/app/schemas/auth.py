@@ -27,6 +27,7 @@ class RefreshRequest(BaseModel):
 class HeldRoleBrief(BaseModel):
     id: str
     role: str
+    designation: Optional[str] = None
     department_id: Optional[str] = None
     department_name: Optional[str] = None
     establishment_id: Optional[str] = None

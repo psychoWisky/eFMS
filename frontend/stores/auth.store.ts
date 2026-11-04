@@ -8,6 +8,7 @@ export type EfmsRole =
 export interface HeldRole {
   id: string;
   role: string;
+  designation?: string | null;
   department_id?: string | null;
   department_name?: string | null;
   establishment_id?: string | null;
