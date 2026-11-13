@@ -456,6 +456,23 @@ class DeptOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class DeptBulkIn(BaseModel):
+    """Add existing department names (from other establishments) to one
+    establishment in a single step."""
+    establishment_id: UUID
+    names: List[str]
+
+
+async def _department_exists(db: AsyncSession, establishment_id: Optional[UUID], name: str, exclude: Optional[UUID] = None) -> Optional[Department]:
+    """The department of this name already in this establishment (names are
+    compared ignoring case and surrounding spaces), or None."""
+    q = select(Department).where(func.lower(func.trim(Department.name)) == name.strip().lower())
+    q = q.where(Department.establishment_id == establishment_id) if establishment_id else q.where(Department.establishment_id.is_(None))
+    if exclude:
+        q = q.where(Department.id != exclude)
+    return (await db.execute(q)).scalars().first()
+
+
 @router.get("/establishments", response_model=List[EstablishmentOut])
 async def list_establishments(db: AsyncSession = Depends(get_db)):
     r = await db.execute(select(Establishment).where(Establishment.is_active == True).order_by(Establishment.name))
@@ -544,9 +561,65 @@ async def create_department(body: DeptIn, db: AsyncSession = Depends(get_db), _=
         raise HTTPException(400, "Enter a name for the department.")
     if not (body.code or "").strip():
         raise HTTPException(400, "Enter a code for the department (up to 4 letters, for example AGRO).")
+    # The same department may exist in several establishments, but only
+    # once in each.
+    dup = await _department_exists(db, body.establishment_id, body.name)
+    if dup:
+        est = await db.get(Establishment, body.establishment_id) if body.establishment_id else None
+        where = f" in “{est.name}”" if est else ""
+        raise HTTPException(409, f"“{dup.name}” already exists{where}." + ("" if dup.is_active else " It is hidden — use the eye icon to show it again."))
     d = Department(**{**body.model_dump(), "name": body.name.strip(), "code": body.code.strip()})
     db.add(d); await db.commit(); await db.refresh(d)
     return d
+
+
+@router.get("/departments/names")
+async def department_names(db: AsyncSession = Depends(get_db), _=Depends(_super)):
+    """Every distinct department name across all establishments, with the
+    code it usually has and where it exists — for adding a department that
+    other establishments already have."""
+    rows = (await db.execute(select(Department).order_by(Department.name))).scalars().all()
+    by_name: dict[str, dict] = {}
+    for d in rows:
+        key = d.name.strip().lower()
+        entry = by_name.setdefault(key, {"name": d.name.strip(), "code": d.code, "establishment_ids": [], "count": 0})
+        if d.establishment_id:
+            entry["establishment_ids"].append(str(d.establishment_id))
+        entry["count"] += 1
+        if not entry["code"] and d.code:
+            entry["code"] = d.code
+    return sorted(by_name.values(), key=lambda e: e["name"].lower())
+
+
+@router.post("/departments/bulk")
+async def add_departments_to_establishment(body: DeptBulkIn, db: AsyncSession = Depends(get_db), _=Depends(_super)):
+    """Add several existing department names to an establishment. A name the
+    establishment already has is skipped, never duplicated."""
+    est = await db.get(Establishment, body.establishment_id)
+    if not est:
+        raise HTTPException(404, "Establishment not found.")
+    wanted = []
+    seen = set()
+    for n in body.names:
+        n = (n or "").strip()
+        if n and n.lower() not in seen:
+            seen.add(n.lower()); wanted.append(n)
+    if not wanted:
+        raise HTTPException(400, "Choose at least one department.")
+    # The code is copied from wherever this department already exists.
+    existing = (await db.execute(select(Department).where(func.lower(func.trim(Department.name)).in_([n.lower() for n in wanted])))).scalars().all()
+    code_of: dict[str, str] = {}
+    for d in existing:
+        if d.code and d.name.strip().lower() not in code_of:
+            code_of[d.name.strip().lower()] = d.code
+    added, skipped = [], []
+    for n in wanted:
+        if await _department_exists(db, est.id, n):
+            skipped.append(n); continue
+        d = Department(name=n, code=code_of.get(n.lower()) or n[:4].upper(), establishment_id=est.id, is_active=True)
+        db.add(d); added.append(n)
+    await db.commit()
+    return {"added": added, "skipped": skipped, "establishment": est.name}
 
 @router.patch("/departments/{did}/toggle", response_model=DeptOut)
 async def toggle_department(did: UUID, db: AsyncSession = Depends(get_db), _=Depends(_super)):
