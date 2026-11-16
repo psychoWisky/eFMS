@@ -12,13 +12,13 @@ import {
 import { UserManagementSection } from "./user-management";
 import { RoleManagementSection } from "./role-management";
 import { ProjectManagementSection } from "./project-management";
+import { DepartmentManagementSection } from "./department-management";
 import { FocAdminPage } from "@/modules/foc/foc-admin";
 import { FOC_ENABLED } from "@/lib/foc";
 import { SearchableSelect } from "@/components/shared/searchable-select";
 
 interface Item { id: string; name: string; is_active: boolean; label?: string; designation?: string; email?: string; user_id?: string; code?: string; establishment_id?: string; }
 interface Establishment { id: string; name: string; code: string | null; is_active: boolean; }
-interface Department { id: string; name: string; code: string | null; establishment_id: string | null; is_active: boolean; }
 interface SignUser { id: string; email: string; full_name: string; designation: string | null; active_role: string | null; can_sign: boolean; }
 interface AdminUser { id: string; email: string; full_name: string; active_role: string | null; designation: string | null; }
 
@@ -60,23 +60,12 @@ export function AdminPanel() {
   const [tab, setTab] = useState<Tab>("users");
   const qc = useQueryClient();
   const [newEst, setNewEst] = useState({ name: "", code: "" });
-  // Departments tab: pick the establishment first, then add departments the
-  // other establishments already have (ticked from a list) or create a new
-  // one. The same name can be in several establishments, but once in each.
-  const [deptEstb, setDeptEstb] = useState("");
-  const [newDept, setNewDept] = useState({ name: "", code: "" });
-  const [pickedDeptNames, setPickedDeptNames] = useState<string[]>([]);
-  const [deptSearch, setDeptSearch] = useState("");
   const [newCat, setNewCat] = useState({ name: "" });
   const [newPri, setNewPri] = useState({ name: "", label: "" });
 
   const [signGrantUserId, setSignGrantUserId] = useState("");
 
   const { data: establishments = [] } = useQuery<Establishment[]>({ queryKey: ["admin-establishments-all"], queryFn: async () => (await api.get("/admin/establishments/all")).data });
-  const { data: departments = [] } = useQuery<Department[]>({ queryKey: ["admin-departments-all"], queryFn: async () => (await api.get("/admin/departments/all")).data });
-  const { data: deptNames = [] } = useQuery<{ name: string; code: string | null; establishment_ids: string[]; count: number }[]>({
-    queryKey: ["admin-department-names"], queryFn: async () => (await api.get("/admin/departments/names")).data,
-  });
   const { data: categories = [] } = useQuery<Item[]>({ queryKey: ["admin-categories"], queryFn: async () => (await api.get("/admin/categories")).data });
   const { data: priorities = [] } = useQuery<Item[]>({ queryKey: ["admin-priorities"], queryFn: async () => (await api.get("/admin/priorities")).data });
   const { data: signUsers = [] } = useQuery<SignUser[]>({ queryKey: ["sign-permissions"], queryFn: async () => (await api.get("/admin/sign-permissions")).data });
@@ -158,112 +147,7 @@ export function AdminPanel() {
       )}
 
       {/* ── DEPARTMENTS ── */}
-      {tab === "departments" && (() => {
-        const DEPT_KEYS = ["admin-departments-all", "admin-department-names", "departments"];
-        const inEstb = departments.filter((d) => d.establishment_id === deptEstb);
-        const hasName = (n: string) => inEstb.some((d) => d.name.trim().toLowerCase() === n.trim().toLowerCase());
-        // Departments other establishments have and this one does not yet.
-        const addable = deptNames.filter((n) => deptEstb && !hasName(n.name) && n.name.toLowerCase().includes(deptSearch.trim().toLowerCase()));
-        const newNameTaken = !!newDept.name.trim() && hasName(newDept.name);
-        const estbName = establishments.find((e) => e.id === deptEstb)?.name;
-        const togglePick = (n: string) => setPickedDeptNames((p) => (p.includes(n) ? p.filter((x) => x !== n) : [...p, n]));
-        return (
-          <div>
-            <div className="bg-gray-50 rounded-xl border border-gray-200 p-4 mb-5 space-y-4">
-              <div>
-                <label className={LABEL}>Establishment *</label>
-                <SearchableSelect
-                  options={establishments.map((e) => ({ value: e.id, label: e.name }))}
-                  value={deptEstb}
-                  onChange={(v) => { setDeptEstb(v); setPickedDeptNames([]); setDeptSearch(""); }}
-                  clearable={false}
-                  placeholder="Choose the establishment to manage its departments…"
-                  searchPlaceholder="Search establishments…"
-                />
-              </div>
-
-              {deptEstb && (
-                <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                  {/* Add departments other establishments already have */}
-                  <div className="bg-white rounded-xl border border-gray-200 p-4">
-                    <p className="text-sm font-semibold text-gray-700">Add existing departments</p>
-                    <p className="text-xs text-gray-500 mb-2">Departments that other establishments have. Tick the ones {estbName} should also have.</p>
-                    <input value={deptSearch} onChange={(e) => setDeptSearch(e.target.value)} placeholder="Search departments…"
-                      className={`${INPUT} mb-2`} />
-                    <div className="max-h-56 overflow-y-auto border border-gray-100 rounded-lg divide-y divide-gray-100">
-                      {addable.length === 0 && (
-                        <p className="text-sm text-gray-400 px-3 py-4 text-center">
-                          {deptNames.length === 0 ? "No departments exist yet — create the first one on the right."
-                            : deptSearch ? "No department matches your search." : `${estbName} already has every department that exists.`}
-                        </p>
-                      )}
-                      {addable.map((n) => (
-                        <label key={n.name} className="flex items-center gap-3 px-3 py-2 cursor-pointer hover:bg-gray-50">
-                          <input type="checkbox" checked={pickedDeptNames.includes(n.name)} onChange={() => togglePick(n.name)} className="accent-[#0D6E6E] w-4 h-4" />
-                          <span className="flex-1 min-w-0">
-                            <span className="text-sm font-medium text-gray-900">{n.name}</span>
-                            <span className="block text-xs text-gray-400">{[n.code ? `Code: ${n.code}` : "", `in ${n.count} establishment${n.count === 1 ? "" : "s"}`].filter(Boolean).join(" · ")}</span>
-                          </span>
-                        </label>
-                      ))}
-                    </div>
-                    <button
-                      onClick={() => act(DEPT_KEYS, async () => {
-                        const r = await api.post("/admin/departments/bulk", { establishment_id: deptEstb, names: pickedDeptNames });
-                        setPickedDeptNames([]);
-                        if (r.data.skipped?.length) toast.info(`Already there, so skipped: ${r.data.skipped.join(", ")}`);
-                      })}
-                      disabled={pickedDeptNames.length === 0}
-                      className="mt-3 flex items-center gap-1 px-4 py-2.5 bg-[#0D6E6E] text-white rounded-lg text-sm font-semibold hover:bg-[#178F8F] disabled:opacity-50">
-                      <Plus size={15} /> Add {pickedDeptNames.length || ""} selected to {estbName}
-                    </button>
-                  </div>
-
-                  {/* Create a new department */}
-                  <div className="bg-white rounded-xl border border-gray-200 p-4">
-                    <p className="text-sm font-semibold text-gray-700">Create a new department</p>
-                    <p className="text-xs text-gray-500 mb-2">For a department no establishment has yet. It is created in {estbName}.</p>
-                    <div className="space-y-3">
-                      <div>
-                        <label className={LABEL}>Name *</label>
-                        <input value={newDept.name} onChange={(e) => setNewDept((s) => ({ ...s, name: e.target.value }))} placeholder="e.g. Agronomy"
-                          className={`${INPUT} ${newNameTaken ? "border-red-400 focus:ring-red-300" : ""}`} />
-                        {newNameTaken && <p className="text-xs text-red-600 mt-1">{estbName} already has a department named “{newDept.name.trim()}”.</p>}
-                        {!newNameTaken && !!newDept.name.trim() && deptNames.some((n) => n.name.toLowerCase() === newDept.name.trim().toLowerCase()) && (
-                          <p className="text-xs text-amber-700 mt-1">Another establishment already has “{newDept.name.trim()}” — you can also tick it on the left.</p>
-                        )}
-                      </div>
-                      <div>
-                        <label className={LABEL}>Code * (4 letters, used in file ref)</label>
-                        <input value={newDept.code} onChange={(e) => setNewDept((s) => ({ ...s, code: e.target.value.toUpperCase().slice(0, 4) }))} placeholder="e.g. AGRO" className={INPUT} />
-                      </div>
-                      <button
-                        onClick={() => act(DEPT_KEYS, async () => { await api.post("/admin/departments", { ...newDept, establishment_id: deptEstb }); setNewDept({ name: "", code: "" }); })}
-                        disabled={!newDept.name.trim() || !newDept.code.trim() || newNameTaken}
-                        className="flex items-center gap-1 px-4 py-2.5 bg-[#0D6E6E] text-white rounded-lg text-sm font-semibold hover:bg-[#178F8F] disabled:opacity-50">
-                        <Plus size={15} /> Create in {estbName}
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              )}
-            </div>
-
-            {deptEstb ? (
-              <>
-                <p className="text-sm font-semibold text-gray-700 mb-2">Departments of {estbName} ({inEstb.length})</p>
-                {inEstb.length === 0 && <p className="text-sm text-gray-400 py-6 text-center">No departments in {estbName} yet.</p>}
-                {inEstb.map((d) => <Row key={d.id} name={d.name} sub={d.code ? `Code: ${d.code}` : ""} active={d.is_active} onToggle={() => act(DEPT_KEYS, () => api.patch(`/admin/departments/${d.id}/toggle`, {}))} onDelete={() => act(DEPT_KEYS, () => api.delete(`/admin/departments/${d.id}`))} />)}
-              </>
-            ) : (
-              <>
-                <p className="text-sm font-semibold text-gray-700 mb-2">All departments ({departments.length})</p>
-                {departments.map((d) => { const est = establishments.find((e) => e.id === d.establishment_id); return <Row key={d.id} name={d.name} sub={[est?.name, d.code ? `Code: ${d.code}` : ""].filter(Boolean).join(" · ")} active={d.is_active} onToggle={() => act(DEPT_KEYS, () => api.patch(`/admin/departments/${d.id}/toggle`, {}))} onDelete={() => act(DEPT_KEYS, () => api.delete(`/admin/departments/${d.id}`))} />; })}
-              </>
-            )}
-          </div>
-        );
-      })()}
+      {tab === "departments" && <DepartmentManagementSection />}
 
       {/* ── CATEGORIES ── */}
       {tab === "categories" && (

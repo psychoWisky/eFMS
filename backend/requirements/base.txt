@@ -25,3 +25,4 @@ sentry-sdk[fastapi]==2.16.0
 email-validator==2.2.0
 python-dateutil==2.9.0.post0
 nh3==0.3.7
+openpyxl==3.1.5

@@ -296,9 +296,10 @@ async def test_the_same_department_can_exist_in_several_establishments(client, u
     e1, e2, e3 = await _estb(client, admin), await _estb(client, admin), await _estb(client, admin)
     emails, files, depts = [], [], []
     try:
-        # same name AND same code in three establishments
-        for e in (e1, e2, e3):
-            r = await client.post("/admin/departments", json={"name": "Accounts", "code": "ACCT", "establishment_id": e["id"]}, headers=H(admin))
+        # same name in three establishments — each department has its OWN code
+        tag = uuid.uuid4().hex[:5].upper()
+        for i, e in enumerate((e1, e2, e3)):
+            r = await client.post("/admin/departments", json={"name": "Accounts", "code": f"AC{tag}{i}", "establishment_id": e["id"]}, headers=H(admin))
             assert r.status_code == 201, r.text
             depts.append(r.json()["id"])
         assert len(set(depts)) == 3
