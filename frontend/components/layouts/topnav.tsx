@@ -27,10 +27,11 @@ function roleLabel(role: string): string {
   return ROLE_LABELS[role as EfmsRole] ?? role.split("_").map((w) => w[0]?.toUpperCase() + w.slice(1)).join(" ");
 }
 
-export function formatRoleTitle(roleName: string, estbName?: string | null, deptName?: string | null): string {
+export function formatRoleTitle(roleName: string, estbName?: string | null, deptName?: string | null, designation?: string | null): string {
   const rLabel = roleLabel(roleName);
   const parts = [estbName, deptName, rLabel].filter(Boolean);
-  return parts.length > 0 ? parts.join(" - ") : rLabel;
+  const title = parts.length > 0 ? parts.join(" - ") : rLabel;
+  return designation ? `${title} (${designation})` : title;
 }
 
 export function EFMSTopNav({ sidebarWidth }: { sidebarWidth: number }) {
@@ -132,11 +133,13 @@ export function EFMSTopNav({ sidebarWidth }: { sidebarWidth: number }) {
     department_id?: string | null;
     establishment_id?: string | null;
     user_role_id?: string | null;
+    designation?: string | null;
   }) => {
     const isCurrent =
       target.role === activeRole &&
       (target.department_id ?? null) === (user?.department_id ?? null) &&
-      (target.establishment_id ?? null) === (user?.establishment_id ?? null);
+      (target.establishment_id ?? null) === (user?.establishment_id ?? null) &&
+      (target.designation ?? null) === (user?.active_designation ?? null);
     if (isCurrent) { setMenuOpen(false); return; }
 
     const switchKey = target.user_role_id || `${target.role}:${target.establishment_id ?? ""}:${target.department_id ?? ""}`;
@@ -231,7 +234,7 @@ export function EFMSTopNav({ sidebarWidth }: { sidebarWidth: number }) {
             <div className="hidden md:block text-left max-w-[260px]">
               <p className="text-sm font-semibold text-[#1A1A2E] leading-tight truncate">{user?.full_name ?? "User"}</p>
               <p className="text-xs text-[#0D6E6E] font-medium leading-tight mt-0.5 break-words whitespace-normal">
-                {user?.is_retired ? "Retired" : activeRole ? formatRoleTitle(activeRole, user?.establishment_name, user?.department_name) : ""}
+                {user?.is_retired ? "Retired" : activeRole ? formatRoleTitle(activeRole, user?.establishment_name, user?.department_name, user?.active_designation) : ""}
               </p>
             </div>
             <ChevronDown size={14} className="text-[#9CA3AF] shrink-0" />
@@ -249,7 +252,7 @@ export function EFMSTopNav({ sidebarWidth }: { sidebarWidth: number }) {
                   <div className="mt-2.5 pt-2 border-t border-gray-200">
                     <span className="text-[10px] uppercase font-bold tracking-wider text-gray-500 block">Current Active Role</span>
                     <p className="text-xs text-[#0D6E6E] font-semibold mt-0.5 break-words whitespace-normal leading-relaxed">
-                      {user?.is_retired ? "Retired — Docket access only" : activeRole ? formatRoleTitle(activeRole, user?.establishment_name, user?.department_name) : "—"}
+                      {user?.is_retired ? "Retired — Docket access only" : activeRole ? formatRoleTitle(activeRole, user?.establishment_name, user?.department_name, user?.active_designation) : "—"}
                     </p>
                   </div>
                 </div>
@@ -261,10 +264,14 @@ export function EFMSTopNav({ sidebarWidth }: { sidebarWidth: number }) {
                         const isCurrent =
                           r.role === activeRole &&
                           (r.department_id ?? null) === (user?.department_id ?? null) &&
-                          (r.establishment_id ?? null) === (user?.establishment_id ?? null);
+                          (r.establishment_id ?? null) === (user?.establishment_id ?? null) &&
+                          (r.designation ?? null) === (user?.active_designation ?? null);
                         const switchKey = r.id || `${r.role}:${r.establishment_id ?? ""}:${r.department_id ?? ""}`;
                         const busy = switchingId === `role:${switchKey}`;
                         const rName = roleLabel(r.role);
+                        // another post of the same role in the same place (told apart by designation)
+                        const shared = (user?.held_roles ?? []).some((o) => o.id !== r.id && o.role === r.role
+                          && (o.establishment_id ?? null) === (r.establishment_id ?? null) && (o.department_id ?? null) === (r.department_id ?? null));
                         const orgParts = [r.establishment_name, r.department_name].filter(Boolean);
 
                         return (
@@ -276,6 +283,7 @@ export function EFMSTopNav({ sidebarWidth }: { sidebarWidth: number }) {
                               department_id: r.department_id,
                               establishment_id: r.establishment_id,
                               user_role_id: r.id,
+                              designation: r.designation,
                             })}
                             className={cn(
                               "w-full flex items-start gap-3 p-3 rounded-xl text-left transition-all border",
@@ -298,8 +306,8 @@ export function EFMSTopNav({ sidebarWidth }: { sidebarWidth: number }) {
                               <p className={cn("text-sm leading-snug break-words whitespace-normal", isCurrent ? "font-bold text-emerald-950" : "font-semibold text-gray-900")}>
                                 {rName}
                               </p>
-                              {r.designation && (
-                                <p className="text-xs text-gray-500 leading-snug break-words">{r.designation}</p>
+                              {(r.designation || shared) && (
+                                <p className="text-xs text-gray-500 leading-snug break-words">{r.designation ?? user?.designation}</p>
                               )}
                               {orgParts.length > 0 && (
                                 <p className="text-xs text-gray-600 mt-0.5 break-words whitespace-normal leading-relaxed">

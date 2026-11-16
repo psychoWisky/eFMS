@@ -1,12 +1,17 @@
 "use client";
-// Admin → Departments. Every department has its OWN code, even when two
-// establishments have a department of the same name — so departments are
-// added in bulk from an Excel sheet (Establishment Name, Establishment Code,
-// Department Name, Department Code), or one at a time with the small form.
+// Admin → Departments. Three ways to add departments to an establishment:
+//   A. pick departments other establishments already have (several at once,
+//      with an optional different code for any of them),
+//   B. upload an Excel sheet (Establishment Name, Establishment Code,
+//      Department Name, Department Code) — codes are whatever the sheet says,
+//   C. create one new department.
+// A department can only be in an establishment once. The same department may
+// carry the same code in several establishments, but a code belongs to one
+// department name.
 import { useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { CheckCircle2, Download, Eye, EyeOff, FileSpreadsheet, Loader2, Plus, Trash2, Upload, XCircle, MinusCircle } from "lucide-react";
+import { CheckCircle2, Download, Eye, EyeOff, FileSpreadsheet, ListChecks, Loader2, Plus, Trash2, Upload, XCircle, MinusCircle, Lock } from "lucide-react";
 import { api } from "@/services/api";
 import { cn } from "@/lib/utils";
 import { apiErrorDetail, confirmAction, showBlocked, showSuccess } from "@/lib/alert";
@@ -15,8 +20,12 @@ import { SearchableSelect } from "@/components/shared/searchable-select";
 interface Establishment { id: string; name: string; code: string | null; is_active: boolean }
 interface Department { id: string; name: string; code: string | null; establishment_id: string | null; is_active: boolean }
 interface RowResult { row: number; establishment: string | null; department: string | null; status: "created" | "skipped" | "failed"; note: string | null }
+interface DeptName { name: string; code: string | null; codes: string[]; establishment_ids: string[]; count: number }
+interface PickResult { establishment: string; created: number; skipped: number; failed: number; results: { name: string; status: "created" | "skipped" | "failed"; code: string | null; note: string | null }[] }
 interface BulkResult { total: number; created: number; skipped: number; failed: number; establishments_created: number; results: RowResult[] }
 
+const STEP = "w-7 h-7 rounded-full bg-[#0D6E6E] text-white text-sm font-bold flex items-center justify-center shrink-0";
+const CARD = "bg-gray-50 rounded-xl border border-gray-200 p-4";
 const INPUT = "w-full border border-gray-300 rounded-lg px-3 py-2.5 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]";
 const LABEL = "block text-sm font-semibold text-gray-600 mb-1";
 
@@ -28,10 +37,55 @@ export function DepartmentManagementSection() {
   const { data: departments = [] } = useQuery<Department[]>({
     queryKey: ["admin-departments-all"], queryFn: async () => (await api.get("/admin/departments/all")).data,
   });
-  const refresh = () => ["admin-departments-all", "admin-establishments-all", "departments", "establishments"]
+  const { data: deptNames = [] } = useQuery<DeptName[]>({
+    queryKey: ["admin-department-names"], queryFn: async () => (await api.get("/admin/departments/names")).data,
+  });
+  const refresh = () => ["admin-departments-all", "admin-department-names", "admin-establishments-all", "departments", "establishments"]
     .forEach((k) => qc.invalidateQueries({ queryKey: [k] }));
 
-  // ── Bulk upload ──
+  // ── Choose the establishment (used by A and C) ──
+  const [estbId, setEstbId] = useState("");
+  const estbLabel = establishments.find((e) => e.id === estbId)?.name ?? "";
+  const inEstb = useMemo(() => departments.filter((d) => d.establishment_id === estbId), [departments, estbId]);
+  const hasName = (n: string) => inEstb.some((d) => d.name.trim().toLowerCase() === n.trim().toLowerCase());
+  const estbNameById = useMemo(() => new Map(establishments.map((e) => [e.id, e.name])), [establishments]);
+
+  // ── A. Pick existing ──
+  const [pickSearch, setPickSearch] = useState("");
+  const [picked, setPicked] = useState<Record<string, string>>({});   // name → optional different code ("" = usual)
+  const [picking, setPicking] = useState(false);
+  const [pickResult, setPickResult] = useState<PickResult | null>(null);
+  const visible = deptNames.filter((n) => n.name.toLowerCase().includes(pickSearch.trim().toLowerCase()));
+  const addable = visible.filter((n) => !hasName(n.name));
+  const pickedNames = Object.keys(picked);
+  const toggle = (name: string) => setPicked((p) => { const c = { ...p }; if (name in c) delete c[name]; else c[name] = ""; return c; });
+  const allVisibleTicked = addable.length > 0 && addable.every((n) => n.name in picked);
+  const toggleAllVisible = () => setPicked((p) => {
+    const c = { ...p };
+    if (allVisibleTicked) addable.forEach((n) => delete c[n.name]); else addable.forEach((n) => { if (!(n.name in c)) c[n.name] = ""; });
+    return c;
+  });
+  async function addPicked() {
+    setPicking(true);
+    setPickResult(null);
+    try {
+      const res = await api.post("/admin/departments/add-existing", {
+        establishment_id: estbId, items: pickedNames.map((name) => ({ name, code: picked[name].trim() || null })),
+      });
+      const data = res.data as PickResult;
+      setPickResult(data);
+      setPicked({});
+      refresh();
+      if (data.failed === 0) showSuccess(`${data.created} department${data.created === 1 ? "" : "s"} added to ${data.establishment}.`);
+      else toast.warning(`${data.created} added, ${data.failed} could not be added — see the reasons below.`);
+    } catch (err) {
+      toast.error(apiErrorDetail(err) ?? "Could not add the departments.");
+    } finally {
+      setPicking(false);
+    }
+  }
+
+  // ── B. Bulk upload ──
   const [file, setFile] = useState<File | null>(null);
   const [fileKey, setFileKey] = useState(0);
   const [uploading, setUploading] = useState(false);
@@ -81,14 +135,15 @@ export function DepartmentManagementSection() {
     }
   }
 
-  // ── Add one ──
-  const [one, setOne] = useState({ establishment_id: "", name: "", code: "" });
+  // ── C. Add one new ──
+  const [one, setOne] = useState({ name: "", code: "" });
   const [saving, setSaving] = useState(false);
+  const oneTaken = !!one.name.trim() && !!estbId && hasName(one.name);
   async function addOne() {
     setSaving(true);
     try {
-      await api.post("/admin/departments", one);
-      setOne((s) => ({ ...s, name: "", code: "" }));
+      await api.post("/admin/departments", { ...one, establishment_id: estbId });
+      setOne({ name: "", code: "" });
       refresh();
       showSuccess("Department added.");
     } catch (err) {
@@ -129,16 +184,133 @@ export function DepartmentManagementSection() {
 
   return (
     <div className="space-y-6">
-      {/* Bulk upload */}
-      <div className="bg-gray-50 rounded-xl border border-gray-200 p-4">
+      {/* Establishment (used by A and C) */}
+      <div className={CARD}>
+        <div className="flex items-start gap-3 mb-3">
+          <span className={STEP}>1</span>
+          <div>
+            <p className="text-sm font-semibold text-gray-800">Choose the establishment</p>
+            <p className="text-xs text-gray-500">Options A and C below add departments to this establishment. The Excel upload (B) does not need it.</p>
+          </div>
+        </div>
+        <div className="max-w-xl">
+          <SearchableSelect
+            options={establishments.filter((e) => e.is_active).map((e) => ({ value: e.id, label: e.name }))}
+            value={estbId} onChange={(v) => { setEstbId(v); setPicked({}); setPickResult(null); }}
+            clearable={false} placeholder="Select an establishment…" searchPlaceholder="Search establishments…" />
+        </div>
+        {estbId && <p className="text-xs text-gray-500 mt-2"><b>{estbLabel}</b> has {inEstb.length} department{inEstb.length === 1 ? "" : "s"} now.</p>}
+      </div>
+
+      {/* A. Pick existing */}
+      <div className={CARD}>
+        <div className="flex items-start gap-3 mb-3">
+          <span className={STEP}>A</span>
+          <div>
+            <p className="text-sm font-semibold text-gray-800 flex items-center gap-2"><ListChecks size={16} className="text-[#0D6E6E]" /> Pick departments that other establishments already have</p>
+            <p className="text-xs text-gray-500 mt-0.5 max-w-2xl">
+              Tick one or many. Each one is added with its usual code. Want a different code for it here? Type it in the box that appears after you tick it — otherwise leave it empty.
+              A department this establishment already has cannot be added again.
+            </p>
+          </div>
+        </div>
+        {!estbId ? (
+          <p className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">Choose an establishment in step 1 first.</p>
+        ) : (
+          <>
+            <div className="flex flex-wrap items-center gap-3 mb-2">
+              <input value={pickSearch} onChange={(e) => setPickSearch(e.target.value)} placeholder="Search departments…"
+                className="flex-1 min-w-[200px] border border-gray-300 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]" />
+              <button type="button" onClick={toggleAllVisible} disabled={addable.length === 0}
+                className="px-3 py-2.5 border border-gray-300 bg-white rounded-lg text-sm font-semibold text-gray-700 hover:bg-gray-100 disabled:opacity-50 whitespace-nowrap">
+                {allVisibleTicked ? "Untick all shown" : `Tick all shown (${addable.length})`}
+              </button>
+            </div>
+            <div className="max-h-80 overflow-y-auto bg-white border border-gray-200 rounded-lg divide-y divide-gray-100">
+              {visible.length === 0 && (
+                <p className="text-sm text-gray-400 px-3 py-6 text-center">
+                  {deptNames.length === 0 ? "No departments exist yet — create the first one with option C." : "No department matches your search."}
+                </p>
+              )}
+              {visible.map((n) => {
+                const already = hasName(n.name);
+                const on = n.name in picked;
+                const where = n.establishment_ids.map((id) => estbNameById.get(id)).filter(Boolean) as string[];
+                return (
+                  <div key={n.name} className={cn("px-3 py-2.5", already && "bg-gray-50", on && "bg-[#F4FAF9]")}>
+                    <label className={cn("flex items-start gap-3", already ? "cursor-not-allowed" : "cursor-pointer")}>
+                      <input type="checkbox" disabled={already} checked={on} onChange={() => toggle(n.name)} className="accent-[#0D6E6E] w-4 h-4 mt-1 shrink-0" />
+                      <span className="flex-1 min-w-0">
+                        <span className="flex flex-wrap items-center gap-2">
+                          <span className={cn("text-sm font-semibold", already ? "text-gray-400" : "text-gray-900")}>{n.name}</span>
+                          {n.codes.length > 0 && (
+                            <span className="text-xs font-mono font-semibold text-[#0A5757] bg-[#E6F4F4] border border-[#BFDEDB] rounded px-1.5 py-0.5">
+                              {n.codes.length === 1 ? `Code ${n.codes[0]}` : `Codes ${n.codes.join(", ")}`}
+                            </span>
+                          )}
+                          {already && <span className="text-xs font-semibold text-gray-500 flex items-center gap-1"><Lock size={11} /> Already in {estbLabel}</span>}
+                        </span>
+                        <span className="block text-xs text-gray-500 mt-0.5 truncate" title={where.join(", ")}>
+                          In {n.count} establishment{n.count === 1 ? "" : "s"}{where.length ? `: ${where.slice(0, 3).join(", ")}${where.length > 3 ? ` +${where.length - 3} more` : ""}` : ""}
+                        </span>
+                      </span>
+                    </label>
+                    {on && (
+                      <div className="ml-7 mt-2 flex flex-wrap items-center gap-2">
+                        <label className="text-xs font-semibold text-gray-600">Different code <span className="font-normal text-gray-400">(optional)</span></label>
+                        <input value={picked[n.name]} maxLength={50} onChange={(e) => setPicked((p) => ({ ...p, [n.name]: e.target.value.toUpperCase() }))}
+                          placeholder={n.code ? `empty = ${n.code}` : "code"}
+                          className="w-44 border border-gray-300 rounded-lg px-2.5 py-1.5 text-sm font-mono bg-white focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]" />
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+            <div className="mt-3 flex flex-wrap items-center gap-3">
+              <button type="button" onClick={addPicked} disabled={pickedNames.length === 0 || picking}
+                className="flex items-center gap-1.5 px-4 py-2.5 bg-[#0D6E6E] text-white rounded-lg text-sm font-semibold hover:bg-[#178F8F] disabled:opacity-50">
+                {picking ? <Loader2 size={15} className="animate-spin" /> : <Plus size={15} />}
+                {pickedNames.length ? `Add ${pickedNames.length} selected to ${estbLabel}` : "Tick departments to add"}
+              </button>
+              {pickedNames.length > 0 && <button type="button" onClick={() => setPicked({})} className="text-xs font-semibold text-gray-500 hover:underline">Clear selection</button>}
+            </div>
+            {pickResult && (
+              <div className="mt-3 border border-gray-200 rounded-lg bg-white divide-y divide-gray-100">
+                {pickResult.results.map((r) => (
+                  <div key={r.name} className="flex items-start gap-3 px-3 py-2 text-sm">
+                    {r.status === "created" ? <CheckCircle2 size={16} className="text-emerald-600 shrink-0 mt-0.5" />
+                      : r.status === "skipped" ? <MinusCircle size={16} className="text-gray-400 shrink-0 mt-0.5" />
+                      : <XCircle size={16} className="text-red-500 shrink-0 mt-0.5" />}
+                    <div className="min-w-0">
+                      <p className="font-medium text-gray-900">{r.name}{r.code ? <span className="ml-2 text-xs font-mono text-[#0A5757]">Code {r.code}</span> : null}</p>
+                      <p className={cn("text-xs", r.status === "failed" ? "text-red-600" : "text-gray-500")}>
+                        {r.status === "created" ? "Added." : r.note}
+                      </p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </>
+        )}
+      </div>
+
+      {/* B. Excel */}
+      <div className={CARD}>
         <div className="flex flex-wrap items-start justify-between gap-3 mb-3">
           <div>
-            <p className="text-sm font-semibold text-gray-700 flex items-center gap-2"><FileSpreadsheet size={16} className="text-[#0D6E6E]" /> Add departments from Excel</p>
-            <p className="text-xs text-gray-500 mt-0.5 max-w-2xl">
-              One row per department with its establishment: <b>Establishment Name, Establishment Code, Department Name, Department Code</b>.
-              A new establishment is created automatically. Every department needs its own code, even when two establishments have a department of the same name.
-              A department the establishment already has is skipped.
-            </p>
+            <div className="flex items-start gap-3">
+              <span className={STEP}>B</span>
+              <div>
+                <p className="text-sm font-semibold text-gray-800 flex items-center gap-2"><FileSpreadsheet size={16} className="text-[#0D6E6E]" /> Upload an Excel sheet</p>
+                <p className="text-xs text-gray-500 mt-0.5 max-w-2xl">
+                  For many establishments and departments at once — and the way to give a department a <b>different code</b> in each establishment.
+                  One row per department: <b>Establishment Name, Establishment Code, Department Name, Department Code</b>.
+                  A new establishment is created automatically. A department the establishment already has is skipped.
+                </p>
+              </div>
+            </div>
           </div>
           <button type="button" onClick={downloadTemplate} disabled={downloading}
             className="flex items-center gap-1.5 px-3 py-2 bg-white border border-gray-300 rounded-lg text-sm font-semibold text-gray-700 hover:bg-gray-100 disabled:opacity-50">
@@ -188,30 +360,40 @@ export function DepartmentManagementSection() {
         )}
       </div>
 
-      {/* Add one */}
-      <div className="bg-gray-50 rounded-xl border border-gray-200 p-4">
-        <p className="text-sm font-semibold text-gray-700 mb-3">Add a single department</p>
-        <div className="grid grid-cols-1 md:grid-cols-[1.2fr_1.2fr_0.6fr_auto] gap-3 items-end">
+      {/* C. Create one new */}
+      <div className={CARD}>
+        <div className="flex items-start gap-3 mb-3">
+          <span className={STEP}>C</span>
           <div>
-            <label className={LABEL}>Establishment *</label>
-            <SearchableSelect
-              options={establishments.filter((e) => e.is_active).map((e) => ({ value: e.id, label: e.name }))}
-              value={one.establishment_id} onChange={(v) => setOne((s) => ({ ...s, establishment_id: v }))}
-              clearable={false} placeholder="Select…" searchPlaceholder="Search establishments…" />
+            <p className="text-sm font-semibold text-gray-800">Create one new department</p>
+            <p className="text-xs text-gray-500">For a department no establishment has yet. It is created in the establishment chosen in step 1.</p>
           </div>
-          <div>
-            <label className={LABEL}>Department name *</label>
-            <input value={one.name} onChange={(e) => setOne((s) => ({ ...s, name: e.target.value }))} placeholder="e.g. Agronomy" className={INPUT} />
-          </div>
-          <div>
-            <label className={LABEL}>Code * (its own)</label>
-            <input value={one.code} onChange={(e) => setOne((s) => ({ ...s, code: e.target.value.toUpperCase().slice(0, 20) }))} placeholder="e.g. AGRO" className={INPUT} />
-          </div>
-          <button type="button" onClick={addOne} disabled={saving || !one.establishment_id || !one.name.trim() || !one.code.trim()}
-            className="flex items-center justify-center gap-1 px-4 py-2.5 bg-[#0D6E6E] text-white rounded-lg text-sm font-semibold hover:bg-[#178F8F] disabled:opacity-50 whitespace-nowrap">
-            {saving ? <Loader2 size={15} className="animate-spin" /> : <Plus size={15} />} Add
-          </button>
         </div>
+        {!estbId ? (
+          <p className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">Choose an establishment in step 1 first.</p>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-[1.4fr_0.8fr_auto] gap-3 items-start">
+            <div>
+              <label className={LABEL}>Department name *</label>
+              <input value={one.name} onChange={(e) => setOne((s) => ({ ...s, name: e.target.value }))} placeholder="e.g. Agronomy"
+                className={cn(INPUT, oneTaken && "border-red-400 focus:ring-red-300")} />
+              {oneTaken && <p className="text-xs text-red-600 mt-1">{estbLabel} already has a department named “{one.name.trim()}”.</p>}
+              {!oneTaken && !!one.name.trim() && deptNames.some((n) => n.name.toLowerCase() === one.name.trim().toLowerCase()) && (
+                <p className="text-xs text-amber-700 mt-1">Another establishment already has “{one.name.trim()}” — you can tick it in A to use its code.</p>
+              )}
+            </div>
+            <div>
+              <label className={LABEL}>Code *</label>
+              <input value={one.code} onChange={(e) => setOne((s) => ({ ...s, code: e.target.value.toUpperCase().slice(0, 20) }))} placeholder="e.g. AGRO" className={INPUT} />
+            </div>
+            <div className="md:pt-7">
+              <button type="button" onClick={addOne} disabled={saving || !one.name.trim() || !one.code.trim() || oneTaken}
+                className="flex items-center justify-center gap-1 px-4 py-2.5 bg-[#0D6E6E] text-white rounded-lg text-sm font-semibold hover:bg-[#178F8F] disabled:opacity-50 whitespace-nowrap">
+                {saving ? <Loader2 size={15} className="animate-spin" /> : <Plus size={15} />} Create
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* List */}

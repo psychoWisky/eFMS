@@ -7,12 +7,13 @@ import { confirmAction, showSuccess, showBlocked, apiErrorDetail } from "@/lib/a
 import {
   Plus, Trash2, Eye, EyeOff, Tag, Users, Building2, Layers,
   Loader2, AlertTriangle, PenLine, ShieldX, ShieldCheck, FolderKanban,
-  Landmark,
+  Landmark, Copy,
 } from "lucide-react";
 import { UserManagementSection } from "./user-management";
 import { RoleManagementSection } from "./role-management";
 import { ProjectManagementSection } from "./project-management";
 import { DepartmentManagementSection } from "./department-management";
+import { MultiDesignationSection } from "./multi-designation";
 import { FocAdminPage } from "@/modules/foc/foc-admin";
 import { FOC_ENABLED } from "@/lib/foc";
 import { SearchableSelect } from "@/components/shared/searchable-select";
@@ -22,7 +23,7 @@ interface Establishment { id: string; name: string; code: string | null; is_acti
 interface SignUser { id: string; email: string; full_name: string; designation: string | null; active_role: string | null; can_sign: boolean; }
 interface AdminUser { id: string; email: string; full_name: string; active_role: string | null; designation: string | null; }
 
-type Tab = "users" | "roles" | "projects" | "establishments" | "departments" | "categories" | "priorities" | "signatures" | "foc";
+type Tab = "users" | "roles" | "projects" | "establishments" | "departments" | "categories" | "priorities" | "signatures" | "multi" | "foc";
 
 const INPUT = "w-full border border-gray-300 rounded-lg px-3 py-2.5 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]";
 const LABEL = "block text-sm font-semibold text-gray-600 mb-1";
@@ -94,6 +95,7 @@ export function AdminPanel() {
     { id: "categories",     label: "Categories",     icon: Tag },
     { id: "priorities",     label: "Priorities",     icon: AlertTriangle },
     { id: "signatures",     label: "Signatures",     icon: PenLine },
+    { id: "multi",          label: "Multiple designations", icon: Copy },
     // FOC (Fixation of Ceiling): projects, FOC sheets and officers.
     ...(FOC_ENABLED ? [{ id: "foc" as const, label: "FOC", icon: Landmark }] : []),
   ];
@@ -145,6 +147,9 @@ export function AdminPanel() {
           {establishments.map((e) => <Row key={e.id} name={e.name} sub={e.code ? `Code: ${e.code}` : undefined} active={e.is_active} onToggle={() => act(["admin-establishments-all","establishments"], () => api.patch(`/admin/establishments/${e.id}/toggle`, {}))} onDelete={() => act(["admin-establishments-all","establishments"], () => api.delete(`/admin/establishments/${e.id}`))} />)}
         </div>
       )}
+
+      {/* ── MULTIPLE DESIGNATIONS ── */}
+      {tab === "multi" && <MultiDesignationSection />}
 
       {/* ── DEPARTMENTS ── */}
       {tab === "departments" && <DepartmentManagementSection />}

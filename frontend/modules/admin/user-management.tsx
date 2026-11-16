@@ -83,13 +83,13 @@ const SYSTEM_ROLE_LABELS: Record<string, string> = {
   hod: "Head of Department", faculty: "Faculty",
 };
 
-interface RoleSummary { id: string; name: string; description: string | null; is_system: boolean; user_count: number; }
+export interface RoleSummary { id: string; name: string; description: string | null; is_system: boolean; user_count: number; }
 
 function roleLabelFor(name: string): string {
   return SYSTEM_ROLE_LABELS[name] ?? name.split("_").map((w) => w[0]?.toUpperCase() + w.slice(1)).join(" ");
 }
 
-function buildRoleOptions(roles: RoleSummary[]): { value: string; label: string }[] {
+export function buildRoleOptions(roles: RoleSummary[]): { value: string; label: string }[] {
   return roles
     .filter((r) => (r.is_system ? ASSIGNABLE_SYSTEM_ROLE_NAMES.has(r.name) : true))
     .map((r) => ({ value: r.name, label: roleLabelFor(r.name) }));
@@ -403,6 +403,39 @@ function EditUserModal({ user, onClose, establishments, departments, roleOptions
   );
   // The main role keeps whatever designation its row already had.
   const primaryRoleDesignation = user.roles?.[primaryIndex]?.designation ?? null;
+
+  // People the Super Admin allowed (Admin → Multiple designations) may hold the
+  // SAME role in the SAME place more than once, told apart by a designation.
+  const { data: multiAllowed = [] } = useQuery<{ user: { id: string } }[]>({
+    queryKey: ["multi-designation"], queryFn: async () => (await api.get("/admin/multi-designation")).data,
+  });
+  const isMultiAllowed = multiAllowed.some((a) => a.user.id === user.id);
+  const samePlace = (a: { establishment_id: string | null | undefined; department_id: string | null | undefined }, estb: string, dept: string) =>
+    (a.establishment_id || "") === (estb || "") && (a.department_id || "") === (dept || "");
+  /** Designations of the posts of `role` this person already holds in that place
+   * (the main role, and the other additional-role rows except row `skip`). */
+  const heldHere = (role: string, estb: string, dept: string, skip: number): string[] => {
+    const out: string[] = [];
+    if (role && estb && form.role === role && samePlace({ establishment_id: form.establishment_id, department_id: form.department_id }, estb, dept)) {
+      out.push(primaryRoleDesignation || form.designation || "—");
+    }
+    extraRoles.forEach((o, j) => {
+      if (j !== skip && o.role === role && samePlace(o, estb, dept)) out.push(o.designation.trim() || form.designation || "—");
+    });
+    return out;
+  };
+  async function confirmAnother(role: string, estb: string, dept: string, existing: string[]): Promise<boolean> {
+    const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    const place = [establishments.find((e) => e.id === estb)?.name, departments.find((d) => d.id === dept)?.name].filter(Boolean).join(" / ");
+    return confirmAction({
+      title: "Already assigned — create another?",
+      html: `<div style="text-align:left;font-size:14px;line-height:1.5">
+        <p>${esc(user.first_name ?? user.email)} already holds <b>${esc(roleLabelFor(role))}</b> in <b>${esc(place)}</b> as:</p>
+        <ul style="margin:4px 0 8px 18px;list-style:disc">${existing.map((d) => `<li>${esc(d)}</li>`).join("")}</ul>
+        <p>Do you still want to give another <b>${esc(roleLabelFor(role))}</b> here? Give it its own designation so the two can be told apart.</p></div>`,
+      confirmText: "Yes, create it", cancelText: "No",
+    });
+  }
   const save = useMutation({
     mutationFn: () => {
       // An extra role needs an establishment and a role. The department is
@@ -429,12 +462,29 @@ function EditUserModal({ user, onClose, establishments, departments, roleOptions
         })),
       ];
 
-      // Validate uniqueness across (role, establishment_id, department_id)
+      // The same role in the same place more than once (allowed people only):
+      // every one needs its own designation — a post without one uses the
+      // person's own designation, so only one may, and no two may match.
+      const places = new Map<string, string[]>();
+      for (const r of allRoles) {
+        const k = `${r.role}__${r.establishment_id ?? ""}__${r.department_id ?? ""}`;
+        places.set(k, [...(places.get(k) ?? []), (r.designation ?? "").trim() || form.designation.trim()]);
+      }
+      for (const [k, labels] of places) {
+        if (labels.length < 2) continue;
+        if (labels.some((l) => !l) || new Set(labels.map((l) => l.toLowerCase())).size < labels.length) {
+          throw new Error(`${roleLabelFor(k.split("__")[0])} is given more than once in the same place — type a different designation for each one.`);
+        }
+      }
+
+      // Validate uniqueness across (role, establishment_id, department_id,
+      // designation) — the same role in the same place twice needs different
+      // designations (and the person must be on the Multiple designations list).
       const seen = new Set<string>();
       for (const r of allRoles) {
-        const key = `${r.role}__${r.establishment_id ?? ""}__${r.department_id ?? ""}`;
+        const key = `${r.role}__${r.establishment_id ?? ""}__${r.department_id ?? ""}__${(r.designation ?? "").trim().toLowerCase()}`;
         if (seen.has(key)) {
-          throw new Error("Duplicate role assignment: this person already has the same role in the same establishment and department (or the same whole-establishment role).");
+          throw new Error("Duplicate role assignment: this person already has the same role in the same place with the same designation.");
         }
         seen.add(key);
       }
@@ -470,10 +520,17 @@ function EditUserModal({ user, onClose, establishments, departments, roleOptions
         <div className="overflow-y-auto overflow-x-hidden px-6 py-5 flex-1">
           <UserFields form={form} setForm={setForm} establishments={establishments} departments={departments} roleOptions={roleOptions} />
           <div className="mt-5 border-t border-gray-100 pt-4">
-            <div className="flex items-center justify-between mb-2">
+            <div className="mb-2">
               <label className={LABEL}>
                 Additional roles <span className="font-normal text-gray-400">(choose an Establishment, optionally a Department, then the Role)</span>
               </label>
+              <p className="text-xs text-gray-400 mt-0.5">
+                {isMultiAllowed ? (
+                  <>This person is <b>allowed</b> to hold the same role in the same place more than once — choose the same role again and type a different <b>designation</b>; you will be asked to confirm.</>
+                ) : (
+                  <>A person normally holds a role once in a place. To allow the <b>same role in the same place again</b>, first add them under <b>Admin Panel → Multiple designations</b>.</>
+                )}
+              </p>
             </div>
             <div className="space-y-3">
               {extraRoles.map((row, i) => {
@@ -510,10 +567,25 @@ function EditUserModal({ user, onClose, establishments, departments, roleOptions
                   const isTaken = takenRolesForContext.has(o.value) && o.value !== row.role;
                   return {
                     ...o,
-                    label: isTaken ? `${o.label} (Already assigned)` : o.label,
-                    disabled: isTaken,
+                    label: isTaken ? `${o.label} (Already assigned${isMultiAllowed ? " — you can add another" : ""})` : o.label,
+                    // Allowed people can be given the same role again here.
+                    disabled: isTaken && !isMultiAllowed,
                   };
                 });
+                const dupHere = row.role && row.establishment_id ? heldHere(row.role, row.establishment_id, row.department_id, i) : [];
+                // Picking a role (or moving the row to a place) where the person already holds it → confirm first.
+                const changeRole = async (v: string) => {
+                  const here = heldHere(v, row.establishment_id, row.department_id, i);
+                  if (here.length && !(await confirmAnother(v, row.establishment_id, row.department_id, here))) return;
+                  setRow({ role: v });
+                };
+                const changePlace = async (patch: { establishment_id?: string; department_id?: string }) => {
+                  const estb = patch.establishment_id ?? row.establishment_id;
+                  const dept = patch.establishment_id !== undefined ? (patch.department_id ?? "") : (patch.department_id ?? row.department_id);
+                  const here = row.role ? heldHere(row.role, estb, dept, i) : [];
+                  if (here.length && isMultiAllowed && !(await confirmAnother(row.role, estb, dept, here))) return;
+                  setRow({ establishment_id: estb, department_id: dept });
+                };
 
                 return (
                   <div key={i} className="rounded-xl border border-gray-200 p-3 bg-gray-50/60">
@@ -529,7 +601,7 @@ function EditUserModal({ user, onClose, establishments, departments, roleOptions
                         <SearchableSelect
                           options={establishments.filter((e) => e.is_active !== false).map((e) => ({ value: e.id, label: e.name }))}
                           value={row.establishment_id}
-                          onChange={(v) => setRow({ establishment_id: v, department_id: "" })}
+                          onChange={(v) => void changePlace({ establishment_id: v, department_id: "" })}
                           placeholder="Select establishment…"
                           searchPlaceholder="Search establishments…"
                         />
@@ -541,7 +613,7 @@ function EditUserModal({ user, onClose, establishments, departments, roleOptions
                           options={rowDepts.map((d) => ({ value: d.id, label: rowDeptLabel(d) }))}
                           value={row.department_id}
                           disabled={!row.establishment_id}
-                          onChange={(v) => setRow({ department_id: v })}
+                          onChange={(v) => void changePlace({ department_id: v })}
                           placeholder={row.establishment_id ? "Whole establishment (no department)" : "Select establishment first"}
                           searchPlaceholder="Search departments…"
                         />
@@ -553,7 +625,7 @@ function EditUserModal({ user, onClose, establishments, departments, roleOptions
                           options={roleOpts}
                           value={row.role}
                           disabled={!row.establishment_id}
-                          onChange={(v) => setRow({ role: v })}
+                          onChange={(v) => void changeRole(v)}
                           clearable={false}
                           placeholder={!row.establishment_id ? "Select establishment first" : "Select role…"}
                           searchPlaceholder="Search roles…"
@@ -562,7 +634,10 @@ function EditUserModal({ user, onClose, establishments, departments, roleOptions
                     </div>
                     {/* Designation for this role (optional) */}
                     <div className="mt-2">
-                      <label className="block text-xs font-semibold text-gray-500 mb-1">Designation <span className="font-normal text-gray-400">(optional)</span></label>
+                      <label className="block text-xs font-semibold text-gray-500 mb-1">
+                        Designation {dupHere.length ? <span className="text-red-600">*</span> : <span className="font-normal text-gray-400">(optional)</span>}
+                        {dupHere.length > 0 && <span className="font-normal text-[#0A5757]"> — required: this person already holds this role here as “{dupHere.join("”, “")}”</span>}
+                      </label>
                       <input
                         value={row.designation}
                         onChange={(e) => setRow({ designation: e.target.value })}

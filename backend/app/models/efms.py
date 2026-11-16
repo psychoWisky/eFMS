@@ -71,6 +71,11 @@ class EfmsFile(Base, UUIDMixin, TimestampMixin):
     creator_department_id           = Column(UUID(as_uuid=True), ForeignKey("departments.id"), nullable=True)
     current_holder_establishment_id = Column(UUID(as_uuid=True), ForeignKey("establishments.id"), nullable=True)
     current_holder_department_id    = Column(UUID(as_uuid=True), ForeignKey("departments.id"), nullable=True)
+    # The designation of the post (role + place + designation) — lets one
+    # person's two posts of the same role in the same place keep separate
+    # files. NULL = a post without its own designation.
+    creator_designation             = Column(String(100), nullable=True)
+    current_holder_designation      = Column(String(100), nullable=True)
 
     creator       = relationship("User", foreign_keys=[created_by])
     current_holder = relationship("User", foreign_keys=[current_holder_id])
@@ -180,6 +185,9 @@ class RouteEntry(Base, UUIDMixin, TimestampMixin):
     # NULL = "any role". to_role is what a recipient's Docket filters on.
     from_role     = Column(String(50), nullable=True)
     to_role       = Column(String(50), nullable=True)
+    # The designation of the sender's / recipient's post at this hop.
+    from_designation = Column(String(100), nullable=True)
+    to_designation   = Column(String(100), nullable=True)
     # The role's name when this hop was recorded, set only on hops that
     # predate a rename of that role (from_role/to_role then hold the new
     # name). Shown as "New Name (formerly Old Name)".

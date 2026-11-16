@@ -32,6 +32,9 @@ interface DocketItem {
   status: string; priority: string; created_by: string;
   current_holder_id: string | null; updated_at: string; created_at: string;
   can_release: boolean; from_user_name: string | null; from_user_info?: PersonInfo | null;
+  // The designation the sender acted under, and the post this file is
+  // addressed to (matters when one person holds the same role more than once).
+  from_designation?: string | null; to_designation?: string | null;
   has_unsent_edits?: boolean;
 }
 interface ReleasedItem {
@@ -41,7 +44,7 @@ interface ReleasedItem {
 
 const docketRowText = (f: DocketItem) =>
   [f.ref_number, f.subject, f.category, f.priority, f.from_user_info?.full_name ?? f.from_user_name,
-   f.from_user_info?.designation, f.from_user_info?.department_name,
+   f.from_designation ?? f.from_user_info?.designation, f.from_user_info?.department_name, f.to_designation,
    f.has_unsent_edits ? "draft saved" : "",
    formatDate(f.updated_at, "relative")]
     .filter(Boolean).join(" ");
@@ -333,6 +336,12 @@ export function EFMSDashboard() {
                           </td>
                           <td className="px-4 py-3 max-w-xs">
                             <p className="text-sm font-semibold text-gray-900 truncate">{f.subject}</p>
+                            {f.to_designation && (
+                              <span className="mt-1 mr-1 inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold bg-[#E6F4F4] text-[#0A5757] border border-[#BFDEDB]"
+                                title="The post this file was sent to">
+                                For: {f.to_designation}
+                              </span>
+                            )}
                             {f.has_unsent_edits && (
                               <span
                                 className="mt-1 inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-[#FBEFD9] text-[#8A5A11] border border-[#E7C88A]"
@@ -342,7 +351,7 @@ export function EFMSDashboard() {
                               </span>
                             )}
                           </td>
-                          <td className="px-4 py-3 text-sm text-gray-600"><PersonBadge person={f.from_user_info} compact /></td>
+                          <td className="px-4 py-3 text-sm text-gray-600"><PersonBadge person={f.from_user_info && f.from_designation ? { ...f.from_user_info, designation: f.from_designation } : f.from_user_info} compact /></td>
                           <td className="px-4 py-3"><FileClassificationBadge priority={f.priority} /></td>
                           <td className="px-4 py-3 text-sm text-gray-500">
                             <span>{formatDate(f.updated_at, "relative")}</span>

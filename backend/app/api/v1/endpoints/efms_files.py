@@ -58,7 +58,7 @@ from app.schemas.efms import (
 )
 from app.utils.otp import create_otp, verify_otp, send_email as _send_otp_email
 from app.utils.person_info import PersonInfo, person_info_map
-from app.utils.workspace import workspace_filter, role_context
+from app.utils.workspace import workspace_filter, role_context, norm_designation
 from app.utils.html_sanitize import sanitize_notesheet_html, ContentTooLarge
 from app.api.v1.endpoints.admin import create_notification
 
@@ -532,10 +532,12 @@ async def list_files(
     _in_role_hold = workspace_filter(
         user, EfmsFile.current_holder_role,
         EfmsFile.current_holder_establishment_id, EfmsFile.current_holder_department_id,
+        EfmsFile.current_holder_designation,
     )
     _in_role_created = workspace_filter(
         user, EfmsFile.creator_role,
         EfmsFile.creator_establishment_id, EfmsFile.creator_department_id,
+        EfmsFile.creator_designation,
     )
 
     if inbox:
@@ -695,6 +697,8 @@ async def track_file(file_id: UUID, db: AsyncSession = Depends(get_db), user: Us
             "from_role_formerly": e.from_role_formerly,
             "to_role":            e.to_role,
             "to_role_formerly":   e.to_role_formerly,
+            "from_designation":   e.from_designation,
+            "to_designation":     e.to_designation,
             "remarks":        visible_remark,
             # A remark existed on this movement but was redacted from
             # "remarks" above (as opposed to no remark ever having been
@@ -901,6 +905,8 @@ async def create_file(
             creator_department_id=user.department_id,
             current_holder_establishment_id=user.establishment_id,
             current_holder_department_id=user.department_id,
+            creator_designation=norm_designation(user.active_designation),
+            current_holder_designation=norm_designation(user.active_designation),
             status=FileStatus.draft,
         )
         db.add(efms_file)
@@ -1065,6 +1071,9 @@ async def reassign_file_ownership(
     role_filter: Optional[str] = None,
     old_context: Optional[tuple] = None,
     new_context: Optional[tuple] = None,
+    scope_designation: bool = False,
+    old_designation: Optional[str] = None,
+    new_designation: Optional[str] = None,
 ) -> int:
     """Move real ownership of every file old_id has as creator, current
     holder, or releaser — over to new_id. Used by both per-role ownership
@@ -1100,7 +1109,7 @@ async def reassign_file_ownership(
     since that's the set that would otherwise need an explicit Forward)."""
     from app.models.efms_extra import Docket
 
-    def _role_match(col, estb_col, dept_col):
+    def _role_match(col, estb_col, dept_col, desig_col):
         if role_filter is None:
             return True
         cond = or_(col.is_(None), col == role_filter)
@@ -1110,6 +1119,10 @@ async def reassign_file_ownership(
                 estb_col.is_not_distinct_from(old_context[0]),
                 dept_col.is_not_distinct_from(old_context[1]),
             )
+            # Several posts of the same role in the same place (told apart by
+            # designation): only the post being handed over moves.
+            if scope_designation:
+                cond = and_(cond, desig_col.is_not_distinct_from(old_designation))
         return cond
 
     # 1. Files created by old_id (My Files) -> new_id. Covers Drafts too,
@@ -1117,6 +1130,7 @@ async def reassign_file_ownership(
     created = (await db.execute(
         select(EfmsFile).where(EfmsFile.created_by == old_id, _role_match(
             EfmsFile.creator_role, EfmsFile.creator_establishment_id, EfmsFile.creator_department_id,
+            EfmsFile.creator_designation,
         ))
     )).scalars().all()
     for f in created:
@@ -1124,6 +1138,7 @@ async def reassign_file_ownership(
         f.creator_role = new_role if role_filter is not None else f.creator_role
         if new_context is not None:
             f.creator_establishment_id, f.creator_department_id = new_context
+            f.creator_designation = new_designation
 
     # 2. Files currently held by old_id (Docket) -> new_id, moved directly
     #    (not a Forward). A neutral audit route entry records the move
@@ -1132,6 +1147,7 @@ async def reassign_file_ownership(
         select(EfmsFile).where(EfmsFile.current_holder_id == old_id, _role_match(
             EfmsFile.current_holder_role,
             EfmsFile.current_holder_establishment_id, EfmsFile.current_holder_department_id,
+            EfmsFile.current_holder_designation,
         ))
     )).scalars().all()
     held_count = len(held)
@@ -1147,6 +1163,8 @@ async def reassign_file_ownership(
             to_user_id=new_id,
             from_role=f.current_holder_role,
             to_role=new_role,
+            from_designation=f.current_holder_designation,
+            to_designation=new_designation,
             action=RouteAction.forward,
             remarks=note,
             is_current=True,
@@ -1160,6 +1178,7 @@ async def reassign_file_ownership(
         f.current_holder_role = new_role
         if new_context is not None:
             f.current_holder_establishment_id, f.current_holder_department_id = new_context
+            f.current_holder_designation = new_designation
 
     # 3. Files old_id released (Docket table's released_by, feeds "My
     #    Released Files") -> new_id. "My Released Files" is scoped by the
@@ -2207,6 +2226,7 @@ async def route_file(
     to_role: Optional[str] = None
     to_establishment_id = None
     to_department_id = None
+    to_designation: Optional[str] = None
     if (
         body.action == RouteAction.forward and body.to_user_id
         and body.to_user_id == f.recipient_id
@@ -2230,11 +2250,15 @@ async def route_file(
                 _matches = [ur for ur in _rec.roles if ur.role == _want]
                 _target = next(
                     (ur for ur in _matches
-                     if role_context(_rec, ur) == (_rec.establishment_id, _rec.department_id)),
-                    _matches[0] if _matches else None,
+                     if role_context(_rec, ur) == (_rec.establishment_id, _rec.department_id)
+                     and norm_designation(ur.designation) == norm_designation(_rec.active_designation)),
+                    next((ur for ur in _matches
+                          if role_context(_rec, ur) == (_rec.establishment_id, _rec.department_id)),
+                         _matches[0] if _matches else None),
                 )
             to_role = _target.role if _target else _rec.active_role
             to_establishment_id, to_department_id = role_context(_rec, _target)
+            to_designation = norm_designation(_target.designation) if _target else None
 
     for entry in f.route_entries:
         entry.is_current = False
@@ -2245,6 +2269,8 @@ async def route_file(
         to_user_id=body.to_user_id,
         from_role=user.active_role,
         to_role=to_role,
+        from_designation=norm_designation(user.active_designation),
+        to_designation=to_designation,
         action=body.action,
         # Normalize "" to NULL: an empty string is not the same thing as "no
         # remark" downstream — track_file's `has_remark = e.remarks is not
@@ -2278,6 +2304,7 @@ async def route_file(
         f.current_holder_role = to_role
         f.current_holder_establishment_id = to_establishment_id
         f.current_holder_department_id = to_department_id
+        f.current_holder_designation = to_designation
     elif body.action == RouteAction.dispatch:
         f.status = FileStatus.dispatched
 

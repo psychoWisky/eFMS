@@ -29,7 +29,8 @@ from app.models.efms import EfmsFile, RouteEntry
 from app.models.efms_extra import OTP, Docket
 from app.models.organization import Establishment, Department
 from app.schemas.auth import LoginRequest, TokenResponse, RefreshRequest, UserBrief, HeldRoleBrief
-from app.utils.workspace import role_context
+from app.utils.workspace import role_context, norm_designation
+from app.utils.posts import desig_key, is_multi_designation_user, restamp_post_designation
 from app.utils.integrity import (
     blocked, user_activity, role_blockers, seats_of_user, seat_of, assert_new_seats_free,
     duplicate_seat_reasons,
@@ -156,6 +157,7 @@ def build_user_brief(user: User) -> UserBrief:
         email=user.email,
         full_name=user.full_name,
         active_role=user.active_role,
+        active_designation=user.active_designation,
         kyc_completed=user.kyc_completed,
         must_change_password=user.must_change_password,
         profile_photo_url=user.profile_photo_url,
@@ -686,6 +688,9 @@ async def switch_role(
     # two same-named roles held in different contexts. Same rule as forward's
     # recipient stamping — see role_context in app/utils/workspace.py.
     me.establishment_id, me.department_id = role_context(me, target)
+    # The post's designation is part of the workspace (two posts of the same
+    # role in the same place keep separate files).
+    me.active_designation = norm_designation(target.designation)
 
     await db.flush()
     reloaded = await db.execute(
@@ -874,56 +879,112 @@ async def _set_single_role(db: AsyncSession, user: User, role: str) -> None:
 
 
 async def _set_role_set(db: AsyncSession, user: User, roles: list["RoleAssignment"]) -> list[str]:
-    """Replace the user's UserRole rows with exactly `roles` (deduped by
-    (role, establishment_id, department_id), order preserved). Each entry
-    carries an optional department_id / establishment_id. The first entry's
-    role becomes active_role unless the user's current active_role is still
-    held."""
-    seen: set[tuple[str, Optional[UUID], Optional[UUID]]] = set()
+    """Replace the user's UserRole rows with exactly `roles`. A post is
+    (role, establishment, department, designation): the same role in the same
+    place twice is allowed ONLY for people on the Multiple designations list,
+    told apart by the designation. Each entry carries an optional department /
+    establishment. The first entry's role becomes active_role unless the
+    user's current active_role is still held."""
+    # 1. Dedupe by the whole post (designation compared ignoring case).
+    seen: set[tuple] = set()
     want: list["RoleAssignment"] = []
     for r in roles:
         if not r.role:
             continue
-        key = (r.role, r.establishment_id, r.department_id)
+        key = (r.role, r.establishment_id, r.department_id, desig_key(getattr(r, "designation", None)))
         if key not in seen:
             seen.add(key)
             want.append(r)
 
-    want_keys = {(r.role, r.establishment_id, r.department_id) for r in want}
-    existing_roles = (await db.execute(select(UserRole).where(UserRole.user_id == user.id))).scalars().all()
-
-    # Delete existing roles that are not in want_keys; kept ones take the
-    # (possibly changed) designation.
-    want_designation = {(r.role, r.establishment_id, r.department_id): getattr(r, "designation", None) for r in want}
-    for ur in existing_roles:
-        key = (ur.role, ur.establishment_id, ur.department_id)
-        if key not in want_keys:
-            await db.delete(ur)
-        else:
-            ur.designation = want_designation.get(key)
-    await db.flush()
-
-    remaining_roles = (await db.execute(select(UserRole).where(UserRole.user_id == user.id))).scalars().all()
-    remaining_keys = {(ur.role, ur.establishment_id, ur.department_id) for ur in remaining_roles}
-
+    # 2. The same role in the same place more than once needs the list.
+    by_place: dict[tuple, list] = {}
     for r in want:
-        key = (r.role, r.establishment_id, r.department_id)
-        if key not in remaining_keys:
-            ur = UserRole(
-                user_id=user.id,
-                role=r.role,
-                establishment_id=r.establishment_id,
-                department_id=r.department_id,
-                designation=getattr(r, "designation", None),
+        by_place.setdefault((r.role, r.establishment_id, r.department_id), []).append(r)
+    repeated = [k for k, v in by_place.items() if len(v) > 1]
+    if repeated and not await is_multi_designation_user(db, user.id):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"{user.full_name} cannot hold the role “{_pretty_role_name(repeated[0][0])}” more than once in the same "
+            "establishment and department. Only people on the “Multiple designations” list can — "
+            "add them under Admin Panel → Multiple designations.",
+        )
+    for k, v in by_place.items():
+        if len(v) < 2:
+            continue
+        own = norm_designation(user.designation)
+        labels = [norm_designation(getattr(x, "designation", None)) or own for x in v]
+        if any(not lbl for lbl in labels) or len({desig_key(lbl) for lbl in labels}) < len(labels):
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                f"The role “{_pretty_role_name(k[0])}” is given more than once in the same place — each one needs its own "
+                "designation so they can be told apart (a post without one uses the person's own designation, "
+                "so only one may do that, and no two may be named the same).",
             )
-            db.add(ur)
-            remaining_keys.add(key)
+
+    # 3. Match existing rows to wanted posts: exact (place + designation)
+    #    first; leftovers of the same place are paired up as a rename of the
+    #    designation (the files follow); anything else is added / removed.
+    existing_roles = (await db.execute(select(UserRole).where(UserRole.user_id == user.id))).scalars().all()
+    ex_by_place: dict[tuple, list] = {}
+    for ur in existing_roles:
+        ex_by_place.setdefault((ur.role, ur.establishment_id, ur.department_id), []).append(ur)
+
+    to_add: list["RoleAssignment"] = []
+    renames: list[tuple] = []
+    to_delete: list[UserRole] = []
+    for place, wants in by_place.items():
+        exs = list(ex_by_place.pop(place, []))
+        left = []
+        for w in wants:
+            hit = next((e for e in exs if desig_key(e.designation) == desig_key(getattr(w, "designation", None))), None)
+            if hit is not None:
+                exs.remove(hit)
+                new_d = norm_designation(getattr(w, "designation", None))
+                if (hit.designation or None) != new_d:      # only the letter case differs
+                    hit.designation = new_d
+            else:
+                left.append(w)
+        for w in left:
+            if exs:
+                e = exs.pop(0)
+                renames.append((e, e.designation, norm_designation(getattr(w, "designation", None))))
+            else:
+                to_add.append(w)
+        to_delete.extend(exs)
+    for leftovers in ex_by_place.values():
+        to_delete.extend(leftovers)
+
+    for e, old, new in renames:
+        e.designation = new
+        await restamp_post_designation(db, user, e, old, new)
+    for ur in to_delete:
+        await db.delete(ur)
+    await db.flush()
+    for w in to_add:
+        db.add(UserRole(
+            user_id=user.id, role=w.role, establishment_id=w.establishment_id, department_id=w.department_id,
+            designation=norm_designation(getattr(w, "designation", None)),
+        ))
     await db.flush()
 
     want_names = [r.role for r in want]
     if user.active_role not in want_names:
         user.active_role = want_names[0] if want_names else None
+    await _sync_active_designation(db, user)
     return want_names
+
+
+async def _sync_active_designation(db: AsyncSession, user: User) -> None:
+    """Keep users.active_designation pointing at a post the person really
+    holds: when the post they were working as is gone (or never recorded), use
+    the one that matches their active role and place."""
+    rows = (await db.execute(select(UserRole).where(UserRole.user_id == user.id))).scalars().all()
+    here = [ur for ur in rows if ur.role == user.active_role and role_context(user, ur) == (user.establishment_id, user.department_id)]
+    if not here:
+        user.active_designation = None
+        return
+    if not any(desig_key(ur.designation) == desig_key(user.active_designation) for ur in here):
+        user.active_designation = norm_designation(here[0].designation)
 
 
 @router.get("/admin/users", response_model=List[AdminUserOut])
@@ -1180,12 +1241,14 @@ def _parse_bulk_bool(value: str, default: bool) -> bool:
     return default
 
 
-async def _resolve_bulk_org_ref(db: AsyncSession, model, value: str) -> Optional[UUID]:
+async def _resolve_bulk_org_ref(db: AsyncSession, model, value: str, establishment_id: Optional[UUID] = None) -> Optional[UUID]:
     """Bulk-upload establishment_id/department_id cells accept a UUID, a
     code (e.g. "DFV"), or a name — not just a raw UUID — since that's what
-    people actually type into the CSV. Raises a plain ValueError with a
-    row-friendly message if the value matches nothing, so the caller can
-    surface it the same way as a Pydantic validation error."""
+    people actually type into the CSV. A department is looked up INSIDE the
+    row's establishment when it has one (the same department name or code can
+    exist in several establishments). Raises a plain ValueError with a
+    row-friendly message if the value matches nothing or is ambiguous, so the
+    caller can surface it the same way as a Pydantic validation error."""
     value = value.strip()
     if not value:
         return None
@@ -1194,18 +1257,21 @@ async def _resolve_bulk_org_ref(db: AsyncSession, model, value: str) -> Optional
     except ValueError:
         pass
     label = "establishment" if model is Establishment else "department"
-    result = await db.execute(
-        select(model.id).where(func.lower(model.code) == value.lower())
-    )
-    match = result.scalar_one_or_none()
-    if match is None:
-        result = await db.execute(
-            select(model.id).where(func.lower(model.name) == value.lower())
-        )
-        match = result.scalar_one_or_none()
-    if match is None:
-        raise ValueError(f"no {label} found matching \"{value}\" (checked code and name)")
-    return match
+
+    async def find(column) -> list:
+        q = select(model.id).where(func.lower(func.trim(column)) == value.lower())
+        if model is Department and establishment_id is not None:
+            q = q.where(Department.establishment_id == establishment_id)
+        return list((await db.execute(q)).scalars().all())
+
+    matches = await find(model.code) or await find(model.name)
+    if not matches:
+        where = " in that establishment" if (model is Department and establishment_id is not None) else ""
+        raise ValueError(f"no {label} found matching \"{value}\"{where} (checked code and name)")
+    if len(matches) > 1:
+        raise ValueError(f"\"{value}\" matches {len(matches)} {label}s"
+                         + (" — fill the establishment column too so the right one is used" if model is Department else ""))
+    return matches[0]
 
 
 @router.post("/admin/users/bulk", response_model=BulkUserUploadResult)
@@ -1251,7 +1317,7 @@ async def bulk_create_users(
 
         try:
             establishment_id = await _resolve_bulk_org_ref(db, Establishment, row.get("establishment_id", ""))
-            department_id = await _resolve_bulk_org_ref(db, Department, row.get("department_id", ""))
+            department_id = await _resolve_bulk_org_ref(db, Department, row.get("department_id", ""), establishment_id)
         except ValueError as exc:
             results.append(BulkUserRowResult(row=idx, email=email or None, status="failed", error=str(exc)))
             continue
@@ -1600,6 +1666,7 @@ async def _leaver_transfer_items(db: AsyncSession, leaver: User) -> list[Transfe
         ctx = " · ".join(n for n in (
             ur.establishment.name if ur.establishment else None,
             ur.department.name if ur.department else None,
+            ur.designation,
         ) if n) or None
         items.append(TransferItemOut(
             kind="role", key=ur.role, label=_pretty_role_name(ur.role),
@@ -1710,19 +1777,27 @@ async def transfer_role(
         role_context(leaver, leaver_role) if carries_seat
         else (leaver_role.establishment_id, leaver_role.department_id)
     )
-    target_role = next(
-        (ur for ur in target.roles
-         if ur.role == body.role
-         and (
-             role_context(target, ur) == (seat_estb, seat_dept) if carries_seat
-             else (ur.department_id == seat_dept and ur.establishment_id == seat_estb)
-         )),
-        None,
-    )
+    def _same_place(ur):
+        return ur.role == body.role and (
+            role_context(target, ur) == (seat_estb, seat_dept) if carries_seat
+            else (ur.department_id == seat_dept and ur.establishment_id == seat_estb)
+        )
+    # The post keeps its designation: the target receives the same
+    # role + place + designation. A target who already holds the role in that
+    # place under another designation can only get a second one if they are on
+    # the Multiple designations list.
+    target_role = next((ur for ur in target.roles if _same_place(ur) and desig_key(ur.designation) == desig_key(leaver_role.designation)), None)
     if target_role is None:
+        if any(_same_place(ur) for ur in target.roles) and not await is_multi_designation_user(db, target.id):
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                f"{target.full_name} already holds this role in that place under another designation. Only people on the "
+                "“Multiple designations” list can hold it twice — add them there first, or choose someone else.",
+            )
         target_role = UserRole(
             user_id=target.id, role=body.role,
             department_id=seat_dept, establishment_id=seat_estb,
+            designation=norm_designation(leaver_role.designation),
         )
         db.add(target_role)
 
@@ -1736,6 +1811,9 @@ async def transfer_role(
         db, old_id=leaver.id, new_id=target.id, new_role=body.role,
         actor_id=current_user.id, note=note, role_filter=body.role,
         old_context=old_context, new_context=role_context(target, target_role),
+        scope_designation=len(same_name) > 1,
+        old_designation=norm_designation(leaver_role.designation),
+        new_designation=norm_designation(target_role.designation),
     )
 
     # Remove the role from the leaver — it has now fully moved. Remember it
@@ -1760,14 +1838,17 @@ async def transfer_role(
             update(Docket).where(Docket.released_by == leaver.id).values(released_by=target.id)
         )
     current = (leaver.establishment_id, leaver.department_id)
-    if not any(ur.role == leaver.active_role and role_context(leaver, ur) == current for ur in remaining):
+    if not any(ur.role == leaver.active_role and role_context(leaver, ur) == current
+               and desig_key(ur.designation) == desig_key(leaver.active_designation) for ur in remaining):
         # The leaver was acting in the role just transferred — move them to
         # one they still hold (with its context), same as switch-role.
         if remaining:
             leaver.active_role = remaining[0].role
             leaver.establishment_id, leaver.department_id = role_context(leaver, remaining[0])
+            leaver.active_designation = norm_designation(remaining[0].designation)
         else:
             leaver.active_role = None
+            leaver.active_designation = None
 
     await db.commit()
     leaver = await _load_user(db, uid)

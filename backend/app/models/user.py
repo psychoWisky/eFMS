@@ -137,6 +137,10 @@ class User(Base, UUIDMixin, TimestampMixin):
     # unchanged: SystemRole is a `str` subclass, so its members compare/hash
     # equal to plain strings.
     active_role = Column(String(50), nullable=True)
+    # The designation of the post (user_roles row) the person is working as
+    # now — NULL for a post without its own designation. Part of the file
+    # workspace key together with role / establishment / department.
+    active_designation = Column(String(100), nullable=True)
 
     # Digital signature permission
     can_sign = Column(Boolean, default=False, nullable=False)
@@ -238,6 +242,16 @@ class UserRole(Base, UUIDMixin, TimestampMixin):
     user = relationship("User", back_populates="roles")
     department = relationship("Department", foreign_keys=[department_id])
     establishment = relationship("Establishment", foreign_keys=[establishment_id])
+
+
+class MultiDesignationUser(Base):
+    """People the Super Admin allowed to hold the SAME role in the SAME
+    establishment/department more than once (told apart by designation)."""
+    __tablename__ = "multi_designation_users"
+
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    created_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
 class RefreshToken(Base, UUIDMixin, TimestampMixin):

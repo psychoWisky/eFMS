@@ -36,6 +36,9 @@ export interface AuthUser {
   // The role this token is acting as. For a multi-role user this is the one
   // they last switched to; may differ from roles[0].
   active_role?: EfmsRole | null;
+  // The designation of the post the token is acting as (set when the person
+  // holds the same role more than once, told apart by designation).
+  active_designation?: string | null;
   can_sign: boolean;
   is_active?: boolean;
   // Present only on a project (PI) profile — used by the profile switcher

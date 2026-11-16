@@ -6,6 +6,7 @@ from app.api.v1.endpoints.docket import router as docket_router
 from app.api.v1.endpoints.tracking import router as tracking_router
 from app.api.v1.endpoints.projects import router as projects_router
 from app.api.v1.endpoints.foc import router as foc_router
+from app.api.v1.endpoints.multi_designation import router as multi_designation_router
 
 api_router = APIRouter(prefix="/api/v1")
 
@@ -17,3 +18,4 @@ api_router.include_router(docket_router)
 api_router.include_router(tracking_router)
 api_router.include_router(projects_router)
 api_router.include_router(foc_router)
+api_router.include_router(multi_designation_router)

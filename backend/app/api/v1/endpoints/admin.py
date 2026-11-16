@@ -13,6 +13,7 @@ from fastapi.responses import Response
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
+from app.utils.workspace import role_context as role_context_of
 from sqlalchemy.orm import selectinload
 from pydantic import BaseModel
 
@@ -303,15 +304,24 @@ async def list_users(
         for ur in held:
             counts[ur.role] = counts.get(ur.role, 0) + 1
         entries: list[tuple] = []
+        # Posts of the same role in the same place (people allowed to hold it
+        # more than once) are told apart by their designation in the list.
+        place_counts: dict[tuple, int] = {}
         for ur in held:
+            k = (ur.role, *role_context_of(u, ur))
+            place_counts[k] = place_counts.get(k, 0) + 1
+        for ur in held:
+            same_place = place_counts[(ur.role, *role_context_of(u, ur))] > 1
+            shown_designation = ur.designation or (u.designation if same_place else None)
             if counts[ur.role] > 1:
                 ctx = " · ".join(n for n in (
                     ur.establishment.name if ur.establishment else None,
                     ur.department.name if ur.department else None,
+                    shown_designation,
                 ) if n) or None
-                entries.append((ur.role, ur.id, ctx, ur.designation))
+                entries.append((ur.role, ur.id, ctx, shown_designation))
             else:
-                entries.append((ur.role, None, None, ur.designation))
+                entries.append((ur.role, None, shown_designation, ur.designation))
         if not entries:
             entries = [(u.active_role if u.active_role else None, None, None, None)]
         for role, ur_id, ctx, role_designation in entries:
@@ -463,13 +473,22 @@ class DeptOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
-async def _department_code_taken(db: AsyncSession, code: str, exclude: Optional[UUID] = None) -> Optional[Department]:
-    """A department that already uses this code (every department has its own
-    code, whatever establishment it is in). Compared ignoring case."""
-    q = select(Department).where(func.lower(func.trim(Department.code)) == code.strip().lower())
+async def _department_code_conflict(db: AsyncSession, code: str, name: str, exclude: Optional[UUID] = None) -> Optional[Department]:
+    """A DIFFERENT department that already uses this code. The same department
+    (same name) may carry the same code in several establishments, but a code
+    belongs to one department name. Compared ignoring case."""
+    q = select(Department).where(
+        func.lower(func.trim(Department.code)) == code.strip().lower(),
+        func.lower(func.trim(Department.name)) != name.strip().lower(),
+    )
     if exclude:
         q = q.where(Department.id != exclude)
     return (await db.execute(q)).scalars().first()
+
+
+def _code_conflict_message(code: str, other: Department) -> str:
+    return (f"The code “{code}” already belongs to the department “{other.name}”. "
+            "The same code can only be used for a department of the same name.")
 
 
 async def _department_exists(db: AsyncSession, establishment_id: Optional[UUID], name: str, exclude: Optional[UUID] = None) -> Optional[Department]:
@@ -577,18 +596,98 @@ async def create_department(body: DeptIn, db: AsyncSession = Depends(get_db), _=
         est = await db.get(Establishment, body.establishment_id) if body.establishment_id else None
         where = f" in “{est.name}”" if est else ""
         raise HTTPException(409, f"“{dup.name}” already exists{where}." + ("" if dup.is_active else " It is hidden — use the eye icon to show it again."))
-    taken = await _department_code_taken(db, body.code)
+    taken = await _department_code_conflict(db, body.code, body.name)
     if taken:
-        raise HTTPException(409, f"The code “{body.code.strip()}” is already used by the department “{taken.name}”. Every department needs its own code.")
+        raise HTTPException(409, _code_conflict_message(body.code.strip(), taken))
     d = Department(**{**body.model_dump(), "name": body.name.strip(), "code": body.code.strip()})
     db.add(d); await db.commit(); await db.refresh(d)
     return d
 
 
+# ── Departments: pick existing ones ───────────────────────────────────────────
+
+class DeptPick(BaseModel):
+    name: str
+    code: Optional[str] = None      # blank = the department's usual code
+
+
+class DeptAddExistingIn(BaseModel):
+    establishment_id: UUID
+    items: List[DeptPick]
+
+
+@router.get("/departments/names")
+async def department_names(db: AsyncSession = Depends(get_db), _=Depends(_super)):
+    """Every distinct department name across all establishments with the
+    code(s) it carries and the establishments that have it — for adding a
+    department other establishments already have."""
+    rows = (await db.execute(select(Department).order_by(Department.name))).scalars().all()
+    by_name: dict[str, dict] = {}
+    for d in rows:
+        entry = by_name.setdefault(d.name.strip().lower(), {"name": d.name.strip(), "codes": [], "establishment_ids": []})
+        if d.code and d.code not in entry["codes"]:
+            entry["codes"].append(d.code)
+        if d.establishment_id:
+            entry["establishment_ids"].append(str(d.establishment_id))
+    out = []
+    for e in by_name.values():
+        e["code"] = e["codes"][0] if e["codes"] else None      # the usual one
+        e["count"] = len(e["establishment_ids"])
+        out.append(e)
+    return sorted(out, key=lambda e: e["name"].lower())
+
+
+@router.post("/departments/add-existing")
+async def add_existing_departments(body: DeptAddExistingIn, db: AsyncSession = Depends(get_db), _=Depends(_super)):
+    """Add departments that other establishments already have to one
+    establishment. The code is the department's usual one unless a different
+    code is given for it. A department the establishment already has is
+    skipped, never added twice."""
+    est = await db.get(Establishment, body.establishment_id)
+    if not est:
+        raise HTTPException(404, "Establishment not found.")
+    if not body.items:
+        raise HTTPException(400, "Choose at least one department.")
+    results = []
+    seen: set[str] = set()
+    for item in body.items:
+        name = (item.name or "").strip()
+        if not name or name.lower() in seen:
+            continue
+        seen.add(name.lower())
+        res = {"name": name, "status": "failed", "code": None, "note": None}
+        results.append(res)
+        if await _department_exists(db, est.id, name):
+            res["status"], res["note"] = "skipped", f"{est.name} already has “{name}”."
+            continue
+        code = (item.code or "").strip()
+        if not code:
+            existing = (await db.execute(select(Department).where(func.lower(func.trim(Department.name)) == name.lower(), Department.code.is_not(None)))).scalars().first()
+            if not existing:
+                res["note"] = f"No other establishment has “{name}” — create it instead."
+                continue
+            code = existing.code
+        if len(code) > 50:
+            res["note"] = "A code can have at most 50 characters."
+            continue
+        clash = await _department_code_conflict(db, code, name)
+        if clash:
+            res["note"] = _code_conflict_message(code, clash)
+            continue
+        db.add(Department(name=name, code=code, establishment_id=est.id, is_active=True))
+        res["status"], res["code"] = "created", code
+    await db.commit()
+    return {
+        "establishment": est.name, "results": results,
+        "created": sum(1 for r in results if r["status"] == "created"),
+        "skipped": sum(1 for r in results if r["status"] == "skipped"),
+        "failed": sum(1 for r in results if r["status"] == "failed"),
+    }
+
+
 # ── Departments: bulk upload from Excel ───────────────────────────────────────
-# Every department has its own code, even when two establishments have a
-# department of the same name — so departments are added by uploading a sheet
-# that carries establishment name + code and department name + code.
+# Establishments and departments (each with its own code) can be added in one go
+# by uploading a sheet with establishment name + code and department name + code.
 
 _DEPT_SHEET_COLUMNS = ["Establishment Name", "Establishment Code", "Department Name", "Department Code"]
 _DEPT_SHEET_KEYS = {"establishmentname": "est_name", "establishmentcode": "est_code",
@@ -688,9 +787,9 @@ async def download_department_template(_=Depends(_super)):
     for line in [
         "One row per department. Delete the example rows before you upload.",
         "Establishment Name + Establishment Code: if the establishment does not exist it is created.",
-        "Department Name + Department Code: every department needs its OWN code, even when two establishments have a department of the same name.",
+        "Department Name + Department Code: the code is whatever you give it. The same department in two establishments may have the same code or different ones.",
         "A department that the establishment already has (same name) is skipped, never duplicated.",
-        "A code that is already used by another department (or another establishment) is refused for that row; other rows still go through.",
+        "A code that already belongs to a department of a DIFFERENT name is refused for that row; other rows still go through.",
         "Codes are not case-sensitive (cvac and CVAC are the same).",
     ]:
         help_.append([line])
@@ -750,10 +849,10 @@ async def bulk_upload_departments(file: UploadFile = File(...), db: AsyncSession
             if await _department_exists(db, est.id, dept_name):
                 res.status, res.note = "skipped", f"{est.name} already has “{dept_name}”."
                 continue
-            code_clash = await _department_code_taken(db, dept_code)
+            code_clash = await _department_code_conflict(db, dept_code, dept_name)
             if code_clash:
                 where = (await db.get(Establishment, code_clash.establishment_id)) if code_clash.establishment_id else None
-                res.note = f"The department code “{dept_code}” is already used by “{code_clash.name}”" + (f" in “{where.name}”." if where else ".")
+                res.note = _code_conflict_message(dept_code, code_clash)[:-1] + (f" (in “{where.name}”)." if where else ".")
                 if new_est:
                     await db.rollback()
                 continue

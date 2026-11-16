@@ -17,7 +17,7 @@ from app.api.v1.endpoints.efms_files import (
     _finalize_current_holder_note, _finalize_any_current_holder_note,
 )
 from app.utils.person_info import person_info_map
-from app.utils.workspace import workspace_filter
+from app.utils.workspace import workspace_filter, norm_designation
 
 router = APIRouter(prefix="/docket", tags=["Docket"])
 
@@ -49,6 +49,7 @@ async def my_docket(db: AsyncSession = Depends(get_db), user: User = Depends(get
             True if user.is_retired else workspace_filter(
                 user, EfmsFile.current_holder_role,
                 EfmsFile.current_holder_establishment_id, EfmsFile.current_holder_department_id,
+                EfmsFile.current_holder_designation,
             ),
         )
         .order_by(EfmsFile.updated_at.desc())
@@ -108,6 +109,11 @@ async def my_docket(db: AsyncSession = Depends(get_db), user: User = Depends(get
             "can_release": str(f.created_by) == str(user.id),
             "from_user_name": from_info.full_name if from_info else None,
             "from_user_info": from_info.model_dump() if from_info else None,
+            # The designation the sender acted under (their post's own, else
+            # their own), and the post this file is addressed to — shown in the
+            # Docket so two posts of one person can be told apart.
+            "from_designation": (last_entry.from_designation if last_entry and last_entry.from_designation else (from_info.designation if from_info else None)),
+            "to_designation": f.current_holder_designation,
             # I hold this file and have saved notesheet edits I haven't
             # forwarded yet — the Docket badges it "Draft saved".
             "has_unsent_edits": f.id in _draft_ids,
@@ -154,6 +160,7 @@ async def release_file(file_id: UUID, db: AsyncSession = Depends(get_db), user: 
     file.current_holder_role = None
     file.current_holder_establishment_id = None
     file.current_holder_department_id = None
+    file.current_holder_designation = None
     await db.commit()
     return {"released": True}
 
@@ -199,6 +206,7 @@ async def reopen_file(file_id: UUID, db: AsyncSession = Depends(get_db), user: U
     file.current_holder_role = user.active_role
     file.current_holder_establishment_id = user.establishment_id
     file.current_holder_department_id = user.department_id
+    file.current_holder_designation = norm_designation(user.active_designation)
     await db.commit()
     return {"reopened": True}
 
@@ -248,6 +256,7 @@ async def my_released_files(db: AsyncSession = Depends(get_db), user: User = Dep
              workspace_filter(
                  user, EfmsFile.creator_role,
                  EfmsFile.creator_establishment_id, EfmsFile.creator_department_id,
+                 EfmsFile.creator_designation,
              ),
          ))
     result = await db.execute(q.order_by(Docket.released_at.desc()))

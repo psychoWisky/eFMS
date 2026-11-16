@@ -39,6 +39,9 @@ class UserBrief(BaseModel):
     email: str
     full_name: str
     active_role: Optional[str]
+    # The designation of the post the person is working as now (None = the
+    # post has none of its own; the person's own designation applies).
+    active_designation: Optional[str] = None
     kyc_completed: bool
     must_change_password: bool = False
     profile_photo_url: Optional[str]
