@@ -905,6 +905,45 @@ async def delete_department(did: UUID, db: AsyncSession = Depends(get_db), _=Dep
         raise HTTPException(400, detail)
 
 
+class DeptRemoveIn(BaseModel):
+    ids: List[UUID]
+
+
+@router.post("/departments/remove")
+async def remove_departments(body: DeptRemoveIn, db: AsyncSession = Depends(get_db), _=Depends(_super)):
+    """Remove several departments at once. Each is checked with the same rules
+    as a single delete: one that people or files still use is NOT removed, and
+    the exact reasons are returned; the others are removed. Nothing else is
+    touched."""
+    if not body.ids:
+        raise HTTPException(400, "Choose at least one department.")
+    results = []
+    for did in dict.fromkeys(body.ids):
+        d = await db.get(Department, did)
+        if not d:
+            continue
+        est = await db.get(Establishment, d.establishment_id) if d.establishment_id else None
+        res = {"id": str(did), "name": d.name, "establishment": est.name if est else None, "status": "blocked", "reasons": []}
+        results.append(res)
+        reasons = await department_blockers(db, did)
+        if reasons:
+            res["reasons"] = reasons
+            continue
+        try:
+            await db.delete(d)
+            await db.commit()
+            res["status"] = "removed"
+        except IntegrityError as exc:
+            await db.rollback()
+            table = _fk_violation_table(exc)
+            res["reasons"] = [f'Still referenced by the "{table}" table.' if table else "Still referenced elsewhere."]
+    return {
+        "removed": sum(1 for r in results if r["status"] == "removed"),
+        "blocked": sum(1 for r in results if r["status"] == "blocked"),
+        "results": results,
+    }
+
+
 # ── Digital Signature Permissions ─────────────────────────────────────────────
 
 class SignPermissionIn(BaseModel):

@@ -12,7 +12,7 @@ from sqlalchemy import delete, select
 
 from app.models.organization import Department, Establishment
 from app.models.user import SystemRole
-from tests.test_delete_guards_and_seats import _drop_org, _estb, H
+from tests.test_delete_guards_and_seats import _api_user, _drop_org, _drop_user, _estb, H
 
 COLS = ["Establishment Name", "Establishment Code", "Department Name", "Department Code"]
 XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -180,3 +180,36 @@ async def test_pick_existing_departments_with_optional_code(client, users, db):
         ids = [e1["id"], e2["id"]]
         dept_ids = [d["id"] for d in (await client.get("/admin/departments/all", headers=H(admin))).json() if d["establishment_id"] in ids]
         await _drop_org(db, ids, dept_ids)
+
+
+@pytest.mark.asyncio
+async def test_remove_several_departments_refuses_the_ones_in_use(client, users, db):
+    admin = await users.make(SystemRole.SUPER_ADMIN)
+    e = await _estb(client, admin)
+    tag = uuid.uuid4().hex[:5].upper()
+    emails, ids = [], []
+    try:
+        for name in ("Free One", "Free Two", "Busy"):
+            r = await client.post("/admin/departments", json={"name": f"{name} {tag}", "code": f"{name.replace(' ', '')[:5].upper()}{tag}", "establishment_id": e["id"]}, headers=H(admin))
+            assert r.status_code == 201, r.text
+            ids.append(r.json()["id"])
+        # "Busy" has a person in it.
+        r, m = await _api_user(client, admin, role="faculty", estb=e["id"], dept=ids[2], tag="busy"); assert r.status_code == 201; emails.append(m)
+
+        r = await client.post("/admin/departments/remove", json={"ids": ids}, headers=H(admin))
+        assert r.status_code == 200, r.text
+        res = {x["name"]: x for x in r.json()["results"]}
+        assert (r.json()["removed"], r.json()["blocked"]) == (2, 1)
+        assert res[f"Free One {tag}"]["status"] == "removed" and res[f"Free Two {tag}"]["status"] == "removed"
+        assert res[f"Busy {tag}"]["status"] == "blocked" and res[f"Busy {tag}"]["reasons"]
+        left = [d["name"] for d in (await client.get("/admin/departments/all", headers=H(admin))).json() if d["establishment_id"] == e["id"]]
+        assert left == [f"Busy {tag}"]
+        # removing again: nothing to remove, nothing breaks
+        r = await client.post("/admin/departments/remove", json={"ids": ids[:2]}, headers=H(admin))
+        assert r.json() == {"removed": 0, "blocked": 0, "results": []}
+        assert (await client.post("/admin/departments/remove", json={"ids": []}, headers=H(admin))).status_code == 400
+        assert (await client.post("/admin/departments/remove", json={"ids": ids}, headers=H(await users.make("registrar")))).status_code == 403
+    finally:
+        for m in emails:
+            await _drop_user(db, m)
+        await _drop_org(db, [e["id"]], ids)
