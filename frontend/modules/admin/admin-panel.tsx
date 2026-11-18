@@ -7,12 +7,12 @@ import { confirmAction, showSuccess, showBlocked, apiErrorDetail } from "@/lib/a
 import {
   Plus, Trash2, Eye, EyeOff, Tag, Users, Building2, Layers,
   Loader2, AlertTriangle, PenLine, ShieldX, ShieldCheck, FolderKanban,
-  Landmark, Copy,
+  Landmark, Copy, Pencil, X,
 } from "lucide-react";
 import { UserManagementSection } from "./user-management";
 import { RoleManagementSection } from "./role-management";
 import { ProjectManagementSection } from "./project-management";
-import { DepartmentManagementSection } from "./department-management";
+import { DepartmentManagementSection, CreateDepartmentModal, EditNameCodeModal } from "./department-management";
 import { MultiDesignationSection } from "./multi-designation";
 import { FocAdminPage } from "@/modules/foc/foc-admin";
 import { FOC_ENABLED } from "@/lib/foc";
@@ -20,6 +20,7 @@ import { SearchableSelect } from "@/components/shared/searchable-select";
 
 interface Item { id: string; name: string; is_active: boolean; label?: string; designation?: string; email?: string; user_id?: string; code?: string; establishment_id?: string; }
 interface Establishment { id: string; name: string; code: string | null; is_active: boolean; }
+interface Department { id: string; name: string; code: string | null; establishment_id: string | null; is_active: boolean; }
 interface SignUser { id: string; email: string; full_name: string; designation: string | null; active_role: string | null; can_sign: boolean; }
 interface AdminUser { id: string; email: string; full_name: string; active_role: string | null; designation: string | null; }
 
@@ -28,7 +29,7 @@ type Tab = "users" | "roles" | "projects" | "establishments" | "departments" | "
 const INPUT = "w-full border border-gray-300 rounded-lg px-3 py-2.5 text-base focus:outline-none focus:ring-2 focus:ring-[#0D6E6E]";
 const LABEL = "block text-sm font-semibold text-gray-600 mb-1";
 
-function Row({ name, sub, active, onToggle, onDelete }: { name: string; sub?: string; active: boolean; onToggle: () => void; onDelete: () => void }) {
+function Row({ name, sub, active, onToggle, onDelete, onEdit }: { name: string; sub?: string; active: boolean; onToggle: () => void; onDelete: () => void; onEdit?: () => void }) {
   async function handleDelete() {
     const confirmed = await confirmAction({
       title: "Delete this item?",
@@ -46,12 +47,54 @@ function Row({ name, sub, active, onToggle, onDelete }: { name: string; sub?: st
         {!active && <span className="text-xs text-amber-600 font-medium">Hidden</span>}
       </div>
       <div className="flex gap-1 ml-3 shrink-0">
+        {onEdit && (
+          <button onClick={onEdit} title="Edit (fix a spelling)" className="p-2 rounded-lg hover:bg-[#F0F7F7] text-gray-400 hover:text-[#0D6E6E]">
+            <Pencil size={16} />
+          </button>
+        )}
         <button onClick={onToggle} title={active ? "Hide" : "Show"} className="p-2 rounded-lg hover:bg-gray-100 text-gray-400 hover:text-gray-600">
           {active ? <Eye size={16} /> : <EyeOff size={16} />}
         </button>
         <button onClick={handleDelete} title="Delete" className="p-2 rounded-lg hover:bg-red-50 text-gray-400 hover:text-red-500">
           <Trash2 size={16} />
         </button>
+      </div>
+    </div>
+  );
+}
+
+/** Edit one text value (category name, priority label). */
+function EditFieldModal({ title, label, hint, value, onSave, onClose }: {
+  title: string; label: string; hint?: string; value: string; onSave: (v: string) => Promise<void>; onClose: () => void;
+}) {
+  const [v, setV] = useState(value);
+  const [saving, setSaving] = useState(false);
+  async function save() {
+    setSaving(true);
+    try { await onSave(v.trim()); onClose(); }
+    catch (err) { toast.error(apiErrorDetail(err) ?? "Could not save."); }
+    finally { setSaving(false); }
+  }
+  return (
+    <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-6" onClick={onClose}>
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg" onClick={(e) => e.stopPropagation()}>
+        <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
+          <h3 className="text-lg font-bold text-gray-900">{title}</h3>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600"><X size={18} /></button>
+        </div>
+        <div className="px-6 py-5 space-y-2">
+          {hint && <p className="text-xs text-gray-500">{hint}</p>}
+          <label className={LABEL}>{label} *</label>
+          <input value={v} onChange={(e) => setV(e.target.value)} className={INPUT} autoFocus
+            onKeyDown={(e) => { if (e.key === "Enter" && v.trim() && v.trim() !== value) void save(); }} />
+        </div>
+        <div className="px-6 py-4 border-t border-gray-200 flex justify-end gap-3">
+          <button onClick={onClose} className="px-4 py-2.5 rounded-lg text-sm font-semibold text-gray-600 hover:bg-gray-100">Cancel</button>
+          <button onClick={save} disabled={saving || !v.trim() || v.trim() === value}
+            className="flex items-center gap-1.5 px-5 py-2.5 bg-[#0D6E6E] text-white rounded-lg text-sm font-semibold hover:bg-[#178F8F] disabled:opacity-50">
+            {saving && <Loader2 size={15} className="animate-spin" />} Save
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -65,8 +108,15 @@ export function AdminPanel() {
   const [newPri, setNewPri] = useState({ name: "", label: "" });
 
   const [signGrantUserId, setSignGrantUserId] = useState("");
+  // Edit pop-ups (fix spellings) and "Add department" from an establishment's box.
+  const [editEst, setEditEst] = useState<Establishment | null>(null);
+  const [editDept, setEditDept] = useState<Department | null>(null);
+  const [addDeptFor, setAddDeptFor] = useState<Establishment | null>(null);
+  const [editCat, setEditCat] = useState<Item | null>(null);
+  const [editPri, setEditPri] = useState<Item | null>(null);
 
   const { data: establishments = [] } = useQuery<Establishment[]>({ queryKey: ["admin-establishments-all"], queryFn: async () => (await api.get("/admin/establishments/all")).data });
+  const { data: allDepartments = [] } = useQuery<Department[]>({ queryKey: ["admin-departments-all"], queryFn: async () => (await api.get("/admin/departments/all")).data });
   const { data: categories = [] } = useQuery<Item[]>({ queryKey: ["admin-categories"], queryFn: async () => (await api.get("/admin/categories")).data });
   const { data: priorities = [] } = useQuery<Item[]>({ queryKey: ["admin-priorities"], queryFn: async () => (await api.get("/admin/priorities")).data });
   const { data: signUsers = [] } = useQuery<SignUser[]>({ queryKey: ["sign-permissions"], queryFn: async () => (await api.get("/admin/sign-permissions")).data });
@@ -144,7 +194,48 @@ export function AdminPanel() {
               </button>
             </div>
           </div>
-          {establishments.map((e) => <Row key={e.id} name={e.name} sub={e.code ? `Code: ${e.code}` : undefined} active={e.is_active} onToggle={() => act(["admin-establishments-all","establishments"], () => api.patch(`/admin/establishments/${e.id}/toggle`, {}))} onDelete={() => act(["admin-establishments-all","establishments"], () => api.delete(`/admin/establishments/${e.id}`))} />)}
+          {establishments.map((e) => {
+            const depts = allDepartments.filter((d) => d.establishment_id === e.id).sort((a, b) => a.name.localeCompare(b.name));
+            const EST_KEYS = ["admin-establishments-all", "establishments"];
+            return (
+              <div key={e.id} className={`rounded-xl border mb-3 overflow-hidden ${e.is_active ? "bg-white border-gray-200" : "bg-gray-50 border-gray-100 opacity-70"}`}>
+                <div className="flex flex-wrap items-center gap-3 px-4 py-3 bg-gray-50 border-b border-gray-100">
+                  <div className="min-w-0 flex-1">
+                    <p className="text-base font-semibold text-gray-900 truncate">{e.name}</p>
+                    <p className="text-sm text-gray-500">
+                      {e.code ? `Code: ${e.code}` : "No code"} · {depts.length} department{depts.length === 1 ? "" : "s"}
+                      {!e.is_active && <span className="ml-2 text-xs text-amber-600 font-medium">Hidden</span>}
+                    </p>
+                  </div>
+                  <button onClick={() => setAddDeptFor(e)}
+                    className="flex items-center gap-1 px-3 py-2 bg-[#0D6E6E] text-white rounded-lg text-sm font-semibold hover:bg-[#178F8F]"><Plus size={14} /> Add department</button>
+                  <button onClick={() => setEditEst(e)} title="Edit name or code" className="p-2 rounded-lg hover:bg-[#F0F7F7] text-gray-400 hover:text-[#0D6E6E]"><Pencil size={16} /></button>
+                  <button onClick={() => act(EST_KEYS, () => api.patch(`/admin/establishments/${e.id}/toggle`, {}))} title={e.is_active ? "Hide" : "Show"}
+                    className="p-2 rounded-lg hover:bg-gray-100 text-gray-400 hover:text-gray-600">{e.is_active ? <Eye size={16} /> : <EyeOff size={16} />}</button>
+                  <button onClick={async () => {
+                    if (await confirmAction({ title: "Delete this establishment?", text: `"${e.name}" will be permanently deleted. This cannot be undone.`, confirmText: "Delete", danger: true }))
+                      await act(EST_KEYS, () => api.delete(`/admin/establishments/${e.id}`));
+                  }} title="Delete" className="p-2 rounded-lg hover:bg-red-50 text-gray-400 hover:text-red-500"><Trash2 size={16} /></button>
+                </div>
+                <div className="px-4 py-3">
+                  {depts.length === 0 ? (
+                    <p className="text-sm text-gray-400">No departments yet — use “Add department”.</p>
+                  ) : (
+                    <div className="flex flex-wrap gap-2">
+                      {depts.map((d) => (
+                        <span key={d.id} className={`inline-flex items-center gap-2 pl-3 pr-1 py-1 rounded-full border text-sm ${d.is_active ? "bg-white border-gray-200 text-gray-800" : "bg-gray-50 border-gray-200 text-gray-400"}`}>
+                          {d.name}
+                          <span className="text-xs font-mono font-semibold text-[#0A5757] bg-[#E6F4F4] rounded px-1.5">{d.code ?? "—"}</span>
+                          {!d.is_active && <span className="text-xs text-amber-600">Hidden</span>}
+                          <button onClick={() => setEditDept(d)} title="Edit name or code" className="p-1 rounded-full hover:bg-[#F0F7F7] text-gray-400 hover:text-[#0D6E6E]"><Pencil size={12} /></button>
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })}
         </div>
       )}
 
@@ -167,7 +258,7 @@ export function AdminPanel() {
               </button>
             </div>
           </div>
-          {categories.map((c) => <Row key={c.id} name={c.name} active={c.is_active} onToggle={() => act("admin-categories", () => api.patch(`/admin/categories/${c.id}/toggle`, {}))} onDelete={() => act("admin-categories", () => api.delete(`/admin/categories/${c.id}`))} />)}
+          {categories.map((c) => <Row key={c.id} name={c.name} active={c.is_active} onEdit={() => setEditCat(c)} onToggle={() => act("admin-categories", () => api.patch(`/admin/categories/${c.id}/toggle`, {}))} onDelete={() => act("admin-categories", () => api.delete(`/admin/categories/${c.id}`))} />)}
         </div>
       )}
 
@@ -185,8 +276,35 @@ export function AdminPanel() {
               </button>
             </div>
           </div>
-          {priorities.map((p) => <Row key={p.id} name={p.label ?? p.name} sub={`Key: ${p.name}`} active={p.is_active} onToggle={() => act("admin-priorities", () => api.patch(`/admin/priorities/${p.id}/toggle`, {}))} onDelete={() => act("admin-priorities", () => api.delete(`/admin/priorities/${p.id}`))} />)}
+          {priorities.map((p) => <Row key={p.id} name={p.label ?? p.name} sub={`Key: ${p.name}`} active={p.is_active} onEdit={() => setEditPri(p)} onToggle={() => act("admin-priorities", () => api.patch(`/admin/priorities/${p.id}/toggle`, {}))} onDelete={() => act("admin-priorities", () => api.delete(`/admin/priorities/${p.id}`))} />)}
         </div>
+      )}
+
+      {/* Edit / add pop-ups */}
+      {editEst && (
+        <EditNameCodeModal title="Edit establishment" name={editEst.name} code={editEst.code}
+          hint="Fix the name or code. Everything is linked to the establishment itself, so nothing else has to change."
+          onSave={async (name, code) => { await api.patch(`/admin/establishments/${editEst.id}`, { name, code }); ["admin-establishments-all", "establishments"].forEach((k) => qc.invalidateQueries({ queryKey: [k] })); showSuccess("Establishment updated."); }}
+          onClose={() => setEditEst(null)} />
+      )}
+      {editDept && (
+        <EditNameCodeModal title="Edit department" name={editDept.name} code={editDept.code}
+          hint="A new code is used for new file numbers; existing file numbers stay as they are."
+          onSave={async (name, code) => { await api.patch(`/admin/departments/${editDept.id}`, { name, code }); ["admin-departments-all", "admin-department-names", "departments"].forEach((k) => qc.invalidateQueries({ queryKey: [k] })); showSuccess("Department updated."); }}
+          onClose={() => setEditDept(null)} />
+      )}
+      {addDeptFor && <CreateDepartmentModal establishmentId={addDeptFor.id} establishmentName={addDeptFor.name} onClose={() => setAddDeptFor(null)} />}
+      {editCat && (
+        <EditFieldModal title="Edit category" label="Category name" value={editCat.name}
+          hint="Files of this category are moved to the new name too."
+          onSave={async (v) => { await api.patch(`/admin/categories/${editCat.id}`, { name: v }); qc.invalidateQueries({ queryKey: ["admin-categories"] }); showSuccess("Category updated."); }}
+          onClose={() => setEditCat(null)} />
+      )}
+      {editPri && (
+        <EditFieldModal title="Edit priority" label="Display label" value={editPri.label ?? editPri.name}
+          hint={`Only the label people see changes. The system key “${editPri.name}” stays the same, because files and the urgent / secret handling depend on it.`}
+          onSave={async (v) => { await api.patch(`/admin/priorities/${editPri.id}`, { label: v }); qc.invalidateQueries({ queryKey: ["admin-priorities"] }); showSuccess("Priority updated."); }}
+          onClose={() => setEditPri(null)} />
       )}
 
       {/* ── SIGNATURES ── */}

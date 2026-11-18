@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import Response
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
+from sqlalchemy import select, func, update
 from app.utils.workspace import role_context as role_context_of
 from sqlalchemy.orm import selectinload
 from pydantic import BaseModel
@@ -129,9 +129,23 @@ async def create_category(body: CategoryIn, db: AsyncSession = Depends(get_db), 
 
 @router.patch("/categories/{cid}", response_model=CategoryOut)
 async def update_category(cid: UUID, body: CategoryIn, db: AsyncSession = Depends(get_db), _=Depends(_super)):
+    """Edit a category (e.g. fix a spelling). Files keep their category as
+    text, so files of the old name are moved to the new name too."""
     c = await db.get(FileCategory, cid)
     if not c: raise HTTPException(404, "Category not found")
-    for k, v in body.model_dump(exclude_none=True).items(): setattr(c, k, v)
+    name = (body.name or "").strip()
+    if not name:
+        raise HTTPException(400, "Enter a name for the category.")
+    clash = (await db.execute(select(FileCategory).where(
+        func.lower(func.trim(FileCategory.name)) == name.lower(), FileCategory.id != cid))).scalars().first()
+    if clash:
+        raise HTTPException(409, f"Another category is already called “{clash.name}”.")
+    old = c.name
+    c.name = name
+    if body.description is not None:
+        c.description = body.description.strip() or None
+    if old != name:
+        await db.execute(update(EfmsFile).where(EfmsFile.category == old).values(category=name))
     await db.commit(); await db.refresh(c)
     return c
 
@@ -168,6 +182,26 @@ async def list_priorities(db: AsyncSession = Depends(get_db)):
 async def create_priority(body: PriorityIn, db: AsyncSession = Depends(get_db), _=Depends(_super)):
     p = FilePriority(**body.model_dump())
     db.add(p); await db.commit(); await db.refresh(p)
+    return p
+
+
+class PriorityEdit(BaseModel):
+    label: str
+
+
+@router.patch("/priorities/{pid}", response_model=PriorityOut)
+async def update_priority(pid: UUID, body: PriorityEdit, db: AsyncSession = Depends(get_db), _=Depends(_super)):
+    """Edit the label people see. The internal name stays as it is — files
+    and the urgent / secret handling are tied to it."""
+    p = await db.get(FilePriority, pid)
+    if not p: raise HTTPException(404, "Priority not found")
+    label = (body.label or "").strip()
+    if not label:
+        raise HTTPException(400, "Enter a label for the priority.")
+    if len(label) > 50:
+        raise HTTPException(400, "A label can have at most 50 characters.")
+    p.label = label
+    await db.commit(); await db.refresh(p)
     return p
 
 
@@ -521,6 +555,70 @@ async def create_establishment(body: EstablishmentIn, db: AsyncSession = Depends
     e = Establishment(**{**body.model_dump(), "name": body.name.strip(), "code": body.code.strip()})
     db.add(e); await db.commit(); await db.refresh(e)
     return e
+
+class OrgEdit(BaseModel):
+    name: Optional[str] = None
+    code: Optional[str] = None
+
+
+@router.patch("/establishments/{eid}", response_model=EstablishmentOut)
+async def update_establishment(eid: UUID, body: OrgEdit, db: AsyncSession = Depends(get_db), _=Depends(_super)):
+    """Edit an establishment's name or code (e.g. fix a spelling). Everything
+    points to it by id, so nothing else has to change."""
+    e = await db.get(Establishment, eid)
+    if not e: raise HTTPException(404, "Establishment not found")
+    if body.name is not None:
+        name = body.name.strip()
+        if not name:
+            raise HTTPException(400, "Enter a name for the establishment.")
+        if len(name) > 255:
+            raise HTTPException(400, "A name can have at most 255 characters.")
+        clash = (await db.execute(select(Establishment).where(
+            func.lower(func.trim(Establishment.name)) == name.lower(), Establishment.id != eid))).scalars().first()
+        if clash:
+            raise HTTPException(409, f"Another establishment is already called “{clash.name}”.")
+        e.name = name
+    if body.code is not None:
+        code = body.code.strip()
+        if not code:
+            raise HTTPException(400, "Enter a code for the establishment.")
+        if len(code) > 50:
+            raise HTTPException(400, "A code can have at most 50 characters.")
+        clash = (await db.execute(select(Establishment).where(
+            func.lower(func.trim(Establishment.code)) == code.lower(), Establishment.id != eid))).scalars().first()
+        if clash:
+            raise HTTPException(409, f"The code “{code}” is already used by “{clash.name}”.")
+        e.code = code
+    await db.commit(); await db.refresh(e)
+    return e
+
+
+@router.patch("/departments/{did}", response_model=DeptOut)
+async def update_department(did: UUID, body: OrgEdit, db: AsyncSession = Depends(get_db), _=Depends(_super)):
+    """Edit a department's name or code in its establishment (e.g. fix a
+    spelling). Same rules as adding one: a name only once per establishment;
+    a code may be shared only by departments of the same name. A changed code
+    is used for new file numbers; existing file numbers stay as they are."""
+    d = await db.get(Department, did)
+    if not d: raise HTTPException(404, "Department not found")
+    name = d.name if body.name is None else body.name.strip()
+    code = (d.code or "") if body.code is None else body.code.strip()
+    if not name:
+        raise HTTPException(400, "Enter a name for the department.")
+    if not code:
+        raise HTTPException(400, "Enter a code for the department.")
+    if len(name) > 255 or len(code) > 50:
+        raise HTTPException(400, "Names can have at most 255 characters and codes at most 50.")
+    dup = await _department_exists(db, d.establishment_id, name, exclude=did)
+    if dup:
+        raise HTTPException(409, f"This establishment already has a department called “{dup.name}”.")
+    clash = await _department_code_conflict(db, code, name, exclude=did)
+    if clash:
+        raise HTTPException(409, _code_conflict_message(code, clash))
+    d.name, d.code = name, code
+    await db.commit(); await db.refresh(d)
+    return d
+
 
 @router.patch("/establishments/{eid}/toggle", response_model=EstablishmentOut)
 async def toggle_establishment(eid: UUID, db: AsyncSession = Depends(get_db), _=Depends(_super)):
