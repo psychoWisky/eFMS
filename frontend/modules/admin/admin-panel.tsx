@@ -7,7 +7,7 @@ import { confirmAction, showSuccess, showBlocked, apiErrorDetail } from "@/lib/a
 import {
   Plus, Trash2, Eye, EyeOff, Tag, Users, Building2, Layers,
   Loader2, AlertTriangle, PenLine, ShieldX, ShieldCheck, FolderKanban,
-  Landmark, Copy, Pencil, X,
+  Landmark, Copy, Pencil, X, ChevronDown, ChevronUp,
 } from "lucide-react";
 import { UserManagementSection } from "./user-management";
 import { RoleManagementSection } from "./role-management";
@@ -112,6 +112,26 @@ export function AdminPanel() {
   const [editEst, setEditEst] = useState<Establishment | null>(null);
   const [editDept, setEditDept] = useState<Department | null>(null);
   const [addDeptFor, setAddDeptFor] = useState<Establishment | null>(null);
+  // Establishment boxes whose department list is open.
+  const [openEst, setOpenEst] = useState<string[]>([]);
+  const toggleOpenEst = (id: string) => setOpenEst((o) => (o.includes(id) ? o.filter((x) => x !== id) : [...o, id]));
+  const DEPT_KEYS = ["admin-departments-all", "admin-department-names", "departments"];
+  async function deleteDept(d: Department, estName: string) {
+    if (!(await confirmAction({
+      title: "Delete this department?",
+      text: `"${d.name}" will be removed from ${estName} only. A department that people or files still use is not removed — you will see why.`,
+      confirmText: "Delete", danger: true,
+    }))) return;
+    try {
+      const r = await api.post("/admin/departments/remove", { ids: [d.id] });
+      const res = r.data as { removed: number; results: { status: string; reasons: string[] }[] };
+      DEPT_KEYS.forEach((k) => qc.invalidateQueries({ queryKey: [k] }));
+      if (res.removed) showSuccess(`“${d.name}” deleted from ${estName}.`);
+      else await showBlocked(`“${d.name}” was not deleted:\n${(res.results[0]?.reasons ?? []).map((x) => `• ${x}`).join("\n")}\nYou can hide it instead (the eye button) — that keeps everything intact.`);
+    } catch (err) {
+      toast.error(apiErrorDetail(err) ?? "Could not delete the department.");
+    }
+  }
   const [editCat, setEditCat] = useState<Item | null>(null);
   const [editPri, setEditPri] = useState<Item | null>(null);
 
@@ -217,18 +237,31 @@ export function AdminPanel() {
                       await act(EST_KEYS, () => api.delete(`/admin/establishments/${e.id}`));
                   }} title="Delete" className="p-2 rounded-lg hover:bg-red-50 text-gray-400 hover:text-red-500"><Trash2 size={16} /></button>
                 </div>
-                <div className="px-4 py-3">
+                <div className="px-4 py-2.5">
                   {depts.length === 0 ? (
                     <p className="text-sm text-gray-400">No departments yet — use “Add department”.</p>
                   ) : (
-                    <div className="flex flex-wrap gap-2">
+                    <button type="button" onClick={() => toggleOpenEst(e.id)}
+                      className="flex items-center gap-1.5 text-sm font-semibold text-[#0D6E6E] hover:underline">
+                      {openEst.includes(e.id) ? <ChevronUp size={15} /> : <ChevronDown size={15} />}
+                      {openEst.includes(e.id) ? "Hide departments" : `Show departments (${depts.length})`}
+                    </button>
+                  )}
+                  {openEst.includes(e.id) && depts.length > 0 && (
+                    <div className="mt-2 border border-gray-100 rounded-lg divide-y divide-gray-100">
                       {depts.map((d) => (
-                        <span key={d.id} className={`inline-flex items-center gap-2 pl-3 pr-1 py-1 rounded-full border text-sm ${d.is_active ? "bg-white border-gray-200 text-gray-800" : "bg-gray-50 border-gray-200 text-gray-400"}`}>
-                          {d.name}
-                          <span className="text-xs font-mono font-semibold text-[#0A5757] bg-[#E6F4F4] rounded px-1.5">{d.code ?? "—"}</span>
-                          {!d.is_active && <span className="text-xs text-amber-600">Hidden</span>}
-                          <button onClick={() => setEditDept(d)} title="Edit name or code" className="p-1 rounded-full hover:bg-[#F0F7F7] text-gray-400 hover:text-[#0D6E6E]"><Pencil size={12} /></button>
-                        </span>
+                        <div key={d.id} className={`flex items-center gap-3 px-3 py-2 ${d.is_active ? "" : "bg-gray-50"}`}>
+                          <div className="min-w-0 flex-1">
+                            <span className={`text-sm font-medium ${d.is_active ? "text-gray-900" : "text-gray-400"}`}>{d.name}</span>
+                            {!d.is_active && <span className="ml-2 text-xs text-amber-600 font-medium">Hidden</span>}
+                          </div>
+                          <span className="text-xs font-mono font-semibold text-[#0A5757] bg-[#E6F4F4] border border-[#BFDEDB] rounded px-1.5 py-0.5">{d.code ?? "—"}</span>
+                          <button onClick={() => setEditDept(d)} title="Edit name or code" className="p-1.5 rounded-lg hover:bg-[#F0F7F7] text-gray-400 hover:text-[#0D6E6E]"><Pencil size={15} /></button>
+                          <button onClick={() => act(DEPT_KEYS, () => api.patch(`/admin/departments/${d.id}/toggle`, {}))} title={d.is_active ? "Hide this department" : "Show this department"}
+                            className="p-1.5 rounded-lg hover:bg-gray-100 text-gray-400 hover:text-gray-600">{d.is_active ? <Eye size={15} /> : <EyeOff size={15} />}</button>
+                          <button onClick={() => deleteDept(d, e.name)} title={`Delete from ${e.name}`}
+                            className="p-1.5 rounded-lg hover:bg-red-50 text-gray-400 hover:text-red-500"><Trash2 size={15} /></button>
+                        </div>
                       ))}
                     </div>
                   )}
