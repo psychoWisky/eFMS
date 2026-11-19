@@ -471,25 +471,10 @@ export function DepartmentManagementSection() {
       const q = search.trim().toLowerCase();
       return !q || d.name.toLowerCase().includes(q) || (d.code ?? "").toLowerCase().includes(q) || (estbName.get(d.establishment_id ?? "") ?? "").toLowerCase().includes(q);
     });
-  // One card per department name (any case); every place it exists is a line inside.
-  const nameKey = (n: string) => n.trim().toLowerCase();
-  const totalPlaces = useMemo(() => {
-    const m = new Map<string, number>();
-    departments.forEach((d) => m.set(nameKey(d.name), (m.get(nameKey(d.name)) ?? 0) + 1));
-    return m;
-  }, [departments]);
-  const allGroupCount = totalPlaces.size;
-  const groups = useMemo(() => {
-    const m = new Map<string, { key: string; name: string; rows: Department[] }>();
-    shown.forEach((d) => {
-      const g = m.get(nameKey(d.name)) ?? { key: nameKey(d.name), name: d.name.trim(), rows: [] };
-      g.rows.push(d);
-      m.set(g.key, g);
-    });
-    return Array.from(m.values())
-      .map((g) => ({ ...g, rows: g.rows.sort((a, b) => (estbName.get(a.establishment_id ?? "") ?? "").localeCompare(estbName.get(b.establishment_id ?? "") ?? "")) }))
-      .sort((a, b) => a.name.localeCompare(b.name));
-  }, [shown, estbName]);
+  // One row per department, sorted by name, then establishment.
+  const rows = useMemo(() => [...shown].sort((a, b) =>
+    a.name.localeCompare(b.name) || (estbName.get(a.establishment_id ?? "") ?? "").localeCompare(estbName.get(b.establishment_id ?? "") ?? "")),
+  [shown, estbName]);
 
   async function act(fn: () => Promise<unknown>) {
     try {
@@ -557,11 +542,11 @@ export function DepartmentManagementSection() {
         </div>
       ) : (
         <>
-      {/* List — one card per department; the establishments that have it, with each one's code */}
+      {/* List — one row per department, its establishment underneath; one checkbox each */}
       <div>
         <div className="flex flex-wrap items-center gap-3 mb-3">
           <p className="text-sm font-semibold text-gray-700 mr-auto">
-            Departments ({groups.length}{groups.length !== allGroupCount ? ` of ${allGroupCount}` : ""}) · {shown.length} place{shown.length === 1 ? "" : "s"}
+            Departments ({rows.length}{rows.length !== departments.length ? ` of ${departments.length}` : ""})
           </p>
           <div className="w-64">
             <SearchableSelect options={establishments.map((e) => ({ value: e.id, label: e.name }))} value={filterEstb} onChange={setFilterEstb}
@@ -576,7 +561,7 @@ export function DepartmentManagementSection() {
               <input type="checkbox" className="accent-[#0D6E6E] w-4 h-4"
                 checked={shown.every((d) => removeIds.includes(d.id))}
                 onChange={(e) => setRemoveIds((cur) => e.target.checked ? Array.from(new Set([...cur, ...shown.map((d) => d.id)])) : cur.filter((id) => !shown.some((d) => d.id === id)))} />
-              Select every place shown
+              Select all shown
             </label>
             {removeIds.length > 0 && (
               <>
@@ -590,52 +575,36 @@ export function DepartmentManagementSection() {
             )}
           </div>
         )}
-        {groups.length === 0 && <p className="text-sm text-gray-400 py-8 text-center">No departments{search || filterEstb ? " match" : " yet"}.</p>}
-        {groups.map((g) => {
-          const total = totalPlaces.get(g.key) ?? g.rows.length;
-          const allTicked = g.rows.every((d) => removeIds.includes(d.id));
-          return (
-            <div key={g.key} className="bg-white border border-gray-200 rounded-xl mb-3 overflow-hidden">
-              <div className="flex flex-wrap items-center gap-3 px-4 py-3 bg-gray-50 border-b border-gray-100">
-                <input type="checkbox" className="accent-[#0D6E6E] w-4 h-4 shrink-0" aria-label={`Select every place of ${g.name}`} checked={allTicked}
-                  onChange={(e) => setRemoveIds((cur) => e.target.checked ? Array.from(new Set([...cur, ...g.rows.map((d) => d.id)])) : cur.filter((id) => !g.rows.some((d) => d.id === id)))} />
+        {rows.length === 0 && <p className="text-sm text-gray-400 py-8 text-center">No departments{search || filterEstb ? " match" : " yet"}.</p>}
+        <div className="bg-white border border-gray-200 rounded-xl overflow-hidden divide-y divide-gray-100">
+          {rows.map((d) => {
+            const where = estbName.get(d.establishment_id ?? "") ?? "No establishment";
+            return (
+              <label key={d.id} className={cn("flex items-center gap-3 px-4 py-3 cursor-pointer", !d.is_active && "bg-gray-50 opacity-70", removeIds.includes(d.id) && "bg-red-50/60")}>
+                <input type="checkbox" className="accent-[#0D6E6E] w-4 h-4 shrink-0" aria-label={`Select ${d.name} (${where})`}
+                  checked={removeIds.includes(d.id)} onChange={() => setRemoveIds((cur) => cur.includes(d.id) ? cur.filter((x) => x !== d.id) : [...cur, d.id])} />
                 <div className="min-w-0 flex-1">
-                  <p className="text-base font-semibold text-gray-900 truncate">{g.name}</p>
-                  <p className="text-xs text-gray-500">
-                    In {total} establishment{total === 1 ? "" : "s"}
-                    {total !== g.rows.length ? ` · showing ${g.rows.length}` : ""}
+                  <p className="text-sm font-semibold text-gray-900 truncate">
+                    {d.name}
+                    {!d.is_active && <span className="ml-2 text-xs text-amber-600 font-medium">Hidden</span>}
                   </p>
+                  <p className="text-xs text-gray-500 truncate">{where}</p>
                 </div>
-                {total > 1 && (
-                  <span className="text-xs text-gray-500">Remove it from just some of them — tick the ones, then <b>Remove selected</b>.</span>
-                )}
-              </div>
-              <div className="divide-y divide-gray-100">
-                {g.rows.map((d) => (
-                  <div key={d.id} className={cn("flex items-center gap-3 px-4 py-2.5", !d.is_active && "bg-gray-50 opacity-70", removeIds.includes(d.id) && "bg-red-50/60")}>
-                    <input type="checkbox" className="accent-[#0D6E6E] w-4 h-4 shrink-0" aria-label={`Select ${d.name} in ${estbName.get(d.establishment_id ?? "") ?? "no establishment"}`}
-                      checked={removeIds.includes(d.id)} onChange={() => setRemoveIds((cur) => cur.includes(d.id) ? cur.filter((x) => x !== d.id) : [...cur, d.id])} />
-                    <div className="min-w-0 flex-1">
-                      <p className="text-sm font-medium text-gray-900 truncate">{estbName.get(d.establishment_id ?? "") ?? "No establishment"}</p>
-                      {!d.is_active && <span className="text-xs text-amber-600 font-medium">Hidden</span>}
-                    </div>
-                    <span className="text-xs font-mono font-semibold text-[#0A5757] bg-[#E6F4F4] border border-[#BFDEDB] rounded px-2 py-1 whitespace-nowrap">
-                      {d.code ? `Code ${d.code}` : "No code"}
-                    </span>
-                    <div className="flex gap-1 shrink-0">
-                      <button onClick={() => setEditing(d)} title="Edit name or code"
-                        className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-semibold text-[#0D6E6E] border border-[#BFDEDB] hover:bg-[#F0F7F7]"><Pencil size={13} /> Edit</button>
-                      <button onClick={() => act(() => api.patch(`/admin/departments/${d.id}/toggle`, {}))} title={d.is_active ? "Hide" : "Show"}
-                        className="p-2 rounded-lg hover:bg-gray-100 text-gray-400 hover:text-gray-600">{d.is_active ? <Eye size={16} /> : <EyeOff size={16} />}</button>
-                      <button onClick={() => removeDepartments([d])} title={`Remove from ${estbName.get(d.establishment_id ?? "") ?? "this establishment"} only`}
-                        className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-semibold text-red-600 border border-red-200 hover:bg-red-50"><Trash2 size={14} /> Remove</button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          );
-        })}
+                <span className="text-xs font-mono font-semibold text-[#0A5757] bg-[#E6F4F4] border border-[#BFDEDB] rounded px-2 py-1 whitespace-nowrap">
+                  {d.code ? `Code ${d.code}` : "No code"}
+                </span>
+                <div className="flex gap-1 shrink-0" onClick={(e) => e.preventDefault()}>
+                  <button type="button" onClick={() => setEditing(d)} title="Edit name or code"
+                    className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-semibold text-[#0D6E6E] border border-[#BFDEDB] hover:bg-[#F0F7F7]"><Pencil size={13} /> Edit</button>
+                  <button type="button" onClick={() => act(() => api.patch(`/admin/departments/${d.id}/toggle`, {}))} title={d.is_active ? "Hide" : "Show"}
+                    className="p-2 rounded-lg hover:bg-gray-100 text-gray-400 hover:text-gray-600">{d.is_active ? <Eye size={16} /> : <EyeOff size={16} />}</button>
+                  <button type="button" onClick={() => removeDepartments([d])} title={`Remove from ${where} only`}
+                    className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-semibold text-red-600 border border-red-200 hover:bg-red-50"><Trash2 size={14} /> Remove</button>
+                </div>
+              </label>
+            );
+          })}
+        </div>
       </div>
         </>
       )}
