@@ -27,7 +27,7 @@ interface Props {
   existingSignatures: SignatureStamp[];
   /** Called when user clicks to place a new stamp (returns percent position) */
   onPlace: (pos_x: number, pos_y: number) => void;
-  /** Pending stamp placed but not yet OTP-verified */
+  /** Pending stamp placed but not yet signed */
   pendingStamp: { pos_x: number; pos_y: number } | null;
   onClearPending: () => void;
   readOnly?: boolean;
@@ -203,7 +203,7 @@ function SignStamp({ stamp }: { stamp: SignatureStamp; onDragStart?: undefined }
               ? "bg-emerald-500/20 border-emerald-400"
               : "bg-amber-500/20 border-amber-400 border-dashed animate-pulse"
             }`}
-          title={isVerified ? `Signed by ${stamp.signer_name}` : "Pending OTP verification"}
+          title={isVerified ? `Signed by ${stamp.signer_name}` : "Awaiting DSC signature"}
         >
           {isVerified
             ? <CheckCircle className="w-5 h-5 text-emerald-400" />
@@ -219,7 +219,7 @@ function SignStamp({ stamp }: { stamp: SignatureStamp; onDragStart?: undefined }
                 <br />{stamp.signer_name}
               </>
             ) : (
-              <span className="text-amber-400">? Awaiting OTP</span>
+              <span className="text-amber-400">? Awaiting DSC</span>
             )}
           </div>
         </div>

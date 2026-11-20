@@ -1,7 +1,7 @@
 """Pydantic v2 schemas for eFMS resources."""
 from __future__ import annotations
 from datetime import datetime
-from typing import Optional, List
+from typing import Literal, Optional, List
 from uuid import UUID
 from pydantic import BaseModel, Field
 
@@ -11,14 +11,17 @@ from app.utils.person_info import PersonInfo
 
 # ── Signature schemas ─────────────────────────────────────────────────────────
 
-class SignInitiate(BaseModel):
-    pos_x: float = Field(..., ge=0, le=100)
-    pos_y: float = Field(..., ge=0, le=100)
-    page_number: int = Field(1, ge=1)
+class SignPrepare(BaseModel):
+    """Step 1 of signing with the DSC: where the signature box goes."""
+    attachment_id: Optional[UUID] = None        # default: the file's first attachment
+    pos_x: float = Field(..., ge=0, le=100)     # centre of the box, % from the left
+    pos_y: float = Field(..., ge=0, le=100)     # centre of the box, % from the top
+    page: Literal["first", "last"] | int = "first"
 
 
-class SignVerify(BaseModel):
-    otp_code: str = Field(..., min_length=6, max_length=6)
+class SignComplete(BaseModel):
+    """Step 2: what the signing application returned (Base64 PKCS#7)."""
+    cms_b64: str = Field(..., min_length=100, max_length=200_000)
 
 
 class SignatureOut(BaseModel):
@@ -31,6 +34,10 @@ class SignatureOut(BaseModel):
     pos_y: float
     page_number: int
     status: str
+    method: str = "otp"
+    cert_cn: Optional[str] = None
+    cert_serial: Optional[str] = None
+    cert_issuer: Optional[str] = None
     signed_at: Optional[datetime] = None
     verified_at: Optional[datetime] = None
     model_config = {"from_attributes": True}

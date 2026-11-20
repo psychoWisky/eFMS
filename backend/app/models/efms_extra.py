@@ -53,8 +53,25 @@ class FileSignature(Base):
     pos_x       = Column(Float, nullable=False)
     pos_y       = Column(Float, nullable=False)
     page_number = Column(Integer, nullable=False, default=1)
-    # 'pending' until OTP verified, then 'verified'
+    # 'pending' until the token's signature is added, then 'verified'
     status      = Column(String(20), nullable=False, default="pending")
+    # 'dsc' = signed with the officer's DSC token; 'otp' = earlier signatures
+    # (kept as they are, no longer created).
+    method      = Column(String(10), nullable=False, default="dsc", server_default="otp")
+    attachment_id = Column(UUID(as_uuid=True), ForeignKey("file_attachments.id", ondelete="SET NULL"), nullable=True)
+    # The prepared PDF waiting for the token's signature (kept outside the
+    # public uploads folder) and the state needed to finish it.
+    prepared_name  = Column(String(80), nullable=True)
+    digest_hex     = Column(String(64), nullable=True)
+    reserved_start = Column(Integer, nullable=True)
+    reserved_end   = Column(Integer, nullable=True)
+    field_name     = Column(String(40), nullable=True)
+    # Certificate recorded when the signature was added.
+    cert_cn          = Column(String(255), nullable=True)
+    cert_serial      = Column(String(80), nullable=True)
+    cert_issuer      = Column(String(500), nullable=True)
+    cert_not_after   = Column(DateTime(timezone=True), nullable=True)
+    cert_fingerprint = Column(String(64), nullable=True)
     signed_at   = Column(DateTime(timezone=True), server_default=func.now())
     verified_at = Column(DateTime(timezone=True), nullable=True)
     created_at  = Column(DateTime(timezone=True), server_default=func.now())

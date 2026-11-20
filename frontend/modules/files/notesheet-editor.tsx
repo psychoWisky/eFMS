@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api, FILES_BASE_URL, API_URL } from "@/services/api";
 import { toast } from "sonner";
-import { confirmAction, showSuccess, escapeHtml } from "@/lib/alert";
+import { confirmAction, showSuccess, escapeHtml, apiErrorDetail } from "@/lib/alert";
 import { useUser, useActiveRole } from "@/stores/auth.store";
 import { cn, formatDate, getAttachmentPreviewKind, isNotesheetEmpty, hasRealNotesheetContent } from "@/lib/utils";
 import {
@@ -14,7 +14,7 @@ import {
   CheckCircle2, XCircle, Trash2, Pencil, Save, FileX2, Paperclip, RotateCcw,
 } from "lucide-react";
 import PdfSignatureCanvas, { type SignatureStamp } from "@/components/signature/pdf-signature-canvas";
-import OtpVerifyModal from "@/components/signature/otp-verify-modal";
+import { DSC_URL, DscClientError, signHashOnToken } from "@/lib/dsc";
 import { PersonBadge, type PersonInfo } from "@/components/shared/person-badge";
 import { FileClassificationBadge, FileClassificationBanner } from "@/components/shared/file-classification-badge";
 import { SearchableSelect } from "@/components/shared/searchable-select";
@@ -38,7 +38,7 @@ interface RouteEntry { id: string; from_user_id: string | null; to_user_id: stri
 interface TrackEntry { id: string; type?: "route" | "sign"; from_user_id: string | null; to_user_id: string | null; from_user_name: string | null; to_user_name: string | null; from_user_info?: PersonInfo | null; to_user_info?: PersonInfo | null; action: string; remarks: string | null; is_current: boolean; created_at: string; }
 interface Attachment { id: string; original_name: string; file_size: number | null; mime_type: string | null; stored_name: string; created_at: string; uploaded_by: string; }
 interface Notesheet { id: string; content: string; version: number; is_locked: boolean; }
-interface Signature { id: string; file_id: string; user_id: string; signer_name: string; signer_info?: PersonInfo | null; pos_x: number; pos_y: number; page_number: number; status: "pending" | "verified"; signed_at: string | null; verified_at: string | null; }
+interface Signature { id: string; file_id: string; user_id: string; signer_name: string; signer_info?: PersonInfo | null; pos_x: number; pos_y: number; page_number: number; status: "pending" | "verified"; method?: string; cert_cn?: string | null; cert_serial?: string | null; cert_issuer?: string | null; signed_at: string | null; verified_at: string | null; }
 interface EfmsFile {
   id: string; ref_number: string; subject: string; category: string;
   status: string; priority: string; is_confidential: boolean;
@@ -141,10 +141,9 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
   }, []);
   // Signature state
   const [pendingStamp, setPendingStamp] = useState<{ pos_x: number; pos_y: number } | null>(null);
-  const [pendingSignatureId, setPendingSignatureId] = useState<string | null>(null);
-  const [showOtpModal, setShowOtpModal] = useState(false);
-  const [otpError, setOtpError] = useState<string | null>(null);
-  const [otpLoading, setOtpLoading] = useState(false);
+  // Signing with the DSC token: which step we are on ("" = idle).
+  const [signStep, setSignStep] = useState<"" | "preparing" | "token" | "saving">("");
+  const [signPage, setSignPage] = useState<"first" | "last">("first");
   const [actionType] = useState<"forward">("forward");
   const [downloadingNotesheet, setDownloadingNotesheet] = useState(false);
   const [selectedPdf, setSelectedPdf] = useState<Attachment | null>(null);
@@ -800,6 +799,41 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
   useEffect(() => {
     if (file?.attachments.length && !selectedPdf) setSelectedPdf(file.attachments[0]);
   }, [file]);
+
+  // Sign the selected document with the officer's DSC (USB token):
+  // server prepares the PDF -> token signs the hash -> server embeds the signature.
+  const signWithDsc = async () => {
+    const target = selectedPdf ?? file?.attachments[0];
+    if (!pendingStamp || !target || signStep) return;
+    let sigId: string | null = null;
+    try {
+      setSignStep("preparing");
+      const prep = await api.post(`/efms/files/${fileId}/sign/prepare`, {
+        attachment_id: target.id, pos_x: pendingStamp.pos_x, pos_y: pendingStamp.pos_y, page: signPage,
+      });
+      sigId = prep.data.signature_id;
+      setSignStep("token");
+      const cms = await signHashOnToken(prep.data.hash, prep.data.txn);
+      setSignStep("saving");
+      await api.post(`/efms/files/${fileId}/sign/${sigId}/complete`, { cms_b64: cms });
+      setPendingStamp(null);
+      qc.invalidateQueries({ queryKey: ["efms-file", fileId] });
+      qc.invalidateQueries({ queryKey: ["file-track", fileId] });
+      showSuccess("Signed with your DSC. The signed copy has been added to Attached Files.");
+    } catch (err) {
+      if (err instanceof DscClientError) {
+        // Tell the server log what the officer's PC said (the server cannot see this).
+        api.post(`/efms/files/${fileId}/sign/client-log`, {
+          stage: "token", message: err.message, signature_id: sigId, service_url: DSC_URL,
+          browser: typeof navigator !== "undefined" ? navigator.userAgent.slice(0, 300) : undefined,
+        }).catch(() => {});
+      }
+      if (sigId) { try { await api.post(`/efms/files/${fileId}/sign/${sigId}/cancel`); } catch { /* already gone */ } }
+      toast.error(err instanceof DscClientError ? err.message : apiErrorDetail(err) ?? "Signing failed. Please try again.");
+    } finally {
+      setSignStep("");
+    }
+  };
 
   // Real, actual-change-based dirty tracking for every independently-dirty
   // part of this page — never a hardcoded true. Edit Draft (creator, draft
@@ -1815,36 +1849,22 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                       <PenLine size={18} className="text-emerald-600" /> Digital Signature
                     </h2>
                     <p className="text-sm text-gray-500 mt-0.5">
-                      Click anywhere on the document to place your signature stamp, then confirm with OTP.
+                      Click on the document where the signature box should go, then sign with your DSC (USB token).
                     </p>
                   </div>
-                  {pendingStamp && !showOtpModal && (
-                    <button
-                      onClick={async () => {
-                        if (!pendingStamp) return;
-                        try {
-                          setOtpLoading(true);
-                          const res = await api.post(`/efms/files/${fileId}/sign`, {
-                            pos_x: pendingStamp.pos_x,
-                            pos_y: pendingStamp.pos_y,
-                            page_number: 1,
-                          });
-                          setPendingSignatureId(res.data.signature_id);
-                          setShowOtpModal(true);
-                          setOtpError(null);
-                        } catch (err) {
-                          const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
-                          toast.error(msg ?? "Failed to initiate signature.");
-                        } finally {
-                          setOtpLoading(false);
-                        }
-                      }}
-                      disabled={otpLoading}
-                      className="flex items-center gap-2 px-4 py-2 bg-emerald-600 text-white rounded-xl text-sm font-semibold hover:bg-emerald-700 disabled:opacity-50"
-                    >
-                      {otpLoading ? <Loader2 size={14} className="animate-spin" /> : <PenLine size={14} />}
-                      Confirm Position &amp; Send OTP
-                    </button>
+                  {pendingStamp && (
+                    <div className="flex items-center gap-2">
+                      <select value={signPage} onChange={(e) => setSignPage(e.target.value as "first" | "last")} disabled={!!signStep}
+                        className="border border-gray-300 rounded-lg px-2 py-2 text-sm bg-white" title="Which page gets the signature box">
+                        <option value="first">First page</option>
+                        <option value="last">Last page</option>
+                      </select>
+                      <button onClick={signWithDsc} disabled={!!signStep}
+                        className="flex items-center gap-2 px-4 py-2 bg-emerald-600 text-white rounded-xl text-sm font-semibold hover:bg-emerald-700 disabled:opacity-70">
+                        {signStep ? <Loader2 size={14} className="animate-spin" /> : <PenLine size={14} />}
+                        {signStep === "preparing" ? "Preparing document…" : signStep === "token" ? "Enter PIN on your token…" : signStep === "saving" ? "Adding signature…" : "Sign with DSC"}
+                      </button>
+                    </div>
                   )}
                 </div>
 
@@ -1892,13 +1912,9 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                         mimeType={signTarget.mime_type}
                         docPreviewUrl={isLegacyDoc ? `${API_URL}/efms/files/${fileId}/attachments/${signTarget.id}/preview-docx` : undefined}
                         existingSignatures={(file.signatures ?? []).map((s) => ({ ...s, status: s.status as "pending" | "verified", verified_at: s.verified_at ?? undefined }))}
-                        onPlace={(pos_x, pos_y) => {
-                          setPendingStamp({ pos_x, pos_y });
-                          setShowOtpModal(false);
-                          setPendingSignatureId(null);
-                        }}
+                        onPlace={(pos_x, pos_y) => setPendingStamp({ pos_x, pos_y })}
                         pendingStamp={pendingStamp}
-                        onClearPending={() => { setPendingStamp(null); setPendingSignatureId(null); }}
+                        onClearPending={() => setPendingStamp(null)}
                       />
                     );
                   })()}
@@ -1922,7 +1938,11 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                           }
                           <div className="flex-1 flex items-center gap-2 flex-wrap">
                             <PersonBadge person={sig.signer_info} fallback={sig.signer_name || "Unknown"} compact />
-                            <span className="text-gray-500">· Page {sig.page_number}, {sig.pos_x.toFixed(0)}% × {sig.pos_y.toFixed(0)}%</span>
+                            <span className="text-gray-500">
+                              {sig.method === "dsc"
+                                ? <>· Signed with DSC{sig.cert_cn ? <> — certificate <b>{sig.cert_cn}</b></> : null}{sig.cert_serial ? <span className="text-gray-400"> (serial {sig.cert_serial})</span> : null}</>
+                                : <>· Earlier signature (OTP)</>}
+                            </span>
                           </div>
                           <span className={cn("px-2 py-0.5 rounded-full text-xs font-semibold",
                             sig.status === "verified" ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700")}>
@@ -1941,38 +1961,6 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
           )}
         </div>
       </div>
-
-      {/* OTP Verification Modal */}
-      {showOtpModal && pendingSignatureId && user && (
-        <OtpVerifyModal
-          email={user.email}
-          fileRef={file.ref_number}
-          isLoading={otpLoading}
-          error={otpError}
-          onClose={() => {
-            setShowOtpModal(false);
-            setOtpError(null);
-          }}
-          onVerify={async (otp) => {
-            setOtpLoading(true);
-            setOtpError(null);
-            try {
-              await api.post(`/efms/files/${fileId}/sign/${pendingSignatureId}/verify`, { otp_code: otp });
-              showSuccess("Signature verified!");
-              setShowOtpModal(false);
-              setPendingStamp(null);
-              setPendingSignatureId(null);
-              qc.invalidateQueries({ queryKey: ["efms-file", fileId] });
-              qc.invalidateQueries({ queryKey: ["file-track", fileId] });
-            } catch (err) {
-              const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
-              setOtpError(msg ?? "Invalid OTP. Please try again.");
-            } finally {
-              setOtpLoading(false);
-            }
-          }}
-        />
-      )}
 
       {previewAttachment && (
         <AttachmentPreviewModal

@@ -53,10 +53,9 @@ from app.schemas.efms import (
     FileCreate, FileUpdate, FileOut,
     NotesheetSave, RouteAction_ as RouteActionIn,
     DispatchCreate, DispatchOut,
-    SignInitiate, SignVerify, SignatureOut,
+    SignPrepare, SignComplete, SignatureOut,
     HolderNotesheetOut, HolderNotesheetUpdate,
 )
-from app.utils.otp import create_otp, verify_otp, send_email as _send_otp_email
 from app.utils.person_info import PersonInfo, person_info_map
 from app.utils.workspace import workspace_filter, role_context, norm_designation
 from app.utils.html_sanitize import sanitize_notesheet_html, ContentTooLarge
@@ -85,6 +84,9 @@ def _draft_edit_expired(f: EfmsFile) -> bool:
 def _attachment_delete_expired(att: FileAttachment) -> bool:
     return datetime.now(timezone.utc) - att.created_at > ATTACHMENT_DELETE_WINDOW
 
+import logging
+from pydantic import BaseModel, Field
+from app.utils.dsc_log import dsc_event, logged_step
 router = APIRouter(prefix="/efms/files", tags=["eFMS Files"])
 
 async def _generate_ref(db: AsyncSession, dept_code: str = "GEN", category: str = "GEN") -> str:
@@ -186,7 +188,8 @@ async def _load_file(file_id: UUID, db: AsyncSession) -> EfmsFile:
             signer_name=signer_info.full_name if signer_info else "",
             signer_info=signer_info,
             pos_x=s.pos_x, pos_y=s.pos_y, page_number=s.page_number,
-            status=s.status, signed_at=s.signed_at, verified_at=s.verified_at,
+            status=s.status, method=s.method, cert_cn=s.cert_cn, cert_serial=s.cert_serial,
+            cert_issuer=s.cert_issuer, signed_at=s.signed_at, verified_at=s.verified_at,
         ))
     f.signatures = enriched  # type: ignore[attr-defined]
     return f
@@ -2613,208 +2616,272 @@ async def preview_doc_as_docx(
 
 # ── Digital Signature ─────────────────────────────────────────────────────────
 
-@router.post("/{file_id}/sign", response_model=dict, status_code=201)
-async def initiate_sign(
-    file_id: UUID,
-    body: SignInitiate,
-    db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_verified_user),
-):
-    """Place a pending signature stamp and send OTP to user's email."""
+# ── Digital signature (DSC / USB token) ──────────────────────────────────────
+#
+# Step 1  POST /{file_id}/sign/prepare          the server prepares the PDF and
+#                                               returns the SHA-256 digest to sign
+#         (the browser sends the digest to the Capricorn signing application on
+#          the officer's PC; the token signs it after the PIN)
+# Step 2  POST /{file_id}/sign/{id}/complete    the server checks the signature
+#                                               and embeds it into the PDF
+#         POST /{file_id}/sign/{id}/cancel      drop a prepared document
+#
+# Authority is unchanged: only people with sign permission, only on a file that
+# has been forwarded to them (not on one they are still drafting).
+
+def _dsc_pending_dir() -> str:
+    """Prepared PDFs wait here, outside the public /uploads folder."""
+    path = os.path.join(os.path.dirname(os.path.abspath(settings.UPLOAD_DIR)), "dsc_pending")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def _drop_prepared(sig) -> None:
+    if sig.prepared_name:
+        try:
+            os.remove(os.path.join(_dsc_pending_dir(), sig.prepared_name))
+        except OSError:
+            pass
+        sig.prepared_name = None
+
+
+def _signature_out(sig, signer: Optional[User]) -> SignatureOut:
+    return SignatureOut(
+        id=sig.id, file_id=sig.file_id, user_id=sig.user_id,
+        signer_name=signer.full_name if signer and signer.full_name else "",
+        pos_x=sig.pos_x, pos_y=sig.pos_y, page_number=sig.page_number,
+        status=sig.status, method=sig.method, cert_cn=sig.cert_cn, cert_serial=sig.cert_serial,
+        cert_issuer=sig.cert_issuer, signed_at=sig.signed_at, verified_at=sig.verified_at,
+    )
+
+
+async def _assert_can_sign(db: AsyncSession, file_id: UUID, user: User) -> EfmsFile:
     if not getattr(user, "can_sign", False):
         raise HTTPException(status_code=403, detail="You do not have permission to sign documents.")
-
     f = await db.get(EfmsFile, file_id)
     if not f:
         raise HTTPException(status_code=404, detail="File not found.")
     if f.current_holder_id != user.id:
         raise HTTPException(status_code=403, detail="You can only sign a file that is currently forwarded to you.")
+    if f.status == FileStatus.draft:
+        raise HTTPException(status_code=403, detail="You cannot sign a file you are still drafting. A document can be signed once it has been forwarded to you.")
+    return f
 
+
+def _signed_display_name(original_name: str) -> str:
+    stem = os.path.splitext(original_name)[0]
+    if stem.endswith("_signed"):
+        stem = stem[: -len("_signed")]
+    return f"{stem}_signed.pdf"
+
+
+@router.post("/{file_id}/sign/prepare", response_model=dict, status_code=201)
+@logged_step("dsc.prepare")
+async def prepare_sign(
+    file_id: UUID,
+    body: SignPrepare,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_verified_user),
+):
+    """Step 1: add an empty signature box to the PDF and return its digest."""
     from app.models.efms_extra import FileSignature
+    from app.utils import dsc
+    from app.utils.doc_convert import convert_office_to_pdf, DocConversionUnavailable, DocConversionFailed
+    from starlette.concurrency import run_in_threadpool
 
-    existing = await db.execute(
-        select(FileSignature).where(FileSignature.file_id == file_id, FileSignature.user_id == user.id)
-    )
-    existing_sigs = existing.scalars().all()
-    if any(s.status == "verified" for s in existing_sigs):
-        raise HTTPException(status_code=400, detail="You have already signed this document.")
+    f = await _assert_can_sign(db, file_id, user)
+    attachments = (await db.execute(
+        select(FileAttachment).where(FileAttachment.file_id == file_id).order_by(FileAttachment.created_at)
+    )).scalars().all()
+    if not attachments:
+        raise HTTPException(status_code=400, detail="This file has no document to sign. Attach a PDF or Word document first.")
+    target = next((a for a in attachments if a.id == body.attachment_id), None) if body.attachment_id else attachments[0]
+    if target is None:
+        raise HTTPException(status_code=404, detail="That attachment does not belong to this file.")
 
-    # Drop any stale pending placements from this user before placing a new one
-    for s in existing_sigs:
-        if s.status == "pending":
-            await db.delete(s)
+    ext = (_get_ext(target.original_name) or _get_ext(target.stored_name)).lower()
+    if ext not in (".pdf", ".doc", ".docx"):
+        raise HTTPException(status_code=400, detail="Digital signing is available for PDF and Word documents.")
 
+    # Later signers sign the latest signed copy, so earlier signatures stay.
+    signed_name = _signed_display_name(target.original_name)
+    source = next((a for a in attachments if a.original_name == signed_name), None) or target
+    source_ext = (_get_ext(source.original_name) or _get_ext(source.stored_name)).lower()
+    upload_dir = os.path.abspath(settings.UPLOAD_DIR)
+    try:
+        async with aiofiles.open(os.path.join(upload_dir, source.stored_name), "rb") as fh:
+            content = await fh.read()
+    except OSError:
+        raise HTTPException(status_code=404, detail="The document file is missing on the server.")
+    if source_ext in (".doc", ".docx"):
+        try:
+            content = await run_in_threadpool(convert_office_to_pdf, content, source_ext)
+        except (DocConversionUnavailable, DocConversionFailed):
+            raise HTTPException(status_code=503, detail="This Word document could not be converted to PDF for signing.")
+    if not content.startswith(b"%PDF"):
+        raise HTTPException(status_code=400, detail="This document is not a valid PDF.")
+
+    page = body.page if body.page in ("first", "last") else int(body.page)
+    signer_label = f"{user.full_name}" + (f", {user.designation}" if getattr(user, "designation", None) else "")
+    try:
+        prepared = await run_in_threadpool(
+            dsc.prepare_pdf_for_dsc, content,
+            page=1 if page == "first" else page, pos_x_pct=body.pos_x, pos_y_pct=body.pos_y,
+            signer_label=signer_label, reason=f"Approved in eFMS — {f.ref_number}",
+        )
+    except dsc.DscError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    # One pending preparation per person per file.
+    old = (await db.execute(select(FileSignature).where(
+        FileSignature.file_id == file_id, FileSignature.user_id == user.id, FileSignature.status == "pending"))).scalars().all()
+    for s in old:
+        _drop_prepared(s)
+        await db.delete(s)
+
+    prepared_name = f"{_uuid.uuid4()}.pdf"
+    async with aiofiles.open(os.path.join(_dsc_pending_dir(), prepared_name), "wb") as out:
+        await out.write(prepared.pdf_bytes)
     sig = FileSignature(
-        file_id=file_id,
-        user_id=user.id,
-        pos_x=body.pos_x,
-        pos_y=body.pos_y,
-        page_number=body.page_number,
-        status="pending",
+        file_id=file_id, user_id=user.id, pos_x=body.pos_x, pos_y=body.pos_y,
+        page_number=1 if page == "first" else (0 if page == "last" else int(page)),
+        status="pending", method="dsc", attachment_id=target.id,
+        prepared_name=prepared_name, digest_hex=prepared.digest_hex,
+        reserved_start=prepared.reserved_start, reserved_end=prepared.reserved_end, field_name=prepared.field_name,
     )
     db.add(sig)
     await db.commit()
     await db.refresh(sig)
-
-    code = await create_otp(db, user.email, "email")
-    _send_otp_email(
-        user.email,
-        f"[AVFU eFMS] Signature OTP for {f.ref_number}",
-        f"Dear {user.full_name},\n\n"
-        f"You are signing file: {f.ref_number} — {f.subject}\n"
-        f"Signature position: Page {body.page_number}, X={body.pos_x:.1f}%, Y={body.pos_y:.1f}%\n\n"
-        f"Your verification OTP is:  {code}\n\n"
-        f"This OTP expires in 10 minutes. Do not share it with anyone.\n\nAVFU eFMS"
-    )
-    return {"signature_id": str(sig.id), "message": f"OTP sent to {user.email}"}
+    return {
+        "signature_id": str(sig.id),
+        "hash": prepared.digest_hex,
+        "txn": str(sig.id),
+        "document": target.original_name,
+        "expires_in_minutes": settings.DSC_PENDING_MINUTES,
+    }
 
 
-@router.post("/{file_id}/sign/{signature_id}/verify", response_model=SignatureOut)
-async def verify_sign(
+@router.post("/{file_id}/sign/{signature_id}/complete", response_model=SignatureOut)
+@logged_step("dsc.complete")
+async def complete_sign(
     file_id: UUID,
     signature_id: UUID,
-    body: SignVerify,
+    body: SignComplete,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_verified_user),
 ):
-    """Verify OTP and mark signature as verified (? → ✓)."""
-    from app.models.efms_extra import FileSignature
+    """Step 2: embed the token's signature into the prepared PDF."""
+    from app.models.efms_extra import FileSignature, FileRemark
+    from app.utils import dsc
+    from starlette.concurrency import run_in_threadpool
+
     sig = await db.get(FileSignature, signature_id)
     if not sig or sig.file_id != file_id:
         raise HTTPException(status_code=404, detail="Signature not found.")
     if sig.user_id != user.id:
         raise HTTPException(status_code=403, detail="This signature does not belong to you.")
-    if sig.status == "verified":
-        raise HTTPException(status_code=400, detail="Signature already verified.")
+    if sig.status != "pending" or sig.method != "dsc" or not sig.prepared_name:
+        raise HTTPException(status_code=400, detail="This signature is not waiting for the token.")
+    await _assert_can_sign(db, file_id, user)
+    age = datetime.now(timezone.utc) - (sig.created_at or datetime.now(timezone.utc))
+    if age > timedelta(minutes=settings.DSC_PENDING_MINUTES):
+        _drop_prepared(sig)
+        await db.delete(sig)
+        await db.commit()
+        raise HTTPException(status_code=400, detail=f"The signing request expired after {settings.DSC_PENDING_MINUTES} minutes. Please start again.")
 
-    ok = await verify_otp(db, user.email, "email", body.otp_code)
-    if not ok:
-        raise HTTPException(status_code=400, detail="Invalid or expired OTP. Please try again.")
+    try:
+        async with aiofiles.open(os.path.join(_dsc_pending_dir(), sig.prepared_name), "rb") as fh:
+            prepared_bytes = await fh.read()
+    except OSError:
+        await db.delete(sig)
+        await db.commit()
+        raise HTTPException(status_code=400, detail="The prepared document is no longer available. Please start again.")
+    prepared = dsc.PreparedPdf(
+        pdf_bytes=prepared_bytes, digest=bytes.fromhex(sig.digest_hex),
+        reserved_start=sig.reserved_start, reserved_end=sig.reserved_end, field_name=sig.field_name,
+    )
+    try:
+        cms = dsc.cms_from_b64(body.cms_b64)
+        signed_pdf, cert = await run_in_threadpool(dsc.embed_dsc_signature, prepared, cms)
+    except dsc.DscError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if (cert.expired or cert.not_yet_valid) and not settings.DSC_ALLOW_EXPIRED_CERT:
+        raise HTTPException(
+            status_code=400,
+            detail=(f"The certificate “{cert.common_name}” is "
+                    f"{'not valid yet' if cert.not_yet_valid else 'expired'} "
+                    f"(valid {cert.not_before:%d-%m-%Y} to {cert.not_after:%d-%m-%Y}). The document was not signed."),
+        )
 
-    sig.status = "verified"
-    sig.verified_at = datetime.now(timezone.utc)
+    # Save the signed copy next to the original (later signers sign this one).
+    source = await db.get(FileAttachment, sig.attachment_id) if sig.attachment_id else None
+    upload_dir = os.path.abspath(settings.UPLOAD_DIR)
+    base_name = source.original_name if source else "document.pdf"
+    signed_name = _signed_display_name(base_name)
+    new_stored = f"{_uuid.uuid4()}.pdf"
+    async with aiofiles.open(os.path.join(upload_dir, new_stored), "wb") as out:
+        await out.write(signed_pdf)
+    existing = (await db.execute(select(FileAttachment).where(
+        FileAttachment.file_id == file_id, FileAttachment.original_name == signed_name))).scalars().first()
+    if existing:
+        try:
+            os.remove(os.path.join(upload_dir, existing.stored_name))
+        except OSError:
+            pass
+        existing.stored_name, existing.file_size, existing.mime_type = new_stored, len(signed_pdf), "application/pdf"
+    else:
+        db.add(FileAttachment(file_id=file_id, original_name=signed_name, stored_name=new_stored,
+                              file_size=len(signed_pdf), mime_type="application/pdf", uploaded_by=user.id))
+
+    now = datetime.now(timezone.utc)
+    _drop_prepared(sig)
+    sig.status, sig.verified_at = "verified", now
+    sig.cert_cn, sig.cert_serial, sig.cert_issuer = cert.common_name[:255], cert.serial_hex[:80], cert.issuer[:500]
+    sig.cert_not_after, sig.cert_fingerprint = cert.not_after, cert.fingerprint_sha256
+    signer_label = user.full_name or user.email
+    db.add(FileRemark(
+        file_id=file_id, user_id=user.id,
+        remark=f"{base_name} digitally signed by {signer_label} (certificate: {cert.common_name}, serial {cert.serial_hex})",
+    ))
     await db.commit()
     await db.refresh(sig)
-
-    signer = await db.get(User, sig.user_id)
-    signer_label = signer.full_name if signer and signer.full_name else (signer.email if signer else user.email)
-
-    await _create_signed_copy_and_track(db, file_id, sig, signer_label, user)
-
-    return SignatureOut(
-        id=sig.id, file_id=sig.file_id, user_id=sig.user_id,
-        signer_name=signer.full_name if signer else "",
-        pos_x=sig.pos_x, pos_y=sig.pos_y, page_number=sig.page_number,
-        status=sig.status, signed_at=sig.signed_at, verified_at=sig.verified_at,
-    )
+    return _signature_out(sig, user)
 
 
-async def _create_signed_copy_and_track(db: AsyncSession, file_id: UUID, sig, signer_label: str, user: User) -> None:
-    """After a signature is OTP-verified: stamp a signed copy of the original
-    attachment, surface it under "Files attached", and record a tracking
-    entry so it shows up in the file's Track Status history.
+class SignClientLog(BaseModel):
+    stage: str = Field(..., max_length=40)          # e.g. "token", "network"
+    message: str = Field(..., max_length=2000)
+    signature_id: Optional[str] = Field(None, max_length=64)
+    service_url: Optional[str] = Field(None, max_length=200)
+    browser: Optional[str] = Field(None, max_length=300)
 
-    Legacy .doc sources are converted to .docx first — via the same
-    convert_doc_to_docx() used by the preview-docx endpoint, no second
-    conversion implementation — since generate_signed_copy only stamps
-    .pdf/.docx. The signed copy is then always saved with a real .docx
-    extension/MIME type, never as .doc. The original .doc attachment is only
-    ever opened for reading here; it is never written to, renamed, or removed.
 
-    The signature itself (sig.status is already "verified" by the time this
-    runs, committed in verify_sign before this is called) is a separate,
-    already-completed fact and is never rolled back here. What this function
-    must not do is claim a signed copy exists when one wasn't actually
-    produced — so the tracking remark reflects success or failure honestly,
-    and no signed-copy FileAttachment is created on failure."""
-    from app.models.efms_extra import FileRemark
-    from app.utils.signing import generate_signed_copy
-    from app.utils.doc_convert import convert_doc_to_docx, DocConversionUnavailable, DocConversionFailed
+@router.post("/{file_id}/sign/client-log", status_code=204)
+async def sign_client_log(file_id: UUID, body: SignClientLog, user: User = Depends(get_current_verified_user)):
+    """The officer's browser reports a problem it saw while talking to the local
+    signing application (not reachable, wrong PIN, token missing, …)."""
+    dsc_event(logging.ERROR, f"dsc.browser.{body.stage}", file=str(file_id), sig=body.signature_id,
+              user=str(user.id), name=user.full_name, message=body.message,
+              service=body.service_url, browser=body.browser)
 
-    att_result = await db.execute(
-        select(FileAttachment).where(FileAttachment.file_id == file_id).order_by(FileAttachment.created_at)
-    )
-    attachments = att_result.scalars().all()
-    source = attachments[0] if attachments else None
 
-    if source:
-        upload_dir = os.path.abspath(settings.UPLOAD_DIR)
-        src_path = os.path.join(upload_dir, source.stored_name)
-        ext = _get_ext(source.original_name) or _get_ext(source.stored_name)
-        base_name = os.path.splitext(source.original_name)[0]
-
-        # A .doc source is always signed as a converted .docx copy, so the
-        # signed artifact's extension/MIME must reflect what it actually is
-        # — never re-use the source's own .doc extension/MIME here.
-        is_legacy_doc = ext.lower() == ".doc"
-        stamp_ext = ".docx" if is_legacy_doc else ext
-        signed_mime = DOCX_MIME_TYPE if is_legacy_doc else source.mime_type
-        signed_display_name = f"{base_name}_signed{stamp_ext}"
-
-        signed_copy_created = False
-        try:
-            async with aiofiles.open(src_path, "rb") as fh:
-                content = await fh.read()
-
-            if is_legacy_doc:
-                content = convert_doc_to_docx(content)  # original .doc bytes on disk are never touched
-
-            signed_bytes = generate_signed_copy(
-                content, stamp_ext,
-                pos_x=sig.pos_x, pos_y=sig.pos_y, page_number=sig.page_number,
-                signer_name=signer_label, timestamp=sig.verified_at,
-            )
-
-            new_stored_name = f"{_uuid.uuid4()}{stamp_ext}"
-            dest = os.path.join(upload_dir, new_stored_name)
-            async with aiofiles.open(dest, "wb") as out:
-                await out.write(signed_bytes)
-
-            existing_signed = next((a for a in attachments if a.original_name == signed_display_name), None)
-            if existing_signed:
-                old_path = os.path.join(upload_dir, existing_signed.stored_name)
-                if os.path.exists(old_path):
-                    try:
-                        os.remove(old_path)
-                    except OSError:
-                        pass
-                existing_signed.stored_name = new_stored_name
-                existing_signed.file_size = len(signed_bytes)
-                existing_signed.mime_type = signed_mime
-            else:
-                db.add(FileAttachment(
-                    file_id=file_id,
-                    original_name=signed_display_name,
-                    stored_name=new_stored_name,
-                    file_size=len(signed_bytes),
-                    mime_type=signed_mime,
-                    uploaded_by=user.id,
-                ))
-            signed_copy_created = True
-        except (OSError, ValueError, DocConversionUnavailable, DocConversionFailed):
-            # Original missing, unsupported file type, or (for .doc) the
-            # conversion tool being unavailable/failing — no signed-copy
-            # attachment is created; the original source is left untouched
-            # either way, since nothing above wrote to src_path.
-            signed_copy_created = False
-
-        if signed_copy_created:
-            db.add(FileRemark(
-                file_id=file_id,
-                user_id=user.id,
-                remark=f"{source.original_name} signed by {signer_label}",
-            ))
-        else:
-            # Never claim a signed copy exists when it doesn't — the
-            # signature itself is still verified, but that fact must be
-            # visible in the remark instead of being indistinguishable from
-            # a real signed-copy success.
-            db.add(FileRemark(
-                file_id=file_id,
-                user_id=user.id,
-                remark=f"{source.original_name}: signature verified by {signer_label}, but a signed copy could not be generated.",
-            ))
-        await db.commit()
+@router.post("/{file_id}/sign/{signature_id}/cancel", status_code=204)
+@logged_step("dsc.cancel")
+async def cancel_sign(
+    file_id: UUID,
+    signature_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_verified_user),
+):
+    """Drop a prepared document the officer did not (or could not) sign."""
+    from app.models.efms_extra import FileSignature
+    sig = await db.get(FileSignature, signature_id)
+    if not sig or sig.file_id != file_id or sig.user_id != user.id or sig.status != "pending":
+        return
+    _drop_prepared(sig)
+    await db.delete(sig)
+    await db.commit()
 
 
 # ── Dispatch ──────────────────────────────────────────────────────────────────

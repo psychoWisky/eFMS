@@ -40,6 +40,13 @@ class Settings(BaseSettings):
     UPLOAD_DIR: str = "./uploads"
     ALLOWED_EXTENSIONS: str = "pdf,doc,docx,xls,xlsx,csv,jpg,jpeg,png"
 
+    # Digital signatures (DSC / USB token)
+    # A prepared document waits this long for the token's signature.
+    DSC_PENDING_MINUTES: int = 10
+    # A signature made with an expired (or not-yet-valid) certificate is
+    # refused. Set true ONLY for testing with an expired test certificate.
+    DSC_ALLOW_EXPIRED_CERT: bool = False
+
     @property
     def allowed_extensions_list(self) -> List[str]:
         return [e.strip() for e in self.ALLOWED_EXTENSIONS.split(",")]

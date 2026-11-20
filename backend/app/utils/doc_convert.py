@@ -94,6 +94,14 @@ def _run_soffice_convert(content: bytes, src_filename: str, target_format: str, 
             return f.read()
 
 
+def convert_office_to_pdf(content: bytes, ext: str) -> bytes:
+    """A Word document (.doc / .docx) as PDF, so it can be signed."""
+    ext = ext.lower().lstrip(".")
+    if ext not in ("doc", "docx"):
+        raise DocConversionFailed("Only Word documents can be converted to PDF.")
+    return _run_soffice_convert(content, f"input.{ext}", "pdf", "pdf")
+
+
 def convert_doc_to_docx(content: bytes) -> bytes:
     return _run_soffice_convert(content, "input.doc", "docx", "docx")
 
