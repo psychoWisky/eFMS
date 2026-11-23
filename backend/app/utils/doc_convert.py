@@ -76,11 +76,20 @@ def _run_soffice_convert(content: bytes, src_filename: str, target_format: str, 
         lo_profile = os.path.join(tmp_dir, "lo-profile")
         profile_uri = Path(lo_profile).absolute().as_uri()
 
+        # The soffice launcher is a shell script that calls dirname, sed, grep,
+        # uname… A service manager (systemd, supervisor, a container) can start
+        # this process with an empty PATH, and then it fails with "dirname: not
+        # found". Give it the standard system directories, and a writable HOME.
+        env = dict(os.environ)
+        std_path = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+        env["PATH"] = f"{env['PATH']}:{std_path}" if env.get("PATH") else std_path
+        env.setdefault("HOME", tmp_dir)
+
         try:
             result = subprocess.run(
                 [soffice, "--headless", "--norestore", f"-env:UserInstallation={profile_uri}",
                  "--convert-to", target_format, "--outdir", tmp_dir, src_path],
-                capture_output=True, timeout=60,
+                capture_output=True, timeout=60, env=env,
             )
         except subprocess.TimeoutExpired as exc:
             raise DocConversionFailed("Conversion timed out.") from exc
