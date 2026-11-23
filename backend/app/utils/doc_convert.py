@@ -33,7 +33,8 @@ class DocConversionFailed(Exception):
     """The conversion tool ran but did not produce usable output."""
 
 
-_FALLBACK_SOFFICE_PATHS = ("/usr/bin/soffice", "/usr/bin/libreoffice")
+_FALLBACK_SOFFICE_PATHS = ("/usr/bin/soffice", "/usr/bin/libreoffice", "/usr/local/bin/soffice",
+                           "/opt/libreoffice/program/soffice", "/Applications/LibreOffice.app/Contents/MacOS/soffice")
 
 
 def _find_soffice() -> str:

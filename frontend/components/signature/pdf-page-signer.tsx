@@ -9,8 +9,8 @@ import { Loader2, X } from "lucide-react";
 export interface PlacedSignature { page: number; pos_x: number; pos_y: number }
 
 // Keep in step with BOX_WIDTH_PT / BOX_HEIGHT_PT in backend/app/utils/dsc.py.
-const BOX_W_PT = 200;
-const BOX_H_PT = 62;
+const BOX_W_PT = 150;
+const BOX_H_PT = 36;
 
 interface PageInfo { w: number; h: number } // size in PDF points
 

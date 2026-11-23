@@ -23,7 +23,7 @@ import concurrent.futures
 import hashlib
 import io
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from asn1crypto import cms as asn1_cms
@@ -42,8 +42,8 @@ from pyhanko_certvalidator.registry import SimpleCertificateStore
 # grows by twice this).
 CMS_RESERVED_BYTES = 16 * 1024
 
-BOX_WIDTH_PT = 200.0
-BOX_HEIGHT_PT = 62.0
+BOX_WIDTH_PT = 150.0
+BOX_HEIGHT_PT = 36.0
 
 
 class DscError(ValueError):
@@ -80,6 +80,15 @@ class CertInfo:
     @property
     def not_yet_valid(self) -> bool:
         return datetime.now(timezone.utc) < self.not_before
+
+
+_IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def _fit(text: str, limit: int = 38) -> str:
+    """Keep a stamp line inside the box (the box is 200 pt wide)."""
+    text = " ".join((text or "").split())
+    return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
 def _next_field_name(reader: PdfFileReader) -> str:
@@ -138,7 +147,7 @@ def prepare_pdf_for_dsc(
         subfilter=fields.SigSeedSubFilter.PADES,
     )
     style = TextStampStyle(
-        stamp_text="Digitally signed by\n%(who)s\nDate: %(date)s\n%(reason)s",
+        stamp_text="Digitally Signed",
         text_box_style=text.TextBoxStyle(font_size=8),
         border_width=1,
     )
@@ -152,7 +161,6 @@ def prepare_pdf_for_dsc(
     async def _go():
         return await pdf_signer.async_digest_doc_for_signing(
             w, bytes_reserved=CMS_RESERVED_BYTES * 2,
-            appearance_text_params={"who": signer_label, "date": when.astimezone().strftime("%d-%m-%Y %H:%M %Z"), "reason": reason},
         )
     try:
         prepared, _tbs, out = _run(_go)

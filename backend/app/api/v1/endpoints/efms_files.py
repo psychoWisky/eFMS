@@ -2699,8 +2699,12 @@ async def _signing_source_pdf(attachments, target) -> bytes:
     if source_ext in (".doc", ".docx"):
         try:
             content = await run_in_threadpool(convert_office_to_pdf, content, source_ext)
-        except (DocConversionUnavailable, DocConversionFailed):
-            raise HTTPException(status_code=503, detail="This Word document could not be converted to PDF for signing.")
+        except DocConversionUnavailable as exc:
+            dsc_event(logging.ERROR, "dsc.convert.unavailable", document=source.original_name, error=str(exc))
+            raise HTTPException(status_code=503, detail="Word documents cannot be signed on this server yet: LibreOffice is not installed (ask your administrator to install it), or sign a PDF instead.")
+        except DocConversionFailed as exc:
+            dsc_event(logging.ERROR, "dsc.convert.failed", document=source.original_name, error=str(exc)[:500])
+            raise HTTPException(status_code=503, detail="This Word document could not be converted to PDF (it may be damaged or password-protected). Try saving it as a PDF and uploading that.")
     if not content.startswith(b"%PDF"):
         raise HTTPException(status_code=400, detail="This document is not a valid PDF.")
     return content
@@ -2752,7 +2756,7 @@ async def prepare_sign(
     content = await _signing_source_pdf(attachments, target)
 
     page = body.page if body.page in ("first", "last") else int(body.page)
-    signer_label = f"{user.full_name}" + (f", {user.designation}" if getattr(user, "designation", None) else "")
+    signer_label = user.full_name or user.email
     try:
         prepared = await run_in_threadpool(
             dsc.prepare_pdf_for_dsc, content,

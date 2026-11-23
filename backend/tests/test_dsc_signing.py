@@ -199,7 +199,7 @@ async def test_dsc_log_gets_refusals_and_browser_errors(client, users, db):
         assert r.status_code == 204
         for h in __import__("logging").getLogger("efms.dsc").handlers:
             h.flush()
-        text = open(path, encoding="utf-8").read()[before:]
+        text = open(path, "rb").read()[before:].decode("utf-8", "replace")
         assert "dsc.prepare.refused" in text and "dsc.browser.token" in text and "could not reach" in text
     finally:
         await _cleanup(db, fid)
