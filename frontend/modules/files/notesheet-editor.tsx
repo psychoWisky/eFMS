@@ -143,7 +143,6 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
   const [pendingStamp, setPendingStamp] = useState<{ page: number; pos_x: number; pos_y: number } | null>(null);
   // Signing with the DSC token: which step we are on ("" = idle).
   const [signStep, setSignStep] = useState<"" | "preparing" | "token" | "saving">("");
-  const [signUploading, setSignUploading] = useState(false);
   const [actionType] = useState<"forward">("forward");
   const [downloadingNotesheet, setDownloadingNotesheet] = useState(false);
   const [selectedPdf, setSelectedPdf] = useState<Attachment | null>(null);
@@ -845,28 +844,6 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
     })();
     return () => { cancelled = true; };
   }, [fileId, signOrigId, signViewKey]);
-
-  // The signer can add their own document and sign it.
-  async function uploadToSign(files: FileList | null) {
-    const f = files?.[0];
-    if (!f || signUploading) return;
-    if (!/\.(pdf|docx?)$/i.test(f.name)) { toast.error("Please choose a PDF or Word document."); return; }
-    setSignUploading(true);
-    try {
-      const form = new FormData();
-      form.append("upload", f, `Signing-${f.name}`);
-      const res = await api.post(`/efms/files/${fileId}/attachments`, form, { headers: { "Content-Type": "multipart/form-data" } });
-      await qc.invalidateQueries({ queryKey: ["efms-file", fileId] });
-      const newId = (res.data as { id?: string })?.id;
-      if (newId) setSelectedPdf({ ...(res.data as Attachment) });
-      setPendingStamp(null);
-      toast.success("Document added. Choose where to sign.");
-    } catch (err) {
-      toast.error(apiErrorDetail(err) ?? "Could not upload this document.");
-    } finally {
-      setSignUploading(false);
-    }
-  }
 
   // Sign the selected document with the officer's DSC (USB token):
   // server prepares the PDF -> token signs the hash -> server embeds the signature.
@@ -1908,6 +1885,18 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
             </div>
           )}
 
+          {/* Sign bar — stays on screen while scrolling through the pages */}
+          {activeTab === "sign" && pendingStamp && (
+            <div className="fixed bottom-5 left-1/2 -translate-x-1/2 z-40 flex items-center gap-3 bg-white border border-emerald-200 shadow-xl rounded-2xl px-4 py-3">
+              <span className="text-sm text-gray-600">Signature on <b>page {pendingStamp.page}</b></span>
+              <button onClick={signWithDsc} disabled={!!signStep}
+                        className="flex items-center gap-2 px-4 py-2 bg-emerald-600 text-white rounded-xl text-sm font-semibold hover:bg-emerald-700 disabled:opacity-70">
+                        {signStep ? <Loader2 size={14} className="animate-spin" /> : <PenLine size={14} />}
+                        {signStep === "preparing" ? "Preparing document…" : signStep === "token" ? "Enter PIN on your token…" : signStep === "saving" ? "Adding signature…" : "Sign with DSC"}
+                      </button>
+            </div>
+          )}
+
           {/* ── SIGN DOCUMENT TAB ── */}
           {activeTab === "sign" && (
             <div className="w-full p-[15px] space-y-5">
@@ -1921,16 +1910,6 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                       Scroll to the page you want and click where the signature box should go (it is placed exactly there), then sign with your DSC (USB token).
                     </p>
                   </div>
-                  {pendingStamp && (
-                    <div className="flex items-center gap-2">
-                      <span className="text-xs text-gray-500">Page {pendingStamp.page}</span>
-                      <button onClick={signWithDsc} disabled={!!signStep}
-                        className="flex items-center gap-2 px-4 py-2 bg-emerald-600 text-white rounded-xl text-sm font-semibold hover:bg-emerald-700 disabled:opacity-70">
-                        {signStep ? <Loader2 size={14} className="animate-spin" /> : <PenLine size={14} />}
-                        {signStep === "preparing" ? "Preparing document…" : signStep === "token" ? "Enter PIN on your token…" : signStep === "saving" ? "Adding signature…" : "Sign with DSC"}
-                      </button>
-                    </div>
-                  )}
                 </div>
 
                 {/* Which document to sign */}
@@ -1952,11 +1931,6 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                           </button>
                         );
                       })}
-                      <label className={cn("flex items-center gap-2 px-3 py-2 rounded-xl border border-dashed border-gray-300 text-sm text-gray-600 hover:bg-gray-50 cursor-pointer", (signUploading || !!signStep) && "opacity-60 pointer-events-none")}>
-                        {signUploading ? <Loader2 size={14} className="animate-spin" /> : <Upload size={14} />}
-                        Upload a document to sign
-                        <input type="file" accept=".pdf,.doc,.docx" className="hidden" onChange={(e) => { uploadToSign(e.target.files); e.target.value = ""; }} />
-                      </label>
                     </div>
                   </div>
                 )}
