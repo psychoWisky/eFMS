@@ -27,6 +27,7 @@ class RefreshRequest(BaseModel):
 class HeldRoleBrief(BaseModel):
     id: str
     role: str
+    can_sign: bool = False
     designation: Optional[str] = None
     department_id: Optional[str] = None
     department_name: Optional[str] = None

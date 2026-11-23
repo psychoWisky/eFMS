@@ -453,6 +453,8 @@ async def edit_project_profile(
         profile.establishment_id = body.establishment_id
     if body.can_sign is not None:
         profile.can_sign = body.can_sign
+        from app.models.user import UserRole
+        await db.execute(update(UserRole).where(UserRole.user_id == profile.id).values(can_sign=body.can_sign))
     if body.role is not None and body.role != profile.active_role:
         # Same catalog validation the admin user-edit path uses. A PI
         # profile can never be SUPER_ADMIN (it is a workflow identity, not

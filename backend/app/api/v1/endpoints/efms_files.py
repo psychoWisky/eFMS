@@ -2656,8 +2656,9 @@ def _signature_out(sig, signer: Optional[User]) -> SignatureOut:
 
 
 async def _assert_can_sign(db: AsyncSession, file_id: UUID, user: User) -> EfmsFile:
-    if not getattr(user, "can_sign", False):
-        raise HTTPException(status_code=403, detail="You do not have permission to sign documents.")
+    from app.utils.signing import user_can_sign_now
+    if not await user_can_sign_now(db, user):
+        raise HTTPException(status_code=403, detail="You do not have permission to sign documents in your current role.")
     f = await db.get(EfmsFile, file_id)
     if not f:
         raise HTTPException(status_code=404, detail="File not found.")

@@ -218,8 +218,10 @@ def embed_dsc_signature(prepared: PreparedPdf, cms_der: bytes) -> tuple[bytes, C
             if a["type"].native == "message_digest":
                 md = bytes(a["values"][0].native)
     if md is None:
+        _diag("no_message_digest", signed=signed, expected=prepared.digest, got=None)
         raise DscError("The signature does not carry a message digest.")
     if md != prepared.digest:
+        _diag("digest_mismatch", signed=signed, expected=prepared.digest, got=md)
         raise DscError("The signature is for a different document digest — nothing was signed. Please try again.")
 
     pdf_prep = PreparedByteRangeDigest(
@@ -249,6 +251,30 @@ def embed_dsc_signature(prepared: PreparedPdf, cms_der: bytes) -> tuple[bytes, C
     if not (status.intact and status.valid):
         raise DscError("The signature does not verify against the document. Please try again.")
     return signed_pdf, _cert_info(status.signing_cert)
+
+
+def _diag(kind: str, *, signed, expected: bytes, got: Optional[bytes]) -> None:
+    """Write what the signing service actually returned to the DSC log, so a
+    mismatch can be understood (no document content, no keys)."""
+    try:
+        import logging
+        from app.utils.dsc_log import dsc_event
+        si = signed["signer_infos"][0]
+        dsc_event(
+            logging.ERROR, f"dsc.diag.{kind}",
+            expected_digest=expected.hex().upper(), returned_digest=got.hex().upper() if got else None,
+            expected_len=len(expected), returned_len=len(got) if got else None,
+            sha256_of_digest_bytes=hashlib.sha256(expected).hexdigest().upper(),
+            sha256_of_hex_text=hashlib.sha256(expected.hex().upper().encode()).hexdigest().upper(),
+            sha256_of_hex_text_lower=hashlib.sha256(expected.hex().encode()).hexdigest().upper(),
+            has_signed_attrs=bool(si["signed_attrs"].native) if si["signed_attrs"] else False,
+            digest_alg=si["digest_algorithm"]["algorithm"].native,
+            sig_alg=si["signature_algorithm"]["algorithm"].native,
+            encap_content_present=signed["encap_content_info"]["content"].native is not None,
+            cms_certs=len(signed["certificates"]) if signed["certificates"] else 0,
+        )
+    except Exception:  # noqa: BLE001 - diagnostics must never break signing
+        pass
 
 
 def _cert_info(cert) -> CertInfo:

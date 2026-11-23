@@ -21,7 +21,9 @@ import { SearchableSelect } from "@/components/shared/searchable-select";
 interface Item { id: string; name: string; is_active: boolean; label?: string; designation?: string; email?: string; user_id?: string; code?: string; establishment_id?: string; }
 interface Establishment { id: string; name: string; code: string | null; is_active: boolean; }
 interface Department { id: string; name: string; code: string | null; establishment_id: string | null; is_active: boolean; }
-interface SignUser { id: string; email: string; full_name: string; designation: string | null; active_role: string | null; can_sign: boolean; }
+// One row = one post (a role of a person, with its place and designation).
+interface SignUser { id: string; user_id: string; email: string; full_name: string; role: string; role_label: string; establishment_name: string | null; department_name: string | null; designation: string | null; can_sign: boolean; }
+const signPostLine = (u: SignUser) => [u.role_label, u.designation, u.establishment_name, u.department_name].filter(Boolean).join(" · ");
 interface AdminUser { id: string; email: string; full_name: string; active_role: string | null; designation: string | null; }
 
 type Tab = "users" | "roles" | "projects" | "establishments" | "departments" | "categories" | "priorities" | "signatures" | "multi" | "foc";
@@ -140,7 +142,7 @@ export function AdminPanel() {
   const { data: categories = [] } = useQuery<Item[]>({ queryKey: ["admin-categories"], queryFn: async () => (await api.get("/admin/categories")).data });
   const { data: priorities = [] } = useQuery<Item[]>({ queryKey: ["admin-priorities"], queryFn: async () => (await api.get("/admin/priorities")).data });
   const { data: signUsers = [] } = useQuery<SignUser[]>({ queryKey: ["sign-permissions"], queryFn: async () => (await api.get("/admin/sign-permissions")).data });
-  const { data: adminUsers = [] } = useQuery<AdminUser[]>({ queryKey: ["admin-users"], queryFn: async () => (await api.get("/admin/users")).data });
+  const { data: signCandidates = [] } = useQuery<SignUser[]>({ queryKey: ["sign-permissions", "candidates"], queryFn: async () => (await api.get("/admin/sign-permissions/candidates")).data, enabled: tab === "signatures" });
 
   async function act(keys: string | string[], fn: () => Promise<unknown>) {
     try {
@@ -346,27 +348,25 @@ export function AdminPanel() {
           {/* Grant permission */}
           <div className="bg-gray-50 rounded-xl border border-gray-200 p-4">
             <p className="text-sm font-semibold text-gray-700 mb-1">Grant Signature Permission</p>
-            <p className="text-xs text-gray-500 mb-3">Select any user to allow them to digitally sign documents forwarded to them.</p>
+            <p className="text-xs text-gray-500 mb-3">Choose the person <b>and the role</b> that may sign. Permission is given per role — a person who holds several roles signs only in the roles chosen here.</p>
             <div className="flex gap-3 items-end">
               <div className="flex-1">
-                <label className={LABEL}>Select User *</label>
+                <label className={LABEL}>Select person and role *</label>
                 <SearchableSelect
-                  options={adminUsers
-                    .filter((u) => !signUsers.some((s) => s.id === u.id))
-                    .map((u) => ({
-                      value: u.id,
-                      label: `${u.full_name} — ${u.designation ?? u.active_role ?? "No role"} · ${u.email}`,
-                    }))}
+                  options={signCandidates.map((u) => ({
+                    value: u.id,
+                    label: `${u.full_name} — ${signPostLine(u)} · ${u.email}`,
+                  }))}
                   value={signGrantUserId}
                   onChange={setSignGrantUserId}
                   clearable={false}
-                  placeholder="Choose a user…"
+                  placeholder="Choose a person and role…"
                   searchPlaceholder="Search by name, role or email…"
                 />
               </div>
               <button
                 onClick={() => act("sign-permissions", async () => {
-                  await api.patch(`/admin/users/${signGrantUserId}/sign-permission`, { can_sign: true });
+                  await api.patch(`/admin/user-roles/${signGrantUserId}/sign-permission`, { can_sign: true });
                   setSignGrantUserId("");
                 })}
                 disabled={!signGrantUserId}
@@ -396,19 +396,20 @@ export function AdminPanel() {
                       <span className="text-sm font-semibold text-gray-900">{u.full_name}</span>
                       <span className="px-2 py-0.5 bg-emerald-100 text-emerald-700 rounded-full text-xs font-semibold">Can Sign</span>
                     </div>
-                    <p className="text-xs text-gray-500 mt-0.5">{u.email} · {u.designation ?? "—"} · {u.active_role?.replace(/_/g, " ") ?? "—"}</p>
+                    <p className="text-xs text-gray-500 mt-0.5">{u.email}</p>
+                    <p className="text-xs text-gray-700 mt-0.5 font-medium">{signPostLine(u)}</p>
                   </div>
                   <button
                     onClick={async () => {
                       const confirmed = await confirmAction({
                         title: "Revoke signature permission?",
-                        text: `${u.full_name} will no longer be able to digitally sign documents.`,
+                        text: `${u.full_name} will no longer be able to digitally sign documents when working as ${signPostLine(u)}.`,
                         confirmText: "Revoke",
                         danger: true,
                       });
                       if (confirmed) {
                         act("sign-permissions", () =>
-                          api.patch(`/admin/users/${u.id}/sign-permission`, { can_sign: false })
+                          api.patch(`/admin/user-roles/${u.id}/sign-permission`, { can_sign: false })
                         );
                       }
                     }}

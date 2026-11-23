@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { api, FILES_BASE_URL, API_URL } from "@/services/api";
+import { api, API_URL } from "@/services/api";
 import { toast } from "sonner";
 import { confirmAction, showSuccess, escapeHtml, apiErrorDetail } from "@/lib/alert";
 import { useUser, useActiveRole } from "@/stores/auth.store";
@@ -143,7 +143,8 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
   const [pendingStamp, setPendingStamp] = useState<{ pos_x: number; pos_y: number } | null>(null);
   // Signing with the DSC token: which step we are on ("" = idle).
   const [signStep, setSignStep] = useState<"" | "preparing" | "token" | "saving">("");
-  const [signPage, setSignPage] = useState<"first" | "last">("first");
+  const [signPageSel, setSignPageSel] = useState<"first" | "last" | "n">("first");
+  const [signPageNo, setSignPageNo] = useState(1);
   const [actionType] = useState<"forward">("forward");
   const [downloadingNotesheet, setDownloadingNotesheet] = useState(false);
   const [selectedPdf, setSelectedPdf] = useState<Attachment | null>(null);
@@ -800,16 +801,57 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
     if (file?.attachments.length && !selectedPdf) setSelectedPdf(file.attachments[0]);
   }, [file]);
 
+  // The Sign tab shows the document through the logged-in "view" endpoint
+  // (as a blob), not the open /uploads address, so it works wherever the API
+  // is reachable and respects the same access checks as the preview.
+  // Documents that can be signed (PDF / Word). The "_signed" copies are not
+  // listed: signing a document always continues from its latest signed copy.
+  const signedNameOf = (name: string) => `${name.replace(/\.[^.]+$/, "").replace(/_signed$/, "")}_signed.pdf`;
+  const signables = (file?.attachments ?? []).filter((a) => {
+    const ext = getFileExtension(a.original_name);
+    return ["pdf", "doc", "docx"].includes(ext) && !/_signed\.pdf$/i.test(a.original_name);
+  });
+  const signOriginal = signables.find((a) => a.id === selectedPdf?.id) ?? signables[0] ?? null;
+  // What is shown on screen: the latest signed copy if there is one, so the
+  // next signer sees the earlier signatures.
+  const signAttachment = signOriginal
+    ? (file?.attachments.find((a) => a.original_name === signedNameOf(signOriginal.original_name)) ?? signOriginal)
+    : null;
+  const [signDocUrl, setSignDocUrl] = useState<string | null>(null);
+  const [signDocError, setSignDocError] = useState<string | null>(null);
+  const signAttId = signAttachment?.id;
+  const signAttStored = signAttachment?.stored_name;
+  useEffect(() => {
+    if (!signAttId) return;
+    let cancelled = false;
+    let objectUrl: string | null = null;
+    (async () => {
+      try {
+        const res = await api.get(`/efms/files/${fileId}/attachments/${signAttId}/view`, { responseType: "blob" });
+        if (cancelled) return;
+        objectUrl = URL.createObjectURL(res.data as Blob);
+        setSignDocUrl(objectUrl);
+        setSignDocError(null);
+      } catch (err) {
+        if (cancelled) return;
+        setSignDocUrl(null);
+        setSignDocError(`The document could not be loaded (${(err as { response?: { status?: number } })?.response?.status ?? "network error"}).`);
+      }
+    })();
+    return () => { cancelled = true; if (objectUrl) URL.revokeObjectURL(objectUrl); };
+  }, [fileId, signAttId, signAttStored]);
+
   // Sign the selected document with the officer's DSC (USB token):
   // server prepares the PDF -> token signs the hash -> server embeds the signature.
   const signWithDsc = async () => {
-    const target = selectedPdf ?? file?.attachments[0];
+    const target = signOriginal;
     if (!pendingStamp || !target || signStep) return;
+    const page = signPageSel === "n" ? Math.max(1, Math.floor(signPageNo) || 1) : signPageSel;
     let sigId: string | null = null;
     try {
       setSignStep("preparing");
       const prep = await api.post(`/efms/files/${fileId}/sign/prepare`, {
-        attachment_id: target.id, pos_x: pendingStamp.pos_x, pos_y: pendingStamp.pos_y, page: signPage,
+        attachment_id: target.id, pos_x: pendingStamp.pos_x, pos_y: pendingStamp.pos_y, page,
       });
       sigId = prep.data.signature_id;
       setSignStep("token");
@@ -1854,11 +1896,16 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                   </div>
                   {pendingStamp && (
                     <div className="flex items-center gap-2">
-                      <select value={signPage} onChange={(e) => setSignPage(e.target.value as "first" | "last")} disabled={!!signStep}
+                      <select value={signPageSel} onChange={(e) => setSignPageSel(e.target.value as "first" | "last" | "n")} disabled={!!signStep}
                         className="border border-gray-300 rounded-lg px-2 py-2 text-sm bg-white" title="Which page gets the signature box">
                         <option value="first">First page</option>
                         <option value="last">Last page</option>
+                        <option value="n">Page number…</option>
                       </select>
+                      {signPageSel === "n" && (
+                        <input type="number" min={1} value={signPageNo} onChange={(e) => setSignPageNo(Number(e.target.value))} disabled={!!signStep}
+                          className="w-16 border border-gray-300 rounded-lg px-2 py-2 text-sm" aria-label="Page number" />
+                      )}
                       <button onClick={signWithDsc} disabled={!!signStep}
                         className="flex items-center gap-2 px-4 py-2 bg-emerald-600 text-white rounded-xl text-sm font-semibold hover:bg-emerald-700 disabled:opacity-70">
                         {signStep ? <Loader2 size={14} className="animate-spin" /> : <PenLine size={14} />}
@@ -1867,6 +1914,29 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                     </div>
                   )}
                 </div>
+
+                {/* Which document to sign */}
+                {signables.length > 1 && (
+                  <div className="px-6 pt-4">
+                    <p className="text-sm font-semibold text-gray-700 mb-2">Choose the document to sign</p>
+                    <div className="flex flex-wrap gap-2">
+                      {signables.map((a) => {
+                        const active = a.id === signOriginal?.id;
+                        const hasSigned = file.attachments.some((x) => x.original_name === signedNameOf(a.original_name));
+                        return (
+                          <button key={a.id} type="button" disabled={!!signStep}
+                            onClick={() => { setSelectedPdf(a); setPendingStamp(null); }}
+                            className={cn("flex items-center gap-2 px-3 py-2 rounded-xl border text-sm text-left disabled:opacity-60",
+                              active ? "border-emerald-500 bg-emerald-50 text-emerald-800 font-semibold" : "border-gray-200 bg-white text-gray-700 hover:bg-gray-50")}>
+                            <FileText size={14} className="shrink-0" />
+                            <span className="truncate max-w-[16rem]">{a.original_name}</span>
+                            {hasSigned && <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-emerald-100 text-emerald-700 font-semibold shrink-0">already signed</span>}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
 
                 {/* Document canvas with overlay */}
                 <div className="p-4">
@@ -1878,7 +1948,7 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                     // or become the signing target. Reuses the same classification
                     // (getAttachmentPreviewKind) as the attachment list and preview
                     // modal instead of a separate file-type check.
-                    const signCandidate = selectedPdf ?? file.attachments[0];
+                    const signCandidate = signAttachment;
 
                     if (!signCandidate) {
                       return (
@@ -1906,9 +1976,15 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                     // preview-docx conversion instead of the raw stored file — same
                     // conversion workflow the Attachment Preview modal uses.
                     const isLegacyDoc = getFileExtension(signTarget.original_name) === "doc";
+                    if (signDocError) {
+                      return <div className="text-center py-16 text-red-500 text-sm">{signDocError}</div>;
+                    }
+                    if (!signDocUrl) {
+                      return <div className="flex items-center justify-center py-16 gap-2 text-gray-400"><Loader2 size={18} className="animate-spin" /> Loading document…</div>;
+                    }
                     return (
                       <PdfSignatureCanvas
-                        fileUrl={`${FILES_BASE_URL}/uploads/${signTarget.stored_name}`}
+                        fileUrl={signDocUrl ?? ""}
                         mimeType={signTarget.mime_type}
                         docPreviewUrl={isLegacyDoc ? `${API_URL}/efms/files/${fileId}/attachments/${signTarget.id}/preview-docx` : undefined}
                         existingSignatures={(file.signatures ?? []).map((s) => ({ ...s, status: s.status as "pending" | "verified", verified_at: s.verified_at ?? undefined }))}

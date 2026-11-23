@@ -238,6 +238,8 @@ class UserRole(Base, UUIDMixin, TimestampMixin):
     # Optional designation for this role (e.g. "Head of Department" for a
     # Professor's extra HoD role). NULL = use the person's own designation.
     designation = Column(String(100), nullable=True)
+    # May sign documents digitally when working in this post.
+    can_sign = Column(Boolean, default=False, nullable=False, server_default="false")
 
     user = relationship("User", back_populates="roles")
     department = relationship("Department", foreign_keys=[department_id])

@@ -129,6 +129,9 @@ def _parse_dob(s: Optional[str]) -> Optional[date]:
 
 # ── Helpers shared by login steps ────────────────────────────────────────────
 
+from app.utils.signing import post_can_sign
+
+
 def build_user_brief(user: User) -> UserBrief:
     # Only surface project fields when the relationship is already loaded on
     # this instance (the my-profiles query eager-loads it). Touching
@@ -145,6 +148,7 @@ def build_user_brief(user: User) -> UserBrief:
         held_roles.append(HeldRoleBrief(
             id=str(r.id),
             role=r.role,
+            can_sign=bool(r.can_sign),
             designation=r.designation,
             department_id=str(r.department_id) if r.department_id else None,
             department_name=r_dept.name if r_dept else (dept.name if dept and str(user.department_id) == str(r.department_id) else None),
@@ -162,7 +166,7 @@ def build_user_brief(user: User) -> UserBrief:
         must_change_password=user.must_change_password,
         profile_photo_url=user.profile_photo_url,
         roles=[r.role for r in user.roles],
-        can_sign=user.can_sign,
+        can_sign=post_can_sign(user, getattr(user, "roles", [])) if getattr(user, "roles", None) else False,
         is_active=user.is_active,
         is_retired=user.is_retired,
         retired_at=user.retired_at.isoformat() if user.retired_at else None,

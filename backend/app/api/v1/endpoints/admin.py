@@ -1047,46 +1047,73 @@ async def remove_departments(body: DeptRemoveIn, db: AsyncSession = Depends(get_
 class SignPermissionIn(BaseModel):
     can_sign: bool
 
-class SignPermissionUserOut(BaseModel):
-    id: UUID
-    email: str
-    full_name: str
-    designation: Optional[str]
-    active_role: Optional[str]
-    can_sign: bool
-    model_config = {"from_attributes": True}
 
-    @classmethod
-    def from_user(cls, u: User) -> "SignPermissionUserOut":
-        return cls(
-            id=u.id, email=u.email, full_name=u.full_name,
-            designation=getattr(u, "designation", None),
-            active_role=u.active_role,
-            can_sign=bool(getattr(u, "can_sign", False)),
-        )
+def _sign_post_out(u: User, ur: UserRole) -> dict:
+    from app.api.v1.endpoints.auth import _pretty_role_name
+    from app.utils.posts import effective_designation
+    estb, dept = role_context_of(u, ur)
+    return {
+        "id": str(ur.id), "user_id": str(u.id), "full_name": u.full_name, "email": u.email,
+        "role": ur.role, "role_label": _pretty_role_name(ur.role),
+        "establishment_name": ur.establishment.name if ur.establishment else (u.establishment.name if u.establishment and u.establishment_id == estb else None),
+        "department_name": ur.department.name if ur.department else (u.department.name if u.department and u.department_id == dept else None),
+        "designation": effective_designation(u, ur) or None,
+        "can_sign": bool(ur.can_sign),
+    }
 
 
-@router.get("/sign-permissions", response_model=List[SignPermissionUserOut])
+async def _sign_posts(db: AsyncSession, granted: bool) -> list[dict]:
+    users = (await db.execute(
+        select(User).options(
+            selectinload(User.roles).selectinload(UserRole.establishment),
+            selectinload(User.roles).selectinload(UserRole.department),
+            selectinload(User.establishment), selectinload(User.department),
+        ).where(User.is_active == True, User.origin_user_id.is_(None))  # noqa: E712
+    )).scalars().unique().all()
+    out = []
+    for u in users:
+        if u.is_retired:
+            continue
+        for ur in u.roles:
+            if ur.role == SystemRole.SUPER_ADMIN or bool(ur.can_sign) != granted:
+                continue
+            out.append(_sign_post_out(u, ur))
+    out.sort(key=lambda p: (p["full_name"].lower(), p["role_label"], p["designation"] or ""))
+    return out
+
+
+@router.get("/sign-permissions")
 async def list_sign_permissions(db: AsyncSession = Depends(get_db), _=Depends(_super)):
-    """Return all users who have been granted digital signature permission."""
-    r = await db.execute(
-        select(User).where(User.can_sign == True, User.is_active == True).order_by(User.first_name)
-    )
-    return [SignPermissionUserOut.from_user(u) for u in r.scalars().all()]
+    """Posts (role + designation of a person) that may sign documents."""
+    return await _sign_posts(db, True)
 
 
-@router.patch("/users/{uid}/sign-permission")
+@router.get("/sign-permissions/candidates")
+async def list_sign_candidates(db: AsyncSession = Depends(get_db), _=Depends(_super)):
+    """Posts that may be given signature permission (not yet given)."""
+    return await _sign_posts(db, False)
+
+
+@router.patch("/user-roles/{ur_id}/sign-permission")
 async def set_sign_permission(
-    uid: UUID,
+    ur_id: UUID,
     body: SignPermissionIn,
     db: AsyncSession = Depends(get_db),
     _=Depends(_super),
 ):
-    """Grant or revoke digital signature permission for a user."""
-    user = await db.get(User, uid)
-    if not user:
-        raise HTTPException(404, "User not found.")
-    user.can_sign = body.can_sign  # type: ignore[attr-defined]
+    """Grant or revoke digital signature permission for ONE post of a person."""
+    ur = await db.get(UserRole, ur_id)
+    if not ur:
+        raise HTTPException(404, "That role was not found.")
+    user = await db.get(User, ur.user_id)
+    if ur.role == SystemRole.SUPER_ADMIN:
+        raise HTTPException(400, "The Super Admin role does not sign documents.")
+    ur.can_sign = body.can_sign
+    await db.flush()
+    # users.can_sign: kept as "signs in at least one post" for older screens.
+    user.can_sign = bool((await db.execute(
+        select(func.count()).select_from(UserRole).where(UserRole.user_id == user.id, UserRole.can_sign == True)  # noqa: E712
+    )).scalar_one())
     await db.commit()
     action = "granted" if body.can_sign else "revoked"
-    return {"message": f"Signature permission {action} for {user.full_name}."}
+    return {"message": f"Signature permission {action} for {user.full_name} ({ur.role.replace('_', ' ')})."}

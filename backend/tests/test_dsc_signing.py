@@ -18,9 +18,14 @@ from tests.conftest import auth_headers as H
 from tests.dsc_sim import make_identity, sample_pdf, sign_hash
 
 
+from app.models.user import UserRole
+
+
 async def _grant(db, *people):
     for p in people:
         await db.execute(sa_update(User).where(User.id == p.id).values(can_sign=True))
+        # the permission belongs to the post (role) — give it for all of this person's posts
+        await db.execute(sa_update(UserRole).where(UserRole.user_id == p.id).values(can_sign=True))
     await db.commit()
 
 
@@ -198,3 +203,30 @@ async def test_dsc_log_gets_refusals_and_browser_errors(client, users, db):
         assert "dsc.prepare.refused" in text and "dsc.browser.token" in text and "could not reach" in text
     finally:
         await _cleanup(db, fid)
+
+
+@pytest.mark.asyncio
+async def test_permission_is_per_role(client, users, db):
+    """A person with two roles can sign only in the role that was granted."""
+    from sqlalchemy import select
+    creator = await users.make(SystemRole.EFMS_OFFICER, first_name="PRCreator")
+    two = await users.make(SystemRole.EFMS_OFFICER, first_name="TwoRoles")
+    admin = await users.make(SystemRole.SUPER_ADMIN, first_name="PRAdmin")
+    db.add(UserRole(user_id=two.id, role=SystemRole.REGISTRAR.value))
+    await db.commit()
+    rows = (await db.execute(select(UserRole).where(UserRole.user_id == two.id))).scalars().all()
+    officer_ur = next(r for r in rows if r.role == SystemRole.EFMS_OFFICER.value)
+    # grant ONLY the officer post
+    r = await client.patch(f"/admin/user-roles/{officer_ur.id}/sign-permission", json={"can_sign": True}, headers=H(admin))
+    assert r.status_code == 200, r.text
+    cands = (await client.get("/admin/sign-permissions/candidates", headers=H(admin))).json()
+    assert any(c["user_id"] == str(two.id) and c["role"] == SystemRole.REGISTRAR.value for c in cands)
+    granted = (await client.get("/admin/sign-permissions", headers=H(admin))).json()
+    assert any(g["id"] == str(officer_ur.id) and g["role_label"] for g in granted)
+    assert not any(g["user_id"] == str(two.id) and g["role"] == SystemRole.REGISTRAR.value for g in granted)
+    from app.utils.signing import user_can_sign_now
+    await db.refresh(two)
+    assert await user_can_sign_now(db, two) is True          # working as officer
+    two.active_role = SystemRole.REGISTRAR.value
+    await db.commit()
+    assert await user_can_sign_now(db, two) is False         # working as registrar
