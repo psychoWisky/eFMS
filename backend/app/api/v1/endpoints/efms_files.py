@@ -2676,6 +2676,55 @@ def _signed_display_name(original_name: str) -> str:
     return f"{stem}_signed.pdf"
 
 
+async def _signing_source_pdf(attachments, target) -> bytes:
+    """The PDF that is signed for `target`: its latest signed copy if one exists
+    (so earlier signatures stay), else the document itself; Word is converted to
+    PDF. Used both to show the document to the signer and to sign it, so the
+    pages they see are the pages that are signed."""
+    from app.utils.doc_convert import convert_office_to_pdf, DocConversionUnavailable, DocConversionFailed
+    from starlette.concurrency import run_in_threadpool
+
+    ext = (_get_ext(target.original_name) or _get_ext(target.stored_name)).lower()
+    if ext not in (".pdf", ".doc", ".docx"):
+        raise HTTPException(status_code=400, detail="Digital signing is available for PDF and Word documents.")
+    signed_name = _signed_display_name(target.original_name)
+    source = next((a for a in attachments if a.original_name == signed_name), None) or target
+    source_ext = (_get_ext(source.original_name) or _get_ext(source.stored_name)).lower()
+    upload_dir = os.path.abspath(settings.UPLOAD_DIR)
+    try:
+        async with aiofiles.open(os.path.join(upload_dir, source.stored_name), "rb") as fh:
+            content = await fh.read()
+    except OSError:
+        raise HTTPException(status_code=404, detail="The document file is missing on the server.")
+    if source_ext in (".doc", ".docx"):
+        try:
+            content = await run_in_threadpool(convert_office_to_pdf, content, source_ext)
+        except (DocConversionUnavailable, DocConversionFailed):
+            raise HTTPException(status_code=503, detail="This Word document could not be converted to PDF for signing.")
+    if not content.startswith(b"%PDF"):
+        raise HTTPException(status_code=400, detail="This document is not a valid PDF.")
+    return content
+
+
+@router.get("/{file_id}/attachments/{att_id}/sign-view")
+async def sign_view(
+    file_id: UUID,
+    att_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_verified_user),
+):
+    """The PDF the signer will sign (latest signed copy; Word converted)."""
+    await _assert_can_sign(db, file_id, user)
+    attachments = (await db.execute(
+        select(FileAttachment).where(FileAttachment.file_id == file_id).order_by(FileAttachment.created_at)
+    )).scalars().all()
+    target = next((a for a in attachments if a.id == att_id), None)
+    if target is None:
+        raise HTTPException(status_code=404, detail="That attachment does not belong to this file.")
+    content = await _signing_source_pdf(attachments, target)
+    return Response(content=content, media_type="application/pdf", headers={"Cache-Control": "no-store"})
+
+
 @router.post("/{file_id}/sign/prepare", response_model=dict, status_code=201)
 @logged_step("dsc.prepare")
 async def prepare_sign(
@@ -2700,27 +2749,7 @@ async def prepare_sign(
     if target is None:
         raise HTTPException(status_code=404, detail="That attachment does not belong to this file.")
 
-    ext = (_get_ext(target.original_name) or _get_ext(target.stored_name)).lower()
-    if ext not in (".pdf", ".doc", ".docx"):
-        raise HTTPException(status_code=400, detail="Digital signing is available for PDF and Word documents.")
-
-    # Later signers sign the latest signed copy, so earlier signatures stay.
-    signed_name = _signed_display_name(target.original_name)
-    source = next((a for a in attachments if a.original_name == signed_name), None) or target
-    source_ext = (_get_ext(source.original_name) or _get_ext(source.stored_name)).lower()
-    upload_dir = os.path.abspath(settings.UPLOAD_DIR)
-    try:
-        async with aiofiles.open(os.path.join(upload_dir, source.stored_name), "rb") as fh:
-            content = await fh.read()
-    except OSError:
-        raise HTTPException(status_code=404, detail="The document file is missing on the server.")
-    if source_ext in (".doc", ".docx"):
-        try:
-            content = await run_in_threadpool(convert_office_to_pdf, content, source_ext)
-        except (DocConversionUnavailable, DocConversionFailed):
-            raise HTTPException(status_code=503, detail="This Word document could not be converted to PDF for signing.")
-    if not content.startswith(b"%PDF"):
-        raise HTTPException(status_code=400, detail="This document is not a valid PDF.")
+    content = await _signing_source_pdf(attachments, target)
 
     page = body.page if body.page in ("first", "last") else int(body.page)
     signer_label = f"{user.full_name}" + (f", {user.designation}" if getattr(user, "designation", None) else "")

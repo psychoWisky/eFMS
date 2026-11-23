@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { api, API_URL } from "@/services/api";
+import { api } from "@/services/api";
 import { toast } from "sonner";
 import { confirmAction, showSuccess, escapeHtml, apiErrorDetail } from "@/lib/alert";
 import { useUser, useActiveRole } from "@/stores/auth.store";
@@ -11,9 +11,9 @@ import { cn, formatDate, getAttachmentPreviewKind, isNotesheetEmpty, hasRealNote
 import {
   ChevronLeft, ChevronRight, ChevronDown, FileText, Download, ArrowRight,
   Loader2, Lock, Clock, MessageSquare, Upload, X, PenLine,
-  CheckCircle2, XCircle, Trash2, Pencil, Save, FileX2, Paperclip, RotateCcw,
+  CheckCircle2, XCircle, Trash2, Pencil, Save, Paperclip, RotateCcw,
 } from "lucide-react";
-import PdfSignatureCanvas, { type SignatureStamp } from "@/components/signature/pdf-signature-canvas";
+import PdfPageSigner from "@/components/signature/pdf-page-signer";
 import { DSC_URL, DscClientError, signHashOnToken } from "@/lib/dsc";
 import { PersonBadge, type PersonInfo } from "@/components/shared/person-badge";
 import { FileClassificationBadge, FileClassificationBanner } from "@/components/shared/file-classification-badge";
@@ -140,11 +140,10 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
     return () => clearInterval(id);
   }, []);
   // Signature state
-  const [pendingStamp, setPendingStamp] = useState<{ pos_x: number; pos_y: number } | null>(null);
+  const [pendingStamp, setPendingStamp] = useState<{ page: number; pos_x: number; pos_y: number } | null>(null);
   // Signing with the DSC token: which step we are on ("" = idle).
   const [signStep, setSignStep] = useState<"" | "preparing" | "token" | "saving">("");
-  const [signPageSel, setSignPageSel] = useState<"first" | "last" | "n">("first");
-  const [signPageNo, setSignPageNo] = useState(1);
+  const [signUploading, setSignUploading] = useState(false);
   const [actionType] = useState<"forward">("forward");
   const [downloadingNotesheet, setDownloadingNotesheet] = useState(false);
   const [selectedPdf, setSelectedPdf] = useState<Attachment | null>(null);
@@ -817,36 +816,64 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
   const signAttachment = signOriginal
     ? (file?.attachments.find((a) => a.original_name === signedNameOf(signOriginal.original_name)) ?? signOriginal)
     : null;
-  const [signDocUrl, setSignDocUrl] = useState<string | null>(null);
+  const [signDocData, setSignDocData] = useState<ArrayBuffer | null>(null);
   const [signDocError, setSignDocError] = useState<string | null>(null);
-  const signAttId = signAttachment?.id;
-  const signAttStored = signAttachment?.stored_name;
+  const signOrigId = signOriginal?.id;
+  const signViewKey = signAttachment?.stored_name;   // changes when a signed copy is added
   useEffect(() => {
-    if (!signAttId) return;
+    if (!signOrigId) return;
     let cancelled = false;
-    let objectUrl: string | null = null;
     (async () => {
       try {
-        const res = await api.get(`/efms/files/${fileId}/attachments/${signAttId}/view`, { responseType: "blob" });
+        // The server returns exactly the PDF that will be signed (latest signed
+        // copy; Word converted), so the pages shown here are the pages signed.
+        const res = await api.get(`/efms/files/${fileId}/attachments/${signOrigId}/sign-view`, { responseType: "arraybuffer" });
         if (cancelled) return;
-        objectUrl = URL.createObjectURL(res.data as Blob);
-        setSignDocUrl(objectUrl);
+        setSignDocData(res.data as ArrayBuffer);
         setSignDocError(null);
       } catch (err) {
         if (cancelled) return;
-        setSignDocUrl(null);
-        setSignDocError(`The document could not be loaded (${(err as { response?: { status?: number } })?.response?.status ?? "network error"}).`);
+        setSignDocData(null);
+        let msg = `The document could not be loaded (${(err as { response?: { status?: number } })?.response?.status ?? "network error"}).`;
+        try {
+          const raw = (err as { response?: { data?: ArrayBuffer } })?.response?.data;
+          const detail = raw ? JSON.parse(new TextDecoder().decode(raw))?.detail : null;
+          if (typeof detail === "string") msg = detail;
+        } catch { /* keep the generic message */ }
+        setSignDocError(msg);
       }
     })();
-    return () => { cancelled = true; if (objectUrl) URL.revokeObjectURL(objectUrl); };
-  }, [fileId, signAttId, signAttStored]);
+    return () => { cancelled = true; };
+  }, [fileId, signOrigId, signViewKey]);
+
+  // The signer can add their own document and sign it.
+  async function uploadToSign(files: FileList | null) {
+    const f = files?.[0];
+    if (!f || signUploading) return;
+    if (!/\.(pdf|docx?)$/i.test(f.name)) { toast.error("Please choose a PDF or Word document."); return; }
+    setSignUploading(true);
+    try {
+      const form = new FormData();
+      form.append("upload", f, `Signing-${f.name}`);
+      const res = await api.post(`/efms/files/${fileId}/attachments`, form, { headers: { "Content-Type": "multipart/form-data" } });
+      await qc.invalidateQueries({ queryKey: ["efms-file", fileId] });
+      const newId = (res.data as { id?: string })?.id;
+      if (newId) setSelectedPdf({ ...(res.data as Attachment) });
+      setPendingStamp(null);
+      toast.success("Document added. Choose where to sign.");
+    } catch (err) {
+      toast.error(apiErrorDetail(err) ?? "Could not upload this document.");
+    } finally {
+      setSignUploading(false);
+    }
+  }
 
   // Sign the selected document with the officer's DSC (USB token):
   // server prepares the PDF -> token signs the hash -> server embeds the signature.
   const signWithDsc = async () => {
     const target = signOriginal;
     if (!pendingStamp || !target || signStep) return;
-    const page = signPageSel === "n" ? Math.max(1, Math.floor(signPageNo) || 1) : signPageSel;
+    const page = pendingStamp.page;
     let sigId: string | null = null;
     try {
       setSignStep("preparing");
@@ -1891,21 +1918,12 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                       <PenLine size={18} className="text-emerald-600" /> Digital Signature
                     </h2>
                     <p className="text-sm text-gray-500 mt-0.5">
-                      Click on the document where the signature box should go, then sign with your DSC (USB token).
+                      Scroll to the page you want and click where the signature box should go (it is placed exactly there), then sign with your DSC (USB token).
                     </p>
                   </div>
                   {pendingStamp && (
                     <div className="flex items-center gap-2">
-                      <select value={signPageSel} onChange={(e) => setSignPageSel(e.target.value as "first" | "last" | "n")} disabled={!!signStep}
-                        className="border border-gray-300 rounded-lg px-2 py-2 text-sm bg-white" title="Which page gets the signature box">
-                        <option value="first">First page</option>
-                        <option value="last">Last page</option>
-                        <option value="n">Page number…</option>
-                      </select>
-                      {signPageSel === "n" && (
-                        <input type="number" min={1} value={signPageNo} onChange={(e) => setSignPageNo(Number(e.target.value))} disabled={!!signStep}
-                          className="w-16 border border-gray-300 rounded-lg px-2 py-2 text-sm" aria-label="Page number" />
-                      )}
+                      <span className="text-xs text-gray-500">Page {pendingStamp.page}</span>
                       <button onClick={signWithDsc} disabled={!!signStep}
                         className="flex items-center gap-2 px-4 py-2 bg-emerald-600 text-white rounded-xl text-sm font-semibold hover:bg-emerald-700 disabled:opacity-70">
                         {signStep ? <Loader2 size={14} className="animate-spin" /> : <PenLine size={14} />}
@@ -1916,10 +1934,10 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                 </div>
 
                 {/* Which document to sign */}
-                {signables.length > 1 && (
+                {(
                   <div className="px-6 pt-4">
-                    <p className="text-sm font-semibold text-gray-700 mb-2">Choose the document to sign</p>
-                    <div className="flex flex-wrap gap-2">
+                    <p className="text-sm font-semibold text-gray-700 mb-2">{signables.length > 1 ? "Choose the document to sign" : "Document to sign"}</p>
+                    <div className="flex flex-wrap gap-2 items-center">
                       {signables.map((a) => {
                         const active = a.id === signOriginal?.id;
                         const hasSigned = file.attachments.some((x) => x.original_name === signedNameOf(a.original_name));
@@ -1934,66 +1952,30 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
                           </button>
                         );
                       })}
+                      <label className={cn("flex items-center gap-2 px-3 py-2 rounded-xl border border-dashed border-gray-300 text-sm text-gray-600 hover:bg-gray-50 cursor-pointer", (signUploading || !!signStep) && "opacity-60 pointer-events-none")}>
+                        {signUploading ? <Loader2 size={14} className="animate-spin" /> : <Upload size={14} />}
+                        Upload a document to sign
+                        <input type="file" accept=".pdf,.doc,.docx" className="hidden" onChange={(e) => { uploadToSign(e.target.files); e.target.value = ""; }} />
+                      </label>
                     </div>
                   </div>
                 )}
 
                 {/* Document canvas with overlay */}
                 <div className="p-4">
-                  {(() => {
-                    // signTarget is only ever assigned below, once we know the candidate
-                    // is actually signable — an Excel/CSV attachment (via selectedPdf,
-                    // set whenever the user clicked "View" on it, or via the
-                    // file.attachments[0] default) must never reach PdfSignatureCanvas
-                    // or become the signing target. Reuses the same classification
-                    // (getAttachmentPreviewKind) as the attachment list and preview
-                    // modal instead of a separate file-type check.
-                    const signCandidate = signAttachment;
-
-                    if (!signCandidate) {
-                      return (
-                        <div className="text-center py-16 text-gray-400">
-                          <FileText size={40} className="mx-auto mb-3 opacity-40" />
-                          <p>No attachments found. Attach a document to this file first.</p>
-                        </div>
-                      );
-                    }
-
-                    if (getAttachmentPreviewKind(signCandidate) === "sheet") {
-                      return (
-                        <div className="text-center py-16 text-gray-400">
-                          <FileX2 size={40} className="mx-auto mb-3 opacity-40" />
-                          <p className="font-semibold text-gray-600">eSign is not available for Excel files.</p>
-                          <p className="text-sm mt-1">eSign is currently supported only for PDF and Word documents.</p>
-                        </div>
-                      );
-                    }
-
-                    const signTarget = signCandidate;
-
-                    // Legacy .doc: the canvas needs a real .docx to render (docx-preview
-                    // can't parse legacy binary Word), so it's fed the on-the-fly
-                    // preview-docx conversion instead of the raw stored file — same
-                    // conversion workflow the Attachment Preview modal uses.
-                    const isLegacyDoc = getFileExtension(signTarget.original_name) === "doc";
-                    if (signDocError) {
-                      return <div className="text-center py-16 text-red-500 text-sm">{signDocError}</div>;
-                    }
-                    if (!signDocUrl) {
-                      return <div className="flex items-center justify-center py-16 gap-2 text-gray-400"><Loader2 size={18} className="animate-spin" /> Loading document…</div>;
-                    }
-                    return (
-                      <PdfSignatureCanvas
-                        fileUrl={signDocUrl ?? ""}
-                        mimeType={signTarget.mime_type}
-                        docPreviewUrl={isLegacyDoc ? `${API_URL}/efms/files/${fileId}/attachments/${signTarget.id}/preview-docx` : undefined}
-                        existingSignatures={(file.signatures ?? []).map((s) => ({ ...s, status: s.status as "pending" | "verified", verified_at: s.verified_at ?? undefined }))}
-                        onPlace={(pos_x, pos_y) => setPendingStamp({ pos_x, pos_y })}
-                        pendingStamp={pendingStamp}
-                        onClearPending={() => setPendingStamp(null)}
-                      />
-                    );
-                  })()}
+                  {!signOriginal ? (
+                    <div className="text-center py-16 text-gray-400">
+                      <FileText size={40} className="mx-auto mb-3 opacity-40" />
+                      <p>No PDF or Word document to sign. Upload one above.</p>
+                    </div>
+                  ) : signDocError ? (
+                    <div className="text-center py-16 text-red-500 text-sm">{signDocError}</div>
+                  ) : !signDocData ? (
+                    <div className="flex items-center justify-center py-16 gap-2 text-gray-400"><Loader2 size={18} className="animate-spin" /> Loading document…</div>
+                  ) : (
+                    <PdfPageSigner pdfData={signDocData} placed={pendingStamp} disabled={!!signStep}
+                      onPlace={setPendingStamp} onClear={() => setPendingStamp(null)} />
+                  )}
                 </div>
 
                 {/* Existing signatures list */}
