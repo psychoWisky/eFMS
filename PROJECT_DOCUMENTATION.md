@@ -124,7 +124,7 @@ dual/triple use is deliberate — see §6.3 and §6.5 for why.
 | `is_active` | The only column auth checks for "can this identity act" |
 | `first_name`, `middle_name`, `last_name` | `full_name` is a **computed property**, not a column |
 | `active_role` | Plain `VARCHAR`, not a Postgres enum — validated against the `roles` table at the application layer. This is "which role is this session acting as right now" |
-| `can_sign` | E-signature permission (per user) |
+| `can_sign` | Legacy summary flag = "signs in at least one post". The real permission is `user_roles.can_sign` (per post) — see §6.6 |
 | `establishment_id`, `department_id` | FK → `establishments` / `departments` — the person's own org context |
 | `origin_user_id`, `project_id` | Both `NULL` for a normal person. Both **set** together (CHECK constraint) for a PI profile — see §6.3 |
 | `account_predecessor_id` | Set on a successor after an ownership transfer — see §6.5 |
@@ -229,8 +229,13 @@ Legacy/simple free-text remark table — largely superseded by
 assuming it's dead code in any area you touch.
 
 #### `file_signatures`
-E-signature records — position on the PDF page, `pending`/`verified`
-status, OTP-verified signing flow (`app/utils/signing.py`).
+One row per digital signature made with the officer's **DSC (USB token)** —
+see §6.6. `method` is `dsc` (new) or `otp` (old signatures, kept and shown as
+"Earlier signature (OTP)"). `pending` rows are prepared PDFs waiting for the
+token (`prepared_name`, `digest_hex`, `reserved_start/end`, `field_name`);
+`verified` rows carry the certificate recorded at signing (`cert_cn`,
+`cert_serial`, `cert_issuer`, `cert_not_after`, `cert_fingerprint`) and
+`attachment_id` (the document signed).
 
 ### 4.5 Admin lookups & notifications
 
@@ -269,7 +274,7 @@ efms_files ──┬── created_by / current_holder_id ──> users
 
 ## 5. Migrations (Alembic)
 
-Located at `backend/alembic/versions/`. Chain: `0001 → 0002 → … → 0018 (head)`.
+Located at `backend/alembic/versions/`. Chain: `0001 → 0002 → … → 0032 (head)`.
 Alembic reads the DB URL from `settings.DATABASE_URL` (i.e. `backend/.env`)
 — **the `sqlalchemy.url` line in `alembic.ini` is overridden and ignored**
 (see `alembic/env.py`).
@@ -294,6 +299,21 @@ Alembic reads the DB URL from `settings.DATABASE_URL` (i.e. `backend/.env`)
 | **0016** | **Ownership transfer**: `users.account_predecessor_id` (+ index) |
 | **0017** | **Per-role file queues**: `efms_files.creator_role`/`current_holder_role`, `route_entries.from_role`/`to_role` |
 | **0018** | **Drift fix**: `users.middle_name` (the ORM model had it for a long time with no migration — `ADD COLUMN IF NOT EXISTS`, safe everywhere) |
+
+| 0019 | Backfill of file role stamps |
+| 0020 | Same role allowed in different establishments/departments (`user_roles` uniqueness) |
+| 0021 | Files stamped with creator/holder establishment + department |
+| 0022 | Draft remembers which role of the recipient was picked |
+| 0023 | `efms_files.description` |
+| 0024 | Role rename history |
+| 0025 | Per-role "several holders allowed" switch |
+| 0026 | `former_role_holdings` (for "Retired" labels) |
+| 0027 | FOC module tables (kept hidden behind `NEXT_PUBLIC_FOC_ENABLED`) |
+| 0028 | FOC in-charge and role links |
+| 0029 | `user_roles.designation` |
+| 0030 | Posts: role + place + designation; `multi_designation_users`; `users.active_designation` |
+| **0031** | **DSC signing**: new columns on `file_signatures` (method, attachment, prepared state, certificate) |
+| **0032** | **Per-post signing permission**: `user_roles.can_sign` (existing signers keep it in all their posts) |
 
 **Every column added by 0015–0018 is nullable, no backfill, no downtime.**
 See `DEVOPS_DB_MIGRATION.md` for the exact runbook to apply these on a
@@ -478,6 +498,45 @@ project-scoped; ownership transfer is account-wide.
 
 ---
 
+### 6.6 Digital signing with a DSC (USB token)
+
+**Who can sign:** a person with the signing permission **in the post they
+are working in** (`user_roles.can_sign`, granted per role + designation by the
+Super Admin: Admin Panel → Signatures), who is the **current holder** of the
+file, and the file is **not a draft**. Forwarding upward works as before.
+`app/utils/signing.py` (`post_can_sign`, `user_can_sign_now`) decides it;
+`build_user_brief` sends the result as `user.can_sign` to the frontend.
+
+**Flow (hash signing — the private key never leaves the token, the document
+never leaves our server):**
+1. `POST /efms/files/{id}/sign/prepare` — the server adds an empty visible
+   PAdES signature field to the chosen PDF (Word is converted first; it signs
+   the latest `_signed.pdf` if one exists, so earlier signatures stay valid)
+   and returns the SHA-256 of the signed byte ranges (`app/utils/dsc.py`,
+   pyHanko).
+2. The browser (`frontend/lib/dsc.ts`) sends the hash to Capricorn's local
+   "PKI Browser Signing Solution" on the officer's own PC
+   (`http://127.0.0.1:1620`, `pkiNetworkSignHash`). **The `data` field must be
+   Base64 of the 32 raw hash bytes** — the app Base64-decodes it and signs
+   that; sending hex text makes it sign a different value (found from a live
+   log). The token asks for the PIN and returns a detached PKCS#7.
+3. `POST .../sign/{sig_id}/complete` — the server checks the PKCS#7 signs
+   exactly that digest, embeds it, validates the finished PDF, records the
+   certificate and saves the signed copy as an attachment.
+
+**Config (all optional):** `DSC_PENDING_MINUTES` (default 10),
+`DSC_ALLOW_EXPIRED_CERT` (testing with Capricorn's expired test certificate
+only — never in production); frontend `NEXT_PUBLIC_DSC_URL`.
+
+**Log:** `<uploads folder's parent>/logs/dsc.log` (rotating). Every step and
+refusal is logged, plus errors the browser saw (service not reachable, wrong
+PIN…). A digest mismatch also writes a `dsc.diag.digest_mismatch` line. No PINs,
+keys or document contents are logged.
+
+**Dependencies:** `pyHanko==0.38.2` (`requirements/base.txt`); LibreOffice only
+for signing Word files. Tests: `backend/tests/test_dsc_signing.py` uses a
+simulated token (`tests/dsc_sim.py`).
+
 ## 7. Authorization model — who can see/do what
 
 All of this lives in `app/api/v1/endpoints/efms_files.py` (the helpers
@@ -541,7 +600,10 @@ The workflow core. See §6 for the *why*; here's the *what*:
 | GET | `/{id}/notesheet/download` | Full PDF (Chromium render) |
 | **POST** | **`/{id}/route`** | **The Forward/Dispatch action** — the single place `status`, `current_holder_id`, holding periods, and role stamps all change |
 | POST/DELETE/GET | `/{id}/attachments*` | Upload, delete (uploader, time-boxed), view/download/zip, DOCX preview |
-| POST | `/{id}/sign`, `/{id}/sign/{sig_id}/verify` | OTP-verified e-signature |
+| POST | `/{id}/sign/prepare` | DSC step 1: add an empty signature box to the chosen PDF, return the SHA-256 to sign |
+| POST | `/{id}/sign/{sig_id}/complete` | DSC step 2: verify the token's PKCS#7 and embed it; saves `<name>_signed.pdf` |
+| POST | `/{id}/sign/{sig_id}/cancel` | Drop a prepared document that was not signed |
+| POST | `/{id}/sign/client-log` | The browser reports a token/PC-side error into `logs/dsc.log` |
 | GET/POST | `/efms/dispatch` | List / create a dispatch record |
 
 ### `app/api/v1/endpoints/docket.py` — `/docket/*`
@@ -687,9 +749,11 @@ Reuse these — do not re-implement:
 - `file_remarks` table's exact relationship to `route_entries.remarks` /
   `holder_notes` should be re-examined before adding new remark features —
   there may be redundant paths.
-- E-signature "dongle" integration was discussed but never scoped/built —
-  ask before assuming `file_signatures`/`signing.py` covers a hardware
-  dongle flow; today it's OTP-verified only.
+- Digital signing is DSC-only now (OTP signing was removed). Certificates
+  are recorded on each signature but not yet linked to eFMS users (no check
+  that the certificate belongs to the logged-in officer), and there is no
+  trusted timestamp (TSA). The signature box position is approximate (a
+  click on the viewer, mapped to the first/last/chosen page).
 - No automated test suite currently exists for either side — every
   feature in this doc was verified via live API calls / driven browser
   sessions during development, not committed tests. Adding pytest

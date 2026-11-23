@@ -20,6 +20,11 @@ interface SignHashResponse {
 /** Ask the signing application to sign `hashHex` (64 hex characters) with the
  * token. Resolves with the Base64 PKCS#7 signature. */
 export async function signHashOnToken(hashHex: string, txn: string): Promise<string> {
+  // The signing application Base64-decodes `data` and signs those bytes as the
+  // digest, so the hash must be sent as Base64 of the raw 32 bytes (sending the
+  // hex text makes it sign a different, 48-byte value — found from the live log).
+  const hashBytes = hashHex.match(/../g)!.map((h) => parseInt(h, 16));
+  const hashB64 = btoa(String.fromCharCode(...hashBytes));
   const body = JSON.stringify({
     request: {
       command: "pkiNetworkSignHash",
@@ -27,7 +32,7 @@ export async function signHashOnToken(hashHex: string, txn: string): Promise<str
       txn,
       certificate: { attribute: ["AP=1", "CN=", "SN=", "TC=SG"] },
       file: { attribute: ["type=pdf"] },
-      data: hashHex,
+      data: hashB64,
     },
   });
 

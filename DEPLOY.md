@@ -90,3 +90,12 @@ seed data. The only manual data step, if any, is your own choice about
 whether specific live users should be given extra roles via
 **Admin → User Management → Edit → "+ Add another role"** once the code is
 live.
+
+
+## 6. Digital signing (DSC) — what to deploy
+
+- `pip install -r requirements/base.txt` (adds pyHanko), then `alembic upgrade head` (head = 0032).
+- The folder above `UPLOAD_DIR` must be writable: the app creates `dsc_pending/` (private, never web-served) and `logs/dsc.log`.
+- Optional env: `DSC_PENDING_MINUTES`; test only: `DSC_ALLOW_EXPIRED_CERT=true`. Frontend (build time): `NEXT_PUBLIC_DSC_URL`.
+- Each officer's PC needs Capricorn's "PKI Browser Signing Solution" running and the USB token plugged in.
+- Developer details: `PROJECT_DOCUMENTATION.md` §6.6.
