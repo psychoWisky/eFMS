@@ -528,11 +528,6 @@ never leaves our server):**
 `DSC_ALLOW_EXPIRED_CERT` (testing with Capricorn's expired test certificate
 only — never in production); frontend `NEXT_PUBLIC_DSC_URL`.
 
-**Log:** `<uploads folder's parent>/logs/dsc.log` (rotating). Every step and
-refusal is logged, plus errors the browser saw (service not reachable, wrong
-PIN…). A digest mismatch also writes a `dsc.diag.digest_mismatch` line. No PINs,
-keys or document contents are logged.
-
 **Dependencies:** `pyHanko==0.38.2` (`requirements/base.txt`); LibreOffice only
 for signing Word files. Tests: `backend/tests/test_dsc_signing.py` uses a
 simulated token (`tests/dsc_sim.py`).
@@ -603,7 +598,6 @@ The workflow core. See §6 for the *why*; here's the *what*:
 | POST | `/{id}/sign/prepare` | DSC step 1: add an empty signature box to the chosen PDF, return the SHA-256 to sign |
 | POST | `/{id}/sign/{sig_id}/complete` | DSC step 2: verify the token's PKCS#7 and embed it; saves `<name>_signed.pdf` |
 | POST | `/{id}/sign/{sig_id}/cancel` | Drop a prepared document that was not signed |
-| POST | `/{id}/sign/client-log` | The browser reports a token/PC-side error into `logs/dsc.log` |
 | GET/POST | `/efms/dispatch` | List / create a dispatch record |
 
 ### `app/api/v1/endpoints/docket.py` — `/docket/*`

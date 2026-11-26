@@ -182,30 +182,6 @@ async def test_bad_signature_expired_certificate_and_cancel(client, users, db):
 
 
 @pytest.mark.asyncio
-async def test_dsc_log_gets_refusals_and_browser_errors(client, users, db):
-    """Refusals and errors the browser saw end up in logs/dsc.log."""
-    import os
-    from app.utils.dsc_log import log_dir
-    creator = await users.make(SystemRole.EFMS_OFFICER, first_name="LogCreator")
-    await _grant(db, creator)
-    fid = await _file_with_pdf(client, creator)
-    path = os.path.join(log_dir(), "dsc.log")
-    before = os.path.getsize(path) if os.path.exists(path) else 0
-    try:
-        r = await client.post(f"/efms/files/{fid}/sign/prepare", json={"pos_x": 5, "pos_y": 5}, headers=H(creator))
-        assert r.status_code == 403
-        r = await client.post(f"/efms/files/{fid}/sign/client-log",
-                              json={"stage": "token", "message": "could not reach the DSC signing application"}, headers=H(creator))
-        assert r.status_code == 204
-        for h in __import__("logging").getLogger("efms.dsc").handlers:
-            h.flush()
-        text = open(path, "rb").read()[before:].decode("utf-8", "replace")
-        assert "dsc.prepare.refused" in text and "dsc.browser.token" in text and "could not reach" in text
-    finally:
-        await _cleanup(db, fid)
-
-
-@pytest.mark.asyncio
 async def test_permission_is_per_role(client, users, db):
     """A person with two roles can sign only in the role that was granted."""
     from sqlalchemy import select

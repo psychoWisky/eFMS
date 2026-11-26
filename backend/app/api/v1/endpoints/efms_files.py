@@ -84,9 +84,6 @@ def _draft_edit_expired(f: EfmsFile) -> bool:
 def _attachment_delete_expired(att: FileAttachment) -> bool:
     return datetime.now(timezone.utc) - att.created_at > ATTACHMENT_DELETE_WINDOW
 
-import logging
-from pydantic import BaseModel, Field
-from app.utils.dsc_log import dsc_event, logged_step
 router = APIRouter(prefix="/efms/files", tags=["eFMS Files"])
 
 async def _generate_ref(db: AsyncSession, dept_code: str = "GEN", category: str = "GEN") -> str:
@@ -2700,10 +2697,8 @@ async def _signing_source_pdf(attachments, target) -> bytes:
         try:
             content = await run_in_threadpool(convert_office_to_pdf, content, source_ext)
         except DocConversionUnavailable as exc:
-            dsc_event(logging.ERROR, "dsc.convert.unavailable", document=source.original_name, error=str(exc))
             raise HTTPException(status_code=503, detail="Word documents cannot be signed on this server yet: LibreOffice is not installed (ask your administrator to install it), or sign a PDF instead.")
         except DocConversionFailed as exc:
-            dsc_event(logging.ERROR, "dsc.convert.failed", document=source.original_name, error=str(exc)[:500])
             raise HTTPException(status_code=503, detail="This Word document could not be converted to PDF (it may be damaged or password-protected). Try saving it as a PDF and uploading that.")
     if not content.startswith(b"%PDF"):
         raise HTTPException(status_code=400, detail="This document is not a valid PDF.")
@@ -2730,7 +2725,6 @@ async def sign_view(
 
 
 @router.post("/{file_id}/sign/prepare", response_model=dict, status_code=201)
-@logged_step("dsc.prepare")
 async def prepare_sign(
     file_id: UUID,
     body: SignPrepare,
@@ -2796,7 +2790,6 @@ async def prepare_sign(
 
 
 @router.post("/{file_id}/sign/{signature_id}/complete", response_model=SignatureOut)
-@logged_step("dsc.complete")
 async def complete_sign(
     file_id: UUID,
     signature_id: UUID,
@@ -2883,25 +2876,7 @@ async def complete_sign(
     return _signature_out(sig, user)
 
 
-class SignClientLog(BaseModel):
-    stage: str = Field(..., max_length=40)          # e.g. "token", "network"
-    message: str = Field(..., max_length=2000)
-    signature_id: Optional[str] = Field(None, max_length=64)
-    service_url: Optional[str] = Field(None, max_length=200)
-    browser: Optional[str] = Field(None, max_length=300)
-
-
-@router.post("/{file_id}/sign/client-log", status_code=204)
-async def sign_client_log(file_id: UUID, body: SignClientLog, user: User = Depends(get_current_verified_user)):
-    """The officer's browser reports a problem it saw while talking to the local
-    signing application (not reachable, wrong PIN, token missing, …)."""
-    dsc_event(logging.ERROR, f"dsc.browser.{body.stage}", file=str(file_id), sig=body.signature_id,
-              user=str(user.id), name=user.full_name, message=body.message,
-              service=body.service_url, browser=body.browser)
-
-
 @router.post("/{file_id}/sign/{signature_id}/cancel", status_code=204)
-@logged_step("dsc.cancel")
 async def cancel_sign(
     file_id: UUID,
     signature_id: UUID,

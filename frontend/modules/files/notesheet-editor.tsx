@@ -14,7 +14,7 @@ import {
   CheckCircle2, XCircle, Trash2, Pencil, Save, Paperclip, RotateCcw,
 } from "lucide-react";
 import PdfPageSigner from "@/components/signature/pdf-page-signer";
-import { DSC_URL, DscClientError, signHashOnToken } from "@/lib/dsc";
+import { DscClientError, signHashOnToken } from "@/lib/dsc";
 import { PersonBadge, type PersonInfo } from "@/components/shared/person-badge";
 import { FileClassificationBadge, FileClassificationBanner } from "@/components/shared/file-classification-badge";
 import { SearchableSelect } from "@/components/shared/searchable-select";
@@ -867,13 +867,6 @@ export function NotesheetPage({ fileId }: { fileId: string }) {
       qc.invalidateQueries({ queryKey: ["file-track", fileId] });
       showSuccess("Signed with your DSC. The signed copy has been added to Attached Files.");
     } catch (err) {
-      if (err instanceof DscClientError) {
-        // Tell the server log what the officer's PC said (the server cannot see this).
-        api.post(`/efms/files/${fileId}/sign/client-log`, {
-          stage: "token", message: err.message, signature_id: sigId, service_url: DSC_URL,
-          browser: typeof navigator !== "undefined" ? navigator.userAgent.slice(0, 300) : undefined,
-        }).catch(() => {});
-      }
       if (sigId) { try { await api.post(`/efms/files/${fileId}/sign/${sigId}/cancel`); } catch { /* already gone */ } }
       toast.error(err instanceof DscClientError ? err.message : apiErrorDetail(err) ?? "Signing failed. Please try again.");
     } finally {
